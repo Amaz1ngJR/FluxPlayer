@@ -85,11 +85,33 @@ bool Demuxer::open(const std::string& filename) {
     LOG_DEBUG("Searching for video and audio streams...");
     for (unsigned int i = 0; i < m_formatCtx->nb_streams; i++) {
         AVStream* stream = m_formatCtx->streams[i];
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && m_videoStreamIndex == -1) {
+
+        // 检查流和编解码器参数是否有效
+        if (!stream) {
+            LOG_ERROR("Stream " + std::to_string(i) + " is nullptr");
+            continue;
+        }
+
+        if (!stream->codecpar) {
+            LOG_ERROR("Stream " + std::to_string(i) + " codecpar is nullptr");
+            continue;
+        }
+
+        AVMediaType codecType = stream->codecpar->codec_type;
+
+        // 调试信息：打印每个流的类型
+        LOG_DEBUG("Stream " + std::to_string(i) +
+                  " - codecpar addr: " + std::to_string(reinterpret_cast<uintptr_t>(stream->codecpar)) +
+                  ", codec_type: " + std::to_string(codecType) +
+                  ", codec_id: " + std::to_string(stream->codecpar->codec_id) +
+                  " (VIDEO=" + std::to_string(AVMEDIA_TYPE_VIDEO) +
+                  ", AUDIO=" + std::to_string(AVMEDIA_TYPE_AUDIO) + ")");
+
+        if (codecType == AVMEDIA_TYPE_VIDEO && m_videoStreamIndex == -1) {
             m_videoStreamIndex = i;
             LOG_INFO("Found video stream at index " + std::to_string(i) +
                     " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));
-        } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && m_audioStreamIndex == -1) {
+        } else if (codecType == AVMEDIA_TYPE_AUDIO && m_audioStreamIndex == -1) {
             m_audioStreamIndex = i;
             LOG_INFO("Found audio stream at index " + std::to_string(i) +
                     " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));
@@ -115,8 +137,15 @@ bool Demuxer::open(const std::string& filename) {
     }
     if (m_audioStreamIndex != -1) {
         AVCodecParameters* audioParams = getAudioCodecParams();
+        // FFmpeg 5.0+ (LIBAVCODEC_VERSION_MAJOR >= 59) 使用 ch_layout.nb_channels
+        // FFmpeg 4.x 使用 channels
+        #if LIBAVCODEC_VERSION_MAJOR >= 59
+            int channels = audioParams->ch_layout.nb_channels;
+        #else
+            int channels = audioParams->channels;
+        #endif
         LOG_INFO("Audio: " + std::to_string(audioParams->sample_rate) + " Hz, " +
-                std::to_string(audioParams->channels) + " channels");
+                std::to_string(channels) + " channels");
     }
     LOG_INFO("============================================");
 

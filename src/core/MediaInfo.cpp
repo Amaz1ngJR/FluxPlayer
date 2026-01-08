@@ -7,6 +7,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 #include <libavutil/pixdesc.h>
+#include <libavformat/avio.h>
 }
 
 namespace FluxPlayer {
@@ -39,7 +40,15 @@ bool MediaInfo::extractFromContext(AVFormatContext* formatCtx) {
 
     // 获取文件大小
     if (formatCtx->pb) {
-        fileSize_ = formatCtx->pb->maxsize > 0 ? formatCtx->pb->maxsize : 0;
+        // FFmpeg 5.0+ (LIBAVFORMAT_VERSION_MAJOR >= 59) 移除了 maxsize 字段
+        // 使用 avio_size() 函数获取文件大小
+        #if LIBAVFORMAT_VERSION_MAJOR >= 59
+            int64_t size = avio_size(formatCtx->pb);
+            fileSize_ = size > 0 ? size : 0;
+        #else
+            // FFmpeg 4.x 使用 maxsize 字段
+            fileSize_ = formatCtx->pb->maxsize > 0 ? formatCtx->pb->maxsize : 0;
+        #endif
     }
 
     // 统计流数量
