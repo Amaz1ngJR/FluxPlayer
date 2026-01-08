@@ -13,6 +13,12 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#elif defined(__linux__)
+#include <alsa/asoundlib.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <vector>
 #endif
 
 namespace FluxPlayer {
@@ -124,6 +130,19 @@ private:
     std::condition_variable cv_;             // 条件变量
     bool shouldExit_;                        // 线程退出标志
     int nextBuffer_;                         // 下一个要填充的缓冲区索引
+#elif defined(__linux__)
+    // Linux ALSA 音频线程
+    void audioThread();  // 音频处理线程
+
+    snd_pcm_t* pcmHandle_;                  // ALSA PCM 句柄
+    static constexpr int kNumBuffers = 3;
+    std::vector<uint8_t> buffer_;           // 音频缓冲区数据
+    size_t bufferSize_;                      // 缓冲区大小
+    snd_pcm_uframes_t periodSize_;          // ALSA 周期大小（帧数）
+    std::thread audioThread_;                // 音频处理线程
+    std::mutex mutex_;                       // 互斥锁
+    std::condition_variable cv_;             // 条件变量
+    bool shouldExit_;                        // 线程退出标志
 #endif
 
     AudioFormat format_;                    // 音频格式

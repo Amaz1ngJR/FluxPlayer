@@ -16,6 +16,11 @@ AudioOutput::AudioOutput()
     , bufferSize_(0)
     , shouldExit_(false)
     , nextBuffer_(0)
+#elif defined(__linux__)
+    , pcmHandle_(nullptr)
+    , bufferSize_(0)
+    , periodSize_(0)
+    , shouldExit_(false)
 #endif
 {
 #ifdef __APPLE__
@@ -175,8 +180,118 @@ bool AudioOutput::init(const AudioFormat& format, AudioCallback callback) {
     return true;
 
 #else
-    LOG_ERROR("AudioOutput: Platform not supported yet");
-    return false;
+    // Linux ALSA 实现
+    int err;
+
+    // 打开默认PCM设备
+    err = snd_pcm_open(&pcmHandle_, "default", SND_PCM_STREAM_PLAYBACK, 0);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to open PCM device: " + std::string(snd_strerror(err)));
+        return false;
+    }
+
+    // 设置硬件参数
+    snd_pcm_hw_params_t* hwParams;
+    snd_pcm_hw_params_alloca(&hwParams);
+    snd_pcm_hw_params_any(pcmHandle_, hwParams);
+
+    // 设置访问模式（交错模式）
+    err = snd_pcm_hw_params_set_access(pcmHandle_, hwParams, SND_PCM_ACCESS_RW_INTERLEAVED);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set access mode: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+
+    // 设置采样格式
+    snd_pcm_format_t alsaFormat;
+    switch (format.bitsPerSample) {
+        case 8:  alsaFormat = SND_PCM_FORMAT_S8; break;
+        case 16: alsaFormat = SND_PCM_FORMAT_S16_LE; break;
+        case 24: alsaFormat = SND_PCM_FORMAT_S24_LE; break;
+        case 32: alsaFormat = SND_PCM_FORMAT_S32_LE; break;
+        default:
+            LOG_ERROR("AudioOutput: Unsupported bits per sample: " + std::to_string(format.bitsPerSample));
+            snd_pcm_close(pcmHandle_);
+            pcmHandle_ = nullptr;
+            return false;
+    }
+    err = snd_pcm_hw_params_set_format(pcmHandle_, hwParams, alsaFormat);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set format: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+
+    // 设置声道数
+    err = snd_pcm_hw_params_set_channels(pcmHandle_, hwParams, format.channels);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set channels: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+
+    // 设置采样率
+    unsigned int sampleRate = format.sampleRate;
+    err = snd_pcm_hw_params_set_rate_near(pcmHandle_, hwParams, &sampleRate, nullptr);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set sample rate: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+    if (sampleRate != static_cast<unsigned int>(format.sampleRate)) {
+        LOG_WARN("AudioOutput: Sample rate adjusted from " + std::to_string(format.sampleRate) +
+                 " to " + std::to_string(sampleRate));
+    }
+
+    // 设置周期大小（与其他平台保持一致，约25ms）
+    const double bufferDurationMs = 25.0;
+    snd_pcm_uframes_t periodSize = static_cast<snd_pcm_uframes_t>(sampleRate * bufferDurationMs / 1000.0);
+    err = snd_pcm_hw_params_set_period_size_near(pcmHandle_, hwParams, &periodSize, nullptr);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set period size: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+    periodSize_ = periodSize;
+
+    // 设置缓冲区大小（3个周期）
+    snd_pcm_uframes_t bufferSize = periodSize * kNumBuffers;
+    err = snd_pcm_hw_params_set_buffer_size_near(pcmHandle_, hwParams, &bufferSize);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set buffer size: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+
+    // 应用硬件参数
+    err = snd_pcm_hw_params(pcmHandle_, hwParams);
+    if (err < 0) {
+        LOG_ERROR("AudioOutput: Failed to set hw params: " + std::string(snd_strerror(err)));
+        snd_pcm_close(pcmHandle_);
+        pcmHandle_ = nullptr;
+        return false;
+    }
+
+    // 计算缓冲区大小（字节）
+    const size_t bytesPerSample = format.bitsPerSample / 8;
+    bufferSize_ = periodSize_ * format.channels * bytesPerSample;
+    buffer_.resize(bufferSize_);
+
+    const size_t bytesPerSecond = format.sampleRate * format.channels * bytesPerSample;
+    LOG_INFO("AudioOutput: Buffer size calculated - " + std::to_string(bufferSize_) +
+             " bytes (" + std::to_string(bufferSize_ * kNumBuffers * 1000.0 / bytesPerSecond) + " ms total delay)");
+
+    LOG_INFO("AudioOutput: Initialized - " + std::to_string(format.sampleRate) + "Hz, " +
+             std::to_string(format.channels) + " channels, " +
+             std::to_string(format.bitsPerSample) + " bits (ALSA)");
+    return true;
 #endif
 }
 
@@ -226,6 +341,24 @@ void AudioOutput::start() {
     isPlaying_.store(true);
     isPaused_.store(false);
     LOG_INFO("AudioOutput: Started");
+#elif defined(__linux__)
+    if (!pcmHandle_) {
+        LOG_ERROR("AudioOutput: Not initialized");
+        return;
+    }
+
+    if (isPlaying_.load()) {
+        LOG_WARN("AudioOutput: Already playing");
+        return;
+    }
+
+    // 启动音频处理线程
+    shouldExit_ = false;
+    audioThread_ = std::thread(&AudioOutput::audioThread, this);
+
+    isPlaying_.store(true);
+    isPaused_.store(false);
+    LOG_INFO("AudioOutput: Started");
 #endif
 }
 
@@ -256,6 +389,20 @@ void AudioOutput::pause() {
 
     isPaused_.store(true);
     LOG_INFO("AudioOutput: Paused");
+#elif defined(__linux__)
+    if (!pcmHandle_ || !isPlaying_.load()) {
+        return;
+    }
+
+    int err = snd_pcm_pause(pcmHandle_, 1);
+    if (err < 0) {
+        // 部分设备不支持pause，使用drain代替
+        LOG_WARN("AudioOutput: Pause not supported, using drop");
+        snd_pcm_drop(pcmHandle_);
+    }
+
+    isPaused_.store(true);
+    LOG_INFO("AudioOutput: Paused");
 #endif
 }
 
@@ -282,6 +429,23 @@ void AudioOutput::resume() {
     if (result != MMSYSERR_NOERROR) {
         LOG_ERROR("AudioOutput: Failed to resume, error = " + std::to_string(result));
         return;
+    }
+
+    isPaused_.store(false);
+    LOG_INFO("AudioOutput: Resumed");
+#elif defined(__linux__)
+    if (!pcmHandle_ || !isPlaying_.load() || !isPaused_.load()) {
+        return;
+    }
+
+    int err = snd_pcm_pause(pcmHandle_, 0);
+    if (err < 0) {
+        // 如果之前用了drop，需要prepare
+        err = snd_pcm_prepare(pcmHandle_);
+        if (err < 0) {
+            LOG_ERROR("AudioOutput: Failed to resume: " + std::string(snd_strerror(err)));
+            return;
+        }
     }
 
     isPaused_.store(false);
@@ -344,6 +508,30 @@ void AudioOutput::stop() {
     // 关闭音频设备
     waveOutClose(hWaveOut_);
     hWaveOut_ = nullptr;
+
+    LOG_INFO("AudioOutput: Stopped");
+#elif defined(__linux__)
+    if (!pcmHandle_) {
+        return;
+    }
+
+    if (isPlaying_.load()) {
+        // 停止音频线程
+        shouldExit_ = true;
+        cv_.notify_all();
+        if (audioThread_.joinable()) {
+            audioThread_.join();
+        }
+
+        isPlaying_.store(false);
+        isPaused_.store(false);
+    }
+
+    // 关闭PCM设备
+    snd_pcm_drop(pcmHandle_);
+    snd_pcm_close(pcmHandle_);
+    pcmHandle_ = nullptr;
+    buffer_.clear();
 
     LOG_INFO("AudioOutput: Stopped");
 #endif
@@ -499,6 +687,76 @@ void AudioOutput::audioThread() {
 
             // 移动到下一个缓冲区
             nextBuffer_ = (nextBuffer_ + 1) % kNumBuffers;
+        }
+    }
+
+    LOG_DEBUG("AudioOutput: Audio thread stopped");
+}
+#endif
+
+#ifdef __linux__
+// Linux ALSA 音频处理线程
+void AudioOutput::audioThread() {
+    LOG_DEBUG("AudioOutput: Audio thread started (ALSA)");
+
+    const size_t bytesPerFrame = format_.channels * (format_.bitsPerSample / 8);
+
+    while (!shouldExit_) {
+        // 检查是否暂停
+        if (isPaused_.load()) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait_for(lock, std::chrono::milliseconds(100), [this] {
+                return shouldExit_ || !isPaused_.load();
+            });
+            continue;
+        }
+
+        // 调用回调函数获取音频数据
+        size_t bytesRead = callback_(buffer_.data(), bufferSize_);
+
+        if (bytesRead > 0) {
+            // 应用软件音量控制
+            float volume = volume_.load();
+            if (volume < 1.0f) {
+                auto* samples = reinterpret_cast<int16_t*>(buffer_.data());
+                size_t numSamples = bytesRead / sizeof(int16_t);
+                for (size_t i = 0; i < numSamples; ++i) {
+                    samples[i] = static_cast<int16_t>(samples[i] * volume);
+                }
+            }
+
+            // 计算帧数
+            snd_pcm_uframes_t frames = bytesRead / bytesPerFrame;
+            uint8_t* ptr = buffer_.data();
+
+            while (frames > 0 && !shouldExit_) {
+                snd_pcm_sframes_t written = snd_pcm_writei(pcmHandle_, ptr, frames);
+
+                if (written < 0) {
+                    // 处理错误
+                    if (written == -EPIPE) {
+                        // 缓冲区下溢，重新准备
+                        LOG_WARN("AudioOutput: Buffer underrun, recovering...");
+                        snd_pcm_prepare(pcmHandle_);
+                    } else if (written == -EAGAIN) {
+                        // 重试
+                        continue;
+                    } else {
+                        // 尝试恢复
+                        int err = snd_pcm_recover(pcmHandle_, written, 0);
+                        if (err < 0) {
+                            LOG_ERROR("AudioOutput: Failed to recover from error: " + std::string(snd_strerror(err)));
+                            break;
+                        }
+                    }
+                } else {
+                    frames -= written;
+                    ptr += written * bytesPerFrame;
+                }
+            }
+        } else {
+            // 没有数据，短暂休眠避免忙等待
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 

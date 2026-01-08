@@ -15,6 +15,7 @@
 #include <GLFW/glfw3.h>
 #include <thread>
 #include <chrono>
+#include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>

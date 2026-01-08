@@ -242,6 +242,7 @@ elseif(PLATFORM_LINUX)
         X11
         pthread
         dl
+        asound
     )
 endif()
 
