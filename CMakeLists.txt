@@ -234,6 +234,7 @@ elseif(PLATFORM_WINDOWS)
     target_link_libraries(FluxPlayer PRIVATE
         opengl32
         gdi32
+        winmm
     )
 elseif(PLATFORM_LINUX)
     target_link_libraries(FluxPlayer PRIVATE

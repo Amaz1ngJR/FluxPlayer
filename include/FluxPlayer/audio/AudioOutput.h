@@ -7,6 +7,12 @@
 
 #ifdef __APPLE__
 #include <AudioToolbox/AudioToolbox.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <mmsystem.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #endif
 
 namespace FluxPlayer {
@@ -103,6 +109,21 @@ private:
     AudioQueueBufferRef buffers_[3];        // 音频缓冲区（3个缓冲）
     static constexpr int kNumBuffers = 3;
     size_t bufferSize_;                      // 动态缓冲区大小
+#elif defined(_WIN32)
+    // Windows WinMM 回调和音频线程
+    static void CALLBACK waveOutCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
+    void audioThread();  // 音频处理线程
+
+    HWAVEOUT hWaveOut_;                     // WaveOut 句柄
+    WAVEHDR waveHeaders_[3];                // Wave 头（3个缓冲）
+    static constexpr int kNumBuffers = 3;
+    std::vector<uint8_t> buffers_[3];       // 音频缓冲区数据
+    size_t bufferSize_;                      // 缓冲区大小
+    std::thread audioThread_;                // 音频处理线程
+    std::mutex mutex_;                       // 互斥锁
+    std::condition_variable cv_;             // 条件变量
+    bool shouldExit_;                        // 线程退出标志
+    int nextBuffer_;                         // 下一个要填充的缓冲区索引
 #endif
 
     AudioFormat format_;                    // 音频格式
