@@ -1,3 +1,8 @@
+/**
+ * @file VideoDecoder.h
+ * @brief 视频解码器，将压缩视频数据解码并转换为 YUV420P 格式
+ */
+
 #pragma once
 
 #include "Frame.h"
@@ -11,40 +16,81 @@ extern "C" {
 
 namespace FluxPlayer {
 
+/**
+ * @brief 视频解码器，基于 FFmpeg libavcodec 和 libswscale
+ *
+ * 负责将压缩的视频数据包（H.264/H.265/VP9等）解码为原始帧，
+ * 并通过 SwsContext 转换为 YUV420P 格式供 GLRenderer 渲染。
+ * 采用 FFmpeg 异步解码模式：先 sendPacket() 再 receiveFrame()。
+ */
 class VideoDecoder {
 public:
     VideoDecoder();
     ~VideoDecoder();
 
-    // 初始化解码器
+    /**
+     * @brief 初始化视频解码器
+     * @param codecParams 从 Demuxer 获取的视频编解码器参数
+     * @param timeBase    视频流的时间基准，用于将 PTS 转换为秒
+     * @return 成功返回 true，失败返回 false
+     */
     bool init(AVCodecParameters* codecParams, AVRational timeBase);
+
+    /** @brief 关闭解码器，释放解码器上下文和格式转换器 */
     void close();
 
-    // 发送数据包到解码器
+    /**
+     * @brief 向解码器发送压缩的视频数据包
+     * @param packet 待解码的 AVPacket（来自 Demuxer）
+     * @return 成功返回 true，失败返回 false
+     */
     bool sendPacket(AVPacket* packet);
 
-    // 接收解码后的帧
+    /**
+     * @brief 从解码器接收一帧解码后的视频数据
+     *
+     * 接收成功后会自动设置帧的 PTS 和类型。
+     * @param frame 用于接收解码数据的 Frame 对象
+     * @return 成功返回 true，需要更多数据或出错返回 false
+     */
     bool receiveFrame(Frame& frame);
 
-    // 刷新解码器（文件结束时调用）
+    /** @brief 刷新解码器缓冲区，seek 操作后必须调用以清除残留帧 */
     void flush();
 
-    // 获取视频信息
+    // ==================== 视频属性 ====================
+
+    /** @brief 获取视频宽度（像素） */
     int getWidth() const { return m_width; }
+
+    /** @brief 获取视频高度（像素） */
     int getHeight() const { return m_height; }
+
+    /**
+     * @brief 获取解码后的原始像素格式
+     * @return FFmpeg 像素格式枚举（如 AV_PIX_FMT_YUV420P）
+     */
     AVPixelFormat getPixelFormat() const { return m_pixelFormat; }
 
-    // 转换为 YUV420P 格式
+    /**
+     * @brief 将解码帧转换为 YUV420P 格式
+     *
+     * 当源帧不是 YUV420P 时（如 YUV422P、RGB 等），使用 libswscale 进行转换。
+     * SwsContext 会在首次调用时延迟初始化。
+     * @param srcFrame 源帧（解码器输出的原始格式）
+     * @param dstFrame 目标帧（转换后的 YUV420P 格式）
+     * @return 成功返回 true，失败返回 false
+     */
     bool convertToYUV420P(AVFrame* srcFrame, Frame& dstFrame);
 
 private:
-    AVCodecContext* m_codecCtx;
-    SwsContext* m_swsCtx;
-    AVRational m_timeBase;
+    AVCodecContext* m_codecCtx;     ///< 视频解码器上下文
+    SwsContext* m_swsCtx;           ///< 图像格式转换上下文（延迟初始化）
+    AVRational m_timeBase;          ///< 视频流时间基准，用于 PTS 计算
 
-    int m_width;
-    int m_height;
-    AVPixelFormat m_pixelFormat;
+    int m_width;                    ///< 视频宽度（像素）
+    int m_height;                   ///< 视频高度（像素）
+    AVPixelFormat m_pixelFormat;    ///< 解码后的原始像素格式
 };
 
 } // namespace FluxPlayer

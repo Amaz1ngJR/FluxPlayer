@@ -115,8 +115,8 @@ void Window::destroy() {
         glfwDestroyWindow(m_window);
         m_window = nullptr;
     }
-    LOG_DEBUG("Terminating GLFW");
-    glfwTerminate();
+    // 注意: glfwTerminate() 已移至 main() 统一调用，
+    // 避免 HomeScreen 销毁窗口后 Player 无法创建新窗口
 }
 
 bool Window::shouldClose() const {

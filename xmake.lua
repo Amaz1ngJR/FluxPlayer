@@ -6,6 +6,13 @@ set_project("FluxPlayer")
 set_version("0.1.0")
 set_languages("cxx17")
 
+-- TCP日志选项（用 nc ip port 远程查看实时日志）
+option("tcp_log")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable TCP log server for remote log viewing")
+option_end()
+
 -- ========================
 -- 配置路径
 -- ========================
@@ -120,6 +127,7 @@ target("FluxPlayer")
     set_kind("binary")
     add_files("src/**/*.cpp")
     add_files("src/main.cpp")
+    add_files("third_party/tinyfiledialogs/tinyfiledialogs.c")
 
     -- 依赖本地库
     add_deps("glfw_local", "glad_local", "imgui_local")
@@ -129,6 +137,7 @@ target("FluxPlayer")
     add_includedirs("third_party/glfw-3.3.8/include")
     add_includedirs("third_party/glad/include")
     add_includedirs("third_party/glm")
+    add_includedirs("third_party/tinyfiledialogs")
 
     -- FFmpeg 头文件和库
     add_includedirs(ffmpeg_root .. "/include")
@@ -152,6 +161,11 @@ target("FluxPlayer")
     else
         set_optimize("fastest")
         set_strip("all")
+    end
+
+    -- TCP日志系统
+    if get_config("tcp_log") then
+        add_defines("ENABLE_TCP_LOG")
     end
 
     -- 运行时复制着色器文件
