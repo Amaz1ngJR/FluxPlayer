@@ -1,3 +1,8 @@
+/**
+ * @file GLRenderer.h
+ * @brief OpenGL 视频渲染器，负责将 YUV420P 视频帧渲染到屏幕
+ */
+
 #pragma once
 
 #include "Shader.h"
@@ -6,36 +11,79 @@
 
 namespace FluxPlayer {
 
+/**
+ * @brief OpenGL 视频渲染器
+ *
+ * 使用 OpenGL 纹理和着色器将 YUV420P 格式的视频帧渲染到全屏四边形上。
+ * 内部维护 Y/U/V 三个独立纹理，在片段着色器中完成 YUV→RGB 色彩空间转换。
+ */
 class GLRenderer {
 public:
     GLRenderer();
     ~GLRenderer();
 
+    /**
+     * @brief 初始化渲染器：加载着色器、创建全屏四边形、分配 YUV 纹理
+     * @param videoWidth  视频帧宽度（像素）
+     * @param videoHeight 视频帧高度（像素）
+     * @return 成功返回 true，失败返回 false
+     */
     bool init(int videoWidth, int videoHeight);
+
+    /** @brief 销毁渲染器，释放所有 OpenGL 资源（VAO/VBO/纹理） */
     void destroy();
 
+    /**
+     * @brief 渲染一帧 YUV420P 视频数据
+     * @param yData  Y（亮度）平面数据指针
+     * @param uData  U（色度Cb）平面数据指针
+     * @param vData  V（色度Cr）平面数据指针
+     * @param yPitch Y 平面每行字节数（linesize），可能因内存对齐大于视频宽度
+     * @param uPitch U 平面每行字节数
+     * @param vPitch V 平面每行字节数
+     */
     void renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                      int yPitch, int uPitch, int vPitch);
+
+    /**
+     * @brief 清除屏幕为指定颜色
+     * @param r 红色分量 (0.0~1.0)
+     * @param g 绿色分量 (0.0~1.0)
+     * @param b 蓝色分量 (0.0~1.0)
+     * @param a 透明度 (0.0~1.0)
+     */
     void clear(float r = 0.0f, float g = 0.0f, float b = 0.0f, float a = 1.0f);
 
+    /**
+     * @brief 更新视频尺寸，重新分配纹理内存
+     * @param width  新的视频宽度（像素）
+     * @param height 新的视频高度（像素）
+     */
     void setVideoSize(int width, int height);
 
 private:
+    /** @brief 创建全屏四边形的 VAO/VBO，包含顶点位置和纹理坐标 */
     void setupQuad();
+
+    /**
+     * @brief 将 YUV 数据上传到 GPU 纹理，处理 pitch 与宽度不一致的对齐问题
+     * @param yData, uData, vData YUV 三平面数据指针
+     * @param yPitch, uPitch, vPitch 各平面的行跨度
+     */
     void updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                           int yPitch, int uPitch, int vPitch);
 
-    std::unique_ptr<Shader> m_shader;
+    std::unique_ptr<Shader> m_shader;   ///< YUV→RGB 转换着色器程序
 
-    GLuint m_VAO;
-    GLuint m_VBO;
+    GLuint m_VAO;       ///< 全屏四边形的顶点数组对象
+    GLuint m_VBO;       ///< 全屏四边形的顶点缓冲对象
 
-    GLuint m_textureY;
-    GLuint m_textureU;
-    GLuint m_textureV;
+    GLuint m_textureY;  ///< Y（亮度）平面纹理，全分辨率
+    GLuint m_textureU;  ///< U（色度Cb）平面纹理，1/2 宽 x 1/2 高
+    GLuint m_textureV;  ///< V（色度Cr）平面纹理，1/2 宽 x 1/2 高
 
-    int m_videoWidth;
-    int m_videoHeight;
+    int m_videoWidth;   ///< 当前视频帧宽度
+    int m_videoHeight;  ///< 当前视频帧高度
 };
 
 } // namespace FluxPlayer

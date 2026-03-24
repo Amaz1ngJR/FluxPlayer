@@ -1,8 +1,14 @@
+/**
+ * @file Timer.cpp
+ * @brief 计时器与帧率计数器的实现
+ */
+
 #include "FluxPlayer/utils/Timer.h"
 
 namespace FluxPlayer {
 
-// Timer implementation
+// ==================== Timer ====================
+
 Timer::Timer()
     : m_running(false) {
     reset();
@@ -29,6 +35,7 @@ void Timer::reset() {
 }
 
 double Timer::getElapsedSeconds() const {
+    // 运行中取当前时间，已停止取记录的停止时间
     TimePoint endTime = m_running ? Clock::now() : m_stopTime;
     auto duration = std::chrono::duration_cast<std::chrono::duration<double>>(endTime - m_startTime);
     return duration.count();
@@ -42,12 +49,13 @@ double Timer::getElapsedMicroseconds() const {
     return getElapsedSeconds() * 1000000.0;
 }
 
-// FPSCounter implementation
+// ==================== FPSCounter ====================
+
 FPSCounter::FPSCounter()
     : m_frameCount(0)
     , m_fps(0.0)
     , m_frameTime(0.0)
-    , m_updateInterval(1.0) {
+    , m_updateInterval(1.0) {  // 每隔 1 秒统计一次帧率
     m_timer.start();
 }
 
@@ -55,9 +63,10 @@ void FPSCounter::update() {
     m_frameCount++;
 
     double elapsed = m_timer.getElapsedSeconds();
+    // 到达统计间隔后，计算平均帧率和帧耗时，然后重置进入下一个周期
     if (elapsed >= m_updateInterval) {
         m_fps = m_frameCount / elapsed;
-        m_frameTime = elapsed / m_frameCount * 1000.0; // ms per frame
+        m_frameTime = elapsed / m_frameCount * 1000.0; // 转换为毫秒
 
         m_frameCount = 0;
         m_timer.reset();
