@@ -146,6 +146,7 @@ set(FLUXPLAYER_SOURCES
     src/ui/Controller.cpp
     src/ui/HomeScreen.cpp
     src/ui/Window.cpp
+    src/utils/Config.cpp
     src/utils/Logger.cpp
     src/utils/Timer.cpp
     third_party/tinyfiledialogs/tinyfiledialogs.c

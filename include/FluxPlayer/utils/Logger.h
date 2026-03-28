@@ -62,26 +62,34 @@ public:
     /**
      * @brief 输出调试日志
      * @param message 日志消息
+     * @param file 文件名
+     * @param line 行号
      */
-    void debug(const std::string& message);
+    void debug(const std::string& message, const char* file = "", int line = 0);
 
     /**
      * @brief 输出信息日志
      * @param message 日志消息
+     * @param file 文件名
+     * @param line 行号
      */
-    void info(const std::string& message);
+    void info(const std::string& message, const char* file = "", int line = 0);
 
     /**
      * @brief 输出警告日志
      * @param message 日志消息
+     * @param file 文件名
+     * @param line 行号
      */
-    void warn(const std::string& message);
+    void warn(const std::string& message, const char* file = "", int line = 0);
 
     /**
      * @brief 输出错误日志
      * @param message 日志消息
+     * @param file 文件名
+     * @param line 行号
      */
-    void error(const std::string& message);
+    void error(const std::string& message, const char* file = "", int line = 0);
 
 #ifdef ENABLE_TCP_LOG
     /**
@@ -107,8 +115,10 @@ private:
      * @brief 核心日志输出函数
      * @param level 日志级别
      * @param message 日志消息
+     * @param file 文件名
+     * @param line 行号
      */
-    void log(LogLevel level, const std::string& message);
+    void log(LogLevel level, const std::string& message, const char* file, int line);
 
     /**
      * @brief 获取当前时间字符串
@@ -162,9 +172,9 @@ private:
 };
 
 // 便捷宏
-#define LOG_DEBUG(msg) FluxPlayer::Logger::getInstance().debug(msg)
-#define LOG_INFO(msg) FluxPlayer::Logger::getInstance().info(msg)
-#define LOG_WARN(msg) FluxPlayer::Logger::getInstance().warn(msg)
-#define LOG_ERROR(msg) FluxPlayer::Logger::getInstance().error(msg)
+#define LOG_DEBUG(msg) FluxPlayer::Logger::getInstance().debug(msg, __FILE__, __LINE__)
+#define LOG_INFO(msg) FluxPlayer::Logger::getInstance().info(msg, __FILE__, __LINE__)
+#define LOG_WARN(msg) FluxPlayer::Logger::getInstance().warn(msg, __FILE__, __LINE__)
+#define LOG_ERROR(msg) FluxPlayer::Logger::getInstance().error(msg, __FILE__, __LINE__)
 
 } // namespace FluxPlayer

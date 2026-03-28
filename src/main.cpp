@@ -18,6 +18,7 @@
 #include "FluxPlayer/ui/Controller.h"
 #include "FluxPlayer/ui/HomeScreen.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Config.h"
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <string>
@@ -159,10 +160,20 @@ static std::string playMedia(const std::string& mediaPath) {
  * - glfwTerminate() 在程序退出前调用一次（已从 Window::destroy 中移除）
  */
 int main(int argc, char* argv[]) {
-    // 初始化日志系统
-    Logger::getInstance().setLogLevel(LogLevel::LOG_DEBUG);
+    // 加载配置
+    Config::getInstance().load();
+
+    // 初始化日志系统，使用配置中的日志级别
+    auto& cfg = Config::getInstance().get();
+    LogLevel logLevel = LogLevel::LOG_INFO;
+    if (cfg.logLevel == "DEBUG") logLevel = LogLevel::LOG_DEBUG;
+    else if (cfg.logLevel == "INFO") logLevel = LogLevel::LOG_INFO;
+    else if (cfg.logLevel == "WARN") logLevel = LogLevel::LOG_WARN;
+    else if (cfg.logLevel == "ERROR") logLevel = LogLevel::LOG_ERROR;
+
+    Logger::getInstance().setLogLevel(logLevel);
 #ifdef ENABLE_TCP_LOG
-    Logger::getInstance().enableTcpLog(9999);
+    Logger::getInstance().enableTcpLog(cfg.tcpLogPort);
 #endif
     LOG_INFO("=== FluxPlayer V2 Starting ===");
     LOG_INFO("Refactored with Player class architecture");

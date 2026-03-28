@@ -11,6 +11,7 @@
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
+#include "FluxPlayer/utils/Config.h"
 
 #include <GLFW/glfw3.h>
 #include <thread>
@@ -44,7 +45,7 @@ Player::Player()
     , videoFrameCount_(0)
     , audioFrameCount_(0)
     , liveStreamStartTime_(0.0)
-    , volume_(1.0f)
+    , volume_(Config::getInstance().get().volume)
     , muted_(false)
     , currentAudioFramePTS_(0.0)
     , samplesPlayedInFrame_(0)
@@ -152,6 +153,7 @@ bool Player::open(const std::string& filePath) {
 
         if (audioOutput_->init(audioFormat, audioCallback)) {
             LOG_INFO("Audio output initialized successfully");
+            audioOutput_->setVolume(volume_.load());  // 应用配置的音量
             clockType = ClockType::AUDIO_CLOCK;  // 使用音频时钟
         } else {
             LOG_WARN("Failed to initialize audio output, audio will be disabled");
@@ -524,6 +526,8 @@ PlayerStats Player::getStats() const {
 
 void Player::setVolume(float volume) {
     volume_.store(std::max(0.0f, std::min(1.0f, volume)));
+    Config::getInstance().getMutable().volume = volume_.load();
+    Config::getInstance().save();
     if (audioOutput_) {
         audioOutput_->setVolume(muted_.load() ? 0.0f : volume_.load());
     }

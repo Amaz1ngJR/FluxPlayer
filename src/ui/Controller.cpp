@@ -2,6 +2,7 @@
 #include "FluxPlayer/core/Player.h"
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Config.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -17,9 +18,9 @@ Controller::Controller(Player& player, Window& window)
     : player_(player)
     , window_(window)
     , initialized_(false)
-    , visible_(true)
-    , showMediaInfo_(true)
-    , showStats_(true)
+    , visible_(Config::getInstance().get().uiVisible)
+    , showMediaInfo_(Config::getInstance().get().showMediaInfo)
+    , showStats_(Config::getInstance().get().showStats)
     , filename_("")
     , videoWidth_(0)
     , videoHeight_(0)
@@ -30,7 +31,7 @@ Controller::Controller(Player& player, Window& window)
     , audioChannels_(0)
     , isDraggingProgress_(false)
     , draggedProgress_(0.0f)
-    , seekPrecision_(0.1)  // 默认0.1秒精度，更精确
+    , seekPrecision_(0.1)
 {
 }
 

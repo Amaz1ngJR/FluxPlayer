@@ -4,6 +4,7 @@
  */
 
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Config.h"
 
 #ifdef ENABLE_TCP_LOG
 #include <sys/socket.h>
@@ -35,6 +36,12 @@ Logger& Logger::getInstance() {
 Logger::Logger()
     : m_minLevel(LogLevel::LOG_DEBUG)
     , m_fileOutputEnabled(false) {
+    // 从配置加载日志级别
+    auto& cfg = Config::getInstance().get();
+    if (cfg.logLevel == "DEBUG") m_minLevel = LogLevel::LOG_DEBUG;
+    else if (cfg.logLevel == "INFO") m_minLevel = LogLevel::LOG_INFO;
+    else if (cfg.logLevel == "WARN") m_minLevel = LogLevel::LOG_WARN;
+    else if (cfg.logLevel == "ERROR") m_minLevel = LogLevel::LOG_ERROR;
 }
 
 // 析构函数：关闭文件流
@@ -80,27 +87,27 @@ void Logger::disableFileOutput() {
 }
 
 // 调试日志
-void Logger::debug(const std::string& message) {
-    log(LogLevel::LOG_DEBUG, message);
+void Logger::debug(const std::string& message, const char* file, int line) {
+    log(LogLevel::LOG_DEBUG, message, file, line);
 }
 
 // 信息日志
-void Logger::info(const std::string& message) {
-    log(LogLevel::LOG_INFO, message);
+void Logger::info(const std::string& message, const char* file, int line) {
+    log(LogLevel::LOG_INFO, message, file, line);
 }
 
 // 警告日志
-void Logger::warn(const std::string& message) {
-    log(LogLevel::LOG_WARN, message);
+void Logger::warn(const std::string& message, const char* file, int line) {
+    log(LogLevel::LOG_WARN, message, file, line);
 }
 
 // 错误日志
-void Logger::error(const std::string& message) {
-    log(LogLevel::LOG_ERROR, message);
+void Logger::error(const std::string& message, const char* file, int line) {
+    log(LogLevel::LOG_ERROR, message, file, line);
 }
 
 // 核心日志输出函数
-void Logger::log(LogLevel level, const std::string& message) {
+void Logger::log(LogLevel level, const std::string& message, const char* file, int line) {
     if (level < m_minLevel) {
         return;
     }
@@ -111,7 +118,17 @@ void Logger::log(LogLevel level, const std::string& message) {
     std::string levelStr = levelToString(level);
     std::string colorCode = getColorCode(level);
     std::string resetCode = getResetCode();
-    std::string logMessage = "[" + timestamp + "] [" + levelStr + "] " + message;
+
+    // 提取文件名（去掉路径）
+    std::string filename = file;
+    size_t pos = filename.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        filename = filename.substr(pos + 1);
+    }
+
+    // 格式化日志：[时间] [级别] [文件:行号] 消息
+    std::string location = line > 0 ? " [" + filename + ":" + std::to_string(line) + "]" : "";
+    std::string logMessage = "[" + timestamp + "] [" + levelStr + "]" + location + " " + message;
     std::string coloredMessage = colorCode + logMessage + resetCode;
 
     // 输出到控制台（带颜色）
