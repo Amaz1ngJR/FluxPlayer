@@ -7,9 +7,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # ========================
 # 配置路径
 # ========================
-# FFmpeg 路径（macOS homebrew 默认路径，可通过 -DFFMPEG_ROOT=... 覆盖）
+# FFmpeg 路径
 if(NOT DEFINED FFMPEG_ROOT)
-    if(APPLE)
+    if(WIN32)
+        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg")
+    elseif(APPLE)
         set(FFMPEG_ROOT "/opt/homebrew/opt/ffmpeg@4")
     else()
         set(FFMPEG_ROOT "/usr/local")

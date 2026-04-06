@@ -16,7 +16,14 @@ option_end()
 -- ========================
 -- 配置路径
 -- ========================
-local ffmpeg_root = "/opt/homebrew/opt/ffmpeg@4"
+local ffmpeg_root = ""
+if is_plat("windows") then
+    ffmpeg_root = "third_party/ffmpeg"
+elseif is_plat("macosx") then
+    ffmpeg_root = "/opt/homebrew/opt/ffmpeg@4"
+else
+    ffmpeg_root = "/usr/local"
+end
 
 -- ========================
 -- 1. GLFW 库（本地第三方库）
