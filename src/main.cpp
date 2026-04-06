@@ -227,7 +227,7 @@ int main(int argc, char* argv[]) {
 
         // 有待播放的媒体路径，启动播放
         if (!mediaPath.empty()) {
-            std::string error = playMedia(mediaPath);
+            std::string error = playMedia(mediaPath);//进入播放
             if (!error.empty()) {
                 // 播放出错，保存错误信息，下次 HomeScreen 会显示
                 lastError = error;

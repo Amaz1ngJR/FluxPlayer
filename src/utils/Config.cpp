@@ -7,19 +7,17 @@
 
 namespace FluxPlayer {
 
+// 获取配置单例
 Config& Config::getInstance() {
     static Config instance;
     return instance;
 }
 
+// 构造函数
 Config::Config() {
-    configPath_ = getConfigPath();
 }
 
-std::string Config::getConfigPath() {
-    return "fluxplayer.ini";
-}
-
+// 获取配置文件修改时间
 long Config::getFileModTime() {
     struct stat st;
     if (stat(configPath_.c_str(), &st) == 0) {
@@ -28,6 +26,7 @@ long Config::getFileModTime() {
     return 0;
 }
 
+// 从配置文件加载设置
 bool Config::load() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ifstream file(configPath_);
@@ -67,6 +66,7 @@ bool Config::load() {
     return true;
 }
 
+// 保存设置到配置文件
 bool Config::save() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ofstream file(configPath_);
@@ -93,9 +93,11 @@ bool Config::save() {
     return true;
 }
 
+// 检查配置文件是否修改，如有修改则重新加载
 void Config::checkAndReload() {
     long modTime = getFileModTime();
     if (modTime > lastModTime_) {
+        LOG_INFO("Config file changed, reloading...");
         load();
     }
 }

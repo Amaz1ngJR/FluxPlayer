@@ -32,11 +32,10 @@ private:
     Config();
     ~Config() = default;
 
-    std::string getConfigPath();
     long getFileModTime();
 
     Settings settings_;
-    std::string configPath_;
+    std::string configPath_ = "fluxplayer.ini";
     std::atomic<long> lastModTime_{0};
     mutable std::mutex mutex_;
 };

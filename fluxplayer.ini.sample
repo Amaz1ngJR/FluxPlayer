@@ -1,7 +1,7 @@
 # FluxPlayer Configuration
 
 [Audio]
-volume=1.0
+volume=0.6
 
 [Log]
 logLevel=INFO
