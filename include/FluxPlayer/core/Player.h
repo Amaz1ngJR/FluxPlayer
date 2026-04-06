@@ -34,7 +34,7 @@ enum class PlayerState {
     PLAYING,    // 播放中
     PAUSED,     // 暂停
     STOPPED,    // 停止（已加载但未播放）
-    ERROR       // 错误状态
+    ERRORED     // 错误状态
 };
 
 /**

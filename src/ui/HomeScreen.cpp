@@ -10,6 +10,7 @@
 #include "FluxPlayer/ui/HomeScreen.h"
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Config.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>      // 需要 ImGui 内部 API（GetBackgroundDrawList 等）
@@ -130,8 +131,9 @@ void HomeScreen::setupStyle() {
 bool HomeScreen::init() {
     LOG_INFO("Initializing HomeScreen...");
 
-    // 创建 960x600 的 GLFW 窗口（HomeScreen 专用，与播放器窗口独立）
-    window_ = std::make_unique<Window>(960, 600, "FluxPlayer");
+    // 从配置读取窗口大小
+    auto& cfg = Config::getInstance().get();
+    window_ = std::make_unique<Window>(cfg.windowWidth, cfg.windowHeight, "FluxPlayer");
     if (!window_->init()) {
         LOG_ERROR("Failed to create HomeScreen window");
         return false;

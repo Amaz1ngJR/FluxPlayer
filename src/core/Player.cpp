@@ -11,6 +11,7 @@
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
+#include "FluxPlayer/utils/Config.h"
 
 #include <GLFW/glfw3.h>
 #include <thread>
@@ -44,7 +45,7 @@ Player::Player()
     , videoFrameCount_(0)
     , audioFrameCount_(0)
     , liveStreamStartTime_(0.0)
-    , volume_(1.0f)
+    , volume_(Config::getInstance().get().volume)
     , muted_(false)
     , currentAudioFramePTS_(0.0)
     , samplesPlayedInFrame_(0)
@@ -84,14 +85,14 @@ bool Player::open(const std::string& filePath) {
     demuxer_ = std::make_unique<Demuxer>();
     if (!demuxer_->open(filePath)) {
         triggerError("Failed to open file: " + filePath);
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
     // 检查视频流
     if (demuxer_->getVideoStreamIndex() < 0) {
         triggerError("No video stream found in file");
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
@@ -120,14 +121,14 @@ bool Player::open(const std::string& filePath) {
     // 初始化解码器
     if (!initDecoders()) {
         triggerError("Failed to initialize decoders");
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
     // 初始化窗口和渲染器
     if (!initWindowAndRenderer()) {
         triggerError("Failed to initialize window and renderer");
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
@@ -152,6 +153,7 @@ bool Player::open(const std::string& filePath) {
 
         if (audioOutput_->init(audioFormat, audioCallback)) {
             LOG_INFO("Audio output initialized successfully");
+            audioOutput_->setVolume(volume_.load());  // 应用配置的音量
             clockType = ClockType::AUDIO_CLOCK;  // 使用音频时钟
         } else {
             LOG_WARN("Failed to initialize audio output, audio will be disabled");
@@ -287,7 +289,7 @@ void Player::stop() {
 }
 
 bool Player::seek(double seconds) {
-    if (state_ == PlayerState::IDLE || state_ == PlayerState::ERROR) {
+    if (state_ == PlayerState::IDLE || state_ == PlayerState::ERRORED) {
         LOG_WARN("Cannot seek: invalid state");
         return false;
     }
@@ -524,6 +526,8 @@ PlayerStats Player::getStats() const {
 
 void Player::setVolume(float volume) {
     volume_.store(std::max(0.0f, std::min(1.0f, volume)));
+    Config::getInstance().getMutable().volume = volume_.load();
+    Config::getInstance().save();
     if (audioOutput_) {
         audioOutput_->setVolume(muted_.load() ? 0.0f : volume_.load());
     }

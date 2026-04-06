@@ -241,11 +241,11 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
     if (codecParams->codec_type == AVMEDIA_TYPE_AUDIO) {
         info.sampleRate = codecParams->sample_rate;
         // FFmpeg 4.x 使用 channels 字段，5.x+ 使用 ch_layout
-        #if LIBAVCODEC_VERSION_MAJOR >= 59
-            info.channels = codecParams->ch_layout.nb_channels;
-        #else
-            info.channels = codecParams->channels;
-        #endif
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+        info.channels = codecParams->ch_layout.nb_channels;
+#else
+        info.channels = codecParams->channels;
+#endif
 
         const char* sampleFmtName = av_get_sample_fmt_name(static_cast<AVSampleFormat>(codecParams->format));
         info.sampleFormat = sampleFmtName ? sampleFmtName : "";

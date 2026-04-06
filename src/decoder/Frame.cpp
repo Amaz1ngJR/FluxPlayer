@@ -71,7 +71,11 @@ int Frame::getSampleRate() const {
 }
 
 int Frame::getChannels() const {
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    return m_frame ? m_frame->ch_layout.nb_channels : 0;
+#else
     return m_frame ? m_frame->channels : 0;
+#endif
 }
 
 int Frame::getNbSamples() const {
@@ -103,7 +107,11 @@ bool Frame::allocate(int sampleRate, int channels, int nbSamples) {
     }
 
     m_frame->sample_rate = sampleRate;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    av_channel_layout_default(&m_frame->ch_layout, channels);
+#else
     m_frame->channels = channels;
+#endif
     m_frame->nb_samples = nbSamples;
     m_frame->format = AV_SAMPLE_FMT_S16;
 

@@ -80,7 +80,11 @@ bool AudioDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
 
     // 保存音频属性
     m_sampleRate = m_codecCtx->sample_rate;
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+    m_channels = m_codecCtx->ch_layout.nb_channels;
+#else
     m_channels = m_codecCtx->channels;
+#endif
     m_sampleFormat = m_codecCtx->sample_fmt;
     m_timeBase = timeBase;
 
@@ -91,6 +95,18 @@ bool AudioDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
 
     // 初始化音频重采样器 (SwrContext)
     // 将解码后的音频转换为 16-bit PCM 交错格式
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    AVChannelLayout out_ch_layout;
+    av_channel_layout_default(&out_ch_layout, m_channels);
+    swr_alloc_set_opts2(&m_swrCtx,
+        &out_ch_layout,                             // 输出声道布局
+        AV_SAMPLE_FMT_S16,                          // 输出格式：16-bit signed integer
+        m_sampleRate,                               // 输出采样率
+        &m_codecCtx->ch_layout,                     // 输入声道布局
+        m_sampleFormat,                             // 输入格式
+        m_sampleRate,                               // 输入采样率
+        0, nullptr);
+#else
     m_swrCtx = swr_alloc_set_opts(nullptr,
         av_get_default_channel_layout(m_channels),  // 输出声道布局
         AV_SAMPLE_FMT_S16,                          // 输出格式：16-bit signed integer
@@ -99,6 +115,7 @@ bool AudioDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
         m_sampleFormat,                             // 输入格式
         m_sampleRate,                               // 输入采样率
         0, nullptr);
+#endif
 
     if (!m_swrCtx) {
         LOG_ERROR("Failed to allocate SwrContext");
@@ -263,8 +280,12 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
     AVFrame* dstAVFrame = dstFrame.getAVFrame();
     dstAVFrame->format = AV_SAMPLE_FMT_S16;
     dstAVFrame->sample_rate = m_sampleRate;
+#if LIBAVUTIL_VERSION_MAJOR >= 57
+    av_channel_layout_default(&dstAVFrame->ch_layout, m_channels);
+#else
     dstAVFrame->channels = m_channels;
     dstAVFrame->channel_layout = av_get_default_channel_layout(m_channels);
+#endif
     dstAVFrame->nb_samples = convertedSamples;
 
     // 分配帧缓冲区
