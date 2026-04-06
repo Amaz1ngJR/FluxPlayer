@@ -192,6 +192,8 @@ elseif(WIN32)
         opengl32
         gdi32
         winmm
+        ole32
+        comdlg32
     )
 elseif(UNIX)
     target_link_libraries(FluxPlayer PRIVATE
@@ -221,3 +223,16 @@ add_custom_command(TARGET FluxPlayer POST_BUILD
         $<TARGET_FILE_DIR:FluxPlayer>/shaders
     COMMENT "Copying shader files..."
 )
+
+# Windows: 构建后复制 FFmpeg DLL 到可执行文件目录
+if(WIN32)
+    file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
+    if(FFMPEG_DLLS)
+        add_custom_command(TARGET FluxPlayer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${FFMPEG_DLLS}
+                $<TARGET_FILE_DIR:FluxPlayer>
+            COMMENT "Copying FFmpeg DLLs..."
+        )
+    endif()
+endif()

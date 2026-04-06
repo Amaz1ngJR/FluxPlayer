@@ -491,7 +491,7 @@ void Controller::renderStats() {
         case PlayerState::PLAYING: stateText = "PLAYING"; break;
         case PlayerState::PAUSED:  stateText = "PAUSED"; break;
         case PlayerState::STOPPED: stateText = "STOPPED"; break;
-        case PlayerState::ERROR:   stateText = "ERROR"; break;
+        case PlayerState::ERRORED:   stateText = "ERROR"; break;
         default:                   stateText = "UNKNOWN"; break;
     }
     ImGui::Text("State: %s", stateText.c_str());

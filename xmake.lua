@@ -63,8 +63,6 @@ target("glfw_local")
             "third_party/glfw-3.3.8/src/monitor.c",
             "third_party/glfw-3.3.8/src/vulkan.c",
             "third_party/glfw-3.3.8/src/window.c",
-            "third_party/glfw-3.3.8/src/posix_time.c",
-            "third_party/glfw-3.3.8/src/posix_thread.c",
             "third_party/glfw-3.3.8/src/egl_context.c",
             "third_party/glfw-3.3.8/src/osmesa_context.c",
             "third_party/glfw-3.3.8/src/wgl_context.c"
@@ -155,7 +153,7 @@ target("FluxPlayer")
     if is_plat("macosx") then
         add_frameworks("OpenGL", "Cocoa", "CoreVideo", "IOKit", "CoreFoundation", "AudioToolbox")
     elseif is_plat("windows") then
-        add_syslinks("opengl32", "gdi32", "winmm")
+        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32")
     elseif is_plat("linux") then
         add_syslinks("GL", "X11", "pthread", "dl")
     end
@@ -175,9 +173,16 @@ target("FluxPlayer")
         add_defines("ENABLE_TCP_LOG")
     end
 
-    -- 运行时复制着色器文件
+    -- 运行时复制着色器文件和 FFmpeg DLL
     after_build(function (target)
         os.cp("assets/shaders", path.join(target:targetdir(), "shaders"))
+        -- Windows: 复制 FFmpeg DLL 到可执行文件目录
+        if is_plat("windows") then
+            local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")
+            if os.isdir(ffmpeg_bin) then
+                os.cp(path.join(ffmpeg_bin, "*.dll"), target:targetdir())
+            end
+        end
     end)
 
 -- 提示信息

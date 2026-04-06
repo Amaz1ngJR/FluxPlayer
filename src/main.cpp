@@ -51,7 +51,7 @@ static std::string playMedia(const std::string& mediaPath) {
             case PlayerState::PLAYING: stateName = "PLAYING"; break;
             case PlayerState::PAUSED:  stateName = "PAUSED"; break;
             case PlayerState::STOPPED: stateName = "STOPPED"; break;
-            case PlayerState::ERROR:   stateName = "ERROR"; break;
+            case PlayerState::ERRORED:   stateName = "ERROR"; break;
         }
         LOG_INFO("Player state changed to: " + stateName);
     });

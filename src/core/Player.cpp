@@ -85,14 +85,14 @@ bool Player::open(const std::string& filePath) {
     demuxer_ = std::make_unique<Demuxer>();
     if (!demuxer_->open(filePath)) {
         triggerError("Failed to open file: " + filePath);
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
     // 检查视频流
     if (demuxer_->getVideoStreamIndex() < 0) {
         triggerError("No video stream found in file");
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
@@ -121,14 +121,14 @@ bool Player::open(const std::string& filePath) {
     // 初始化解码器
     if (!initDecoders()) {
         triggerError("Failed to initialize decoders");
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
     // 初始化窗口和渲染器
     if (!initWindowAndRenderer()) {
         triggerError("Failed to initialize window and renderer");
-        setState(PlayerState::ERROR);
+        setState(PlayerState::ERRORED);
         return false;
     }
 
@@ -289,7 +289,7 @@ void Player::stop() {
 }
 
 bool Player::seek(double seconds) {
-    if (state_ == PlayerState::IDLE || state_ == PlayerState::ERROR) {
+    if (state_ == PlayerState::IDLE || state_ == PlayerState::ERRORED) {
         LOG_WARN("Cannot seek: invalid state");
         return false;
     }

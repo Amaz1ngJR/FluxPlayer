@@ -139,11 +139,11 @@ bool Demuxer::open(const std::string& filename) {
         AVCodecParameters* audioParams = getAudioCodecParams();
         // FFmpeg 5.0+ (LIBAVCODEC_VERSION_MAJOR >= 59) 使用 ch_layout.nb_channels
         // FFmpeg 4.x 使用 channels
-        #if LIBAVCODEC_VERSION_MAJOR >= 59
-            int channels = audioParams->ch_layout.nb_channels;
-        #else
-            int channels = audioParams->channels;
-        #endif
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+        int channels = audioParams->ch_layout.nb_channels;
+#else
+        int channels = audioParams->channels;
+#endif
         LOG_INFO("Audio: " + std::to_string(audioParams->sample_rate) + " Hz, " +
                 std::to_string(channels) + " channels");
     }
