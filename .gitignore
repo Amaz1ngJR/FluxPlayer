@@ -14,6 +14,10 @@ build/
 *.dll
 *.exe
 
+# Allow FFmpeg prebuilt binaries
+!third_party/ffmpeg/bin/*.dll
+!third_party/ffmpeg/lib/*.lib
+
 # IDE files
 .vscode/
 .idea/
