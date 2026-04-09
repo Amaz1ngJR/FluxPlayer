@@ -77,6 +77,7 @@ public:
                       int width,
                       int height,
                       double duration,
+                      double videoFps,
                       const std::string& videoCodec,
                       const std::string& audioCodec,
                       int audioSampleRate,
@@ -175,6 +176,7 @@ private:
     std::string filename_;      // 文件名
     int videoWidth_;            // 视频宽度
     int videoHeight_;           // 视频高度
+    double videoFps_;            // 视频帧率
     double duration_;           // 视频时长（秒）
     std::string videoCodec_;    // 视频编码格式
     std::string audioCodec_;    // 音频编码格式

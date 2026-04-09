@@ -70,6 +70,9 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
         return false;
     }
 
+    // 启用多线程解码（0 = FFmpeg 自动选择最优线程数）
+    m_codecCtx->thread_count = 0;
+
     // 步骤4：打开解码器
     ret = avcodec_open2(m_codecCtx, codec, nullptr);
     if (ret < 0) {
@@ -219,44 +222,44 @@ bool VideoDecoder::convertToYUV420P(AVFrame* srcFrame, Frame& dstFrame) {
         return false;
     }
 
-    // 初始化 SwsContext（图像缩放/格式转换上下文）
-    // 只在第一次调用时初始化，之后重复使用
-    if (!m_swsCtx) {
-        LOG_DEBUG("Creating SwsContext for pixel format conversion");
-        LOG_DEBUG("Source format: " + std::string(av_get_pix_fmt_name(static_cast<AVPixelFormat>(srcFrame->format))));
+    // 如果源帧已经是 YUV420P，直接引用，跳过 sws_scale
+    if (static_cast<AVPixelFormat>(srcFrame->format) == AV_PIX_FMT_YUV420P) {
+        AVFrame* dst = dstFrame.getAVFrame();
+        av_frame_ref(dst, srcFrame);
+    } else {
+        // 非 YUV420P 格式，需要通过 sws_scale 转换
+        if (!m_swsCtx) {
+            LOG_DEBUG("Creating SwsContext for pixel format conversion");
+            LOG_DEBUG("Source format: " + std::string(av_get_pix_fmt_name(static_cast<AVPixelFormat>(srcFrame->format))));
 
-        m_swsCtx = sws_getContext(
-            srcFrame->width, srcFrame->height, static_cast<AVPixelFormat>(srcFrame->format),
-            srcFrame->width, srcFrame->height, AV_PIX_FMT_YUV420P,
-            SWS_BILINEAR,  // 双线性插值算法（速度和质量的平衡）
-            nullptr, nullptr, nullptr
+            m_swsCtx = sws_getContext(
+                srcFrame->width, srcFrame->height, static_cast<AVPixelFormat>(srcFrame->format),
+                srcFrame->width, srcFrame->height, AV_PIX_FMT_YUV420P,
+                SWS_BILINEAR,
+                nullptr, nullptr, nullptr
+            );
+
+            if (!m_swsCtx) {
+                LOG_ERROR("Failed to create SwsContext for format conversion");
+                return false;
+            }
+        }
+
+        if (!dstFrame.getAVFrame()->data[0]) {
+            dstFrame.allocate(srcFrame->width, srcFrame->height, AV_PIX_FMT_YUV420P);
+        }
+
+        int ret = sws_scale(
+            m_swsCtx,
+            srcFrame->data, srcFrame->linesize,
+            0, srcFrame->height,
+            dstFrame.getAVFrame()->data, dstFrame.getAVFrame()->linesize
         );
 
-        if (!m_swsCtx) {
-            LOG_ERROR("Failed to create SwsContext for format conversion");
+        if (ret <= 0) {
+            LOG_ERROR("sws_scale failed");
             return false;
         }
-        LOG_DEBUG("SwsContext created successfully");
-    }
-
-    // 分配目标帧内存（如果尚未分配）
-    if (!dstFrame.getAVFrame()->data[0]) {
-        LOG_DEBUG("Allocating YUV420P frame buffer");
-        dstFrame.allocate(srcFrame->width, srcFrame->height, AV_PIX_FMT_YUV420P);
-    }
-
-    // 执行像素格式转换
-    // sws_scale 会将源帧数据转换为 YUV420P 格式并写入目标帧
-    int ret = sws_scale(
-        m_swsCtx,
-        srcFrame->data, srcFrame->linesize,
-        0, srcFrame->height,
-        dstFrame.getAVFrame()->data, dstFrame.getAVFrame()->linesize
-    );
-
-    if (ret <= 0) {
-        LOG_ERROR("sws_scale failed");
-        return false;
     }
 
     // 复制时间戳信息

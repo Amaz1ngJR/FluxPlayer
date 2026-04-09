@@ -54,6 +54,7 @@ Player::Player()
     , audioBufferDelay_(0.0)
     , audioQueueDepth_(0)
     , audioUnderrunCount_(0)
+    , pendingAudioOffset_(0)
     , controller_(nullptr)
     , MAX_AUDIO_QUEUE_SIZE(20)  // 默认20帧，实时流会增大
     , droppedFrames_(0)
@@ -154,7 +155,7 @@ bool Player::open(const std::string& filePath) {
         if (audioOutput_->init(audioFormat, audioCallback)) {
             LOG_INFO("Audio output initialized successfully");
             audioOutput_->setVolume(volume_.load());  // 应用配置的音量
-            clockType = ClockType::AUDIO_CLOCK;  // 使用音频时钟
+            clockType = ClockType::EXTERNAL_CLOCK;  // 使用系统时钟驱动视频
         } else {
             LOG_WARN("Failed to initialize audio output, audio will be disabled");
             audioOutput_.reset();
@@ -351,11 +352,27 @@ void Player::run() {
             // ===== Seek期间暂停渲染，避免关键帧闪烁 =====
             // 在解码到目标位置的过程中，不从队列取帧，保持显示上一帧
             if (!decodingToTarget_.load()) {
-                // 非seek状态：正常从队列取帧
+                // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
                 std::lock_guard<std::mutex> lock(videoQueueMutex_);
                 if (!videoFrameQueue_.empty()) {
-                    frame = videoFrameQueue_.front();
-                    videoFrameQueue_.pop();
+                    double nextPTS = videoFrameQueue_.front()->getPTS();
+                    double masterClock = avSync_->getMasterClock();
+                    // 下一帧的 PTS <= 主时钟，说明该显示了
+                    if (nextPTS <= masterClock + 0.005) {
+                        frame = videoFrameQueue_.front();
+                        videoFrameQueue_.pop();
+                        // 如果落后较多，连续丢帧追赶
+                        while (!videoFrameQueue_.empty()) {
+                            double peekPTS = videoFrameQueue_.front()->getPTS();
+                            if (peekPTS <= masterClock + 0.005) {
+                                frame = videoFrameQueue_.front();
+                                videoFrameQueue_.pop();
+                                droppedFrames_.fetch_add(1);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             // else: seek状态：不取帧，frame保持为空，后面会渲染lastRenderedFrame_
@@ -365,17 +382,7 @@ void Player::run() {
 
                 // 更新视频时钟
                 avSync_->updateVideoClock(framePTS);
-
-                // 计算帧延迟
-                double delay = avSync_->computeFrameDelay(framePTS, lastFrameTime);
                 lastFrameTime = framePTS;
-
-                // 如果需要延迟
-                if (delay > 0 && delay < 1.0) {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(static_cast<int>(delay * 1000))
-                    );
-                }
 
                 // 渲染帧
                 renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
@@ -465,8 +472,9 @@ void Player::run() {
 
             int underruns = audioUnderrunCount_.load();
             LOG_INFO("Status - FPS: " + std::to_string(static_cast<int>(currentFPS_.load())) +
-                    " | Time: " + std::to_string(avSync_->getVideoClock()) + "s" +
-                    " | Bitrate: " + std::to_string(currentBitrate_.load()) + " Mbps" +
+                    " | VClock: " + std::to_string(avSync_->getVideoClock()) + "s" +
+                    " | AClock: " + std::to_string(avSync_->getAudioClock()) + "s" +
+                    " | Dropped: " + std::to_string(droppedFrames_.load()) +
                     " | VQueue: " + std::to_string(videoQueueSize) +
                     " | AQueue: " + std::to_string(audioQueueSize) +
                     (underruns > 0 ? " | Underruns: " + std::to_string(underruns) : "") +
@@ -576,6 +584,10 @@ void Player::decodingThread() {
                         audioFrameQueue_.pop();
                     }
                 }
+
+                // 清空残留音频帧
+                pendingAudioFrame_.reset();
+                pendingAudioOffset_ = 0;
 
                 // 通知同步器更新时钟
                 avSync_->seekTo(seekTime);
@@ -849,27 +861,17 @@ void Player::decodingThread() {
                         audioFramePtr->setPTS(rawFrame.getPTS());
                         audioFramePtr->setType(FrameType::AUDIO);
 
-                        // 等待直到音频队列有空间（等待时间比视频短）
-                        int waitCount = 0;
-                        const int maxWait = 20;  // 最多等待20次 * 2ms = 40ms
-                        while (audioQueueFull && waitCount < maxWait && !shouldQuit_.load()) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                            // 重新检查队列状态
-                            {
-                                std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                                audioQueueFull = audioFrameQueue_.size() >= MAX_AUDIO_QUEUE_SIZE;
-                            }
-                            waitCount++;
-                        }
-
-                        // 如果队列仍然满，丢弃音频帧（音频丢帧不像视频那么明显）
-                        if (audioQueueFull || shouldQuit_.load()) {
-                            if (waitCount >= maxWait) {
-                                LOG_DEBUG("Audio frame dropped after timeout");
-                            }
-                        } else {
+                        // 音频队列满时直接丢弃，不阻塞解码线程
+                        bool canEnqueue = false;
+                        {
                             std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                            audioFrameQueue_.push(audioFramePtr);
+                            if (audioFrameQueue_.size() < MAX_AUDIO_QUEUE_SIZE) {
+                                audioFrameQueue_.push(audioFramePtr);
+                                canEnqueue = true;
+                            }
+                        }
+                        if (!canEnqueue) {
+                            LOG_DEBUG("Audio frame dropped: queue full");
                         }
                     } else {
                         LOG_WARN("Failed to convert audio frame to S16 format");
@@ -1112,10 +1114,17 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
     // 填充缓冲区，尽可能从队列中获取音频数据
     while (bytesWritten < bufferSize) {
+        // 优先使用上次未消费完的帧
         std::shared_ptr<Frame> audioFrame;
+        size_t frameOffset = 0;
 
-        // 使用作用域限制锁的持有时间，减少竞争
-        {
+        if (pendingAudioFrame_) {
+            audioFrame = pendingAudioFrame_;
+            frameOffset = pendingAudioOffset_;
+            pendingAudioFrame_.reset();
+            pendingAudioOffset_ = 0;
+        } else {
+            // 从队列取新帧
             std::lock_guard<std::mutex> lock(audioQueueMutex_);
             if (!audioFrameQueue_.empty()) {
                 audioFrame = audioFrameQueue_.front();
@@ -1128,12 +1137,10 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
         if (!audioFrame) {
             // 队列为空 - 音频欠载（underrun）
-            // 填充静音以避免爆音，并记录欠载次数
             size_t silenceBytes = bufferSize - bytesWritten;
             std::memset(buffer + bytesWritten, 0, silenceBytes);
             bytesWritten += silenceBytes;
 
-            // 统计欠载次数（用于诊断）
             int underruns = audioUnderrunCount_.fetch_add(1) + 1;
             if (underruns % 10 == 1) {  // 每10次记录一次，避免日志过多
                 LOG_WARN("Audio underrun detected, count: " + std::to_string(underruns));
@@ -1148,46 +1155,49 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
             continue;
         }
 
-        // 记录第一帧的PTS（用于后续时钟更新）
+        // 记录第一帧的PTS
         if (!hasValidFrame) {
-            firstFramePTS = audioFrame->getPTS();
+            double framePTS = audioFrame->getPTS();
+            // 如果从帧中间开始，补偿 PTS
+            if (frameOffset > 0) {
+                size_t samplesSkipped = frameOffset / (audioChannels_ * sampleSize);
+                framePTS += static_cast<double>(samplesSkipped) / static_cast<double>(audioSampleRate_);
+            }
+            firstFramePTS = framePTS;
             hasValidFrame = true;
         }
 
-        // 计算本帧的数据大小
+        // 计算本帧剩余的数据大小
         size_t frameDataSize = static_cast<size_t>(avFrame->nb_samples) *
                               static_cast<size_t>(audioChannels_) *
                               static_cast<size_t>(sampleSize);
+        size_t remainingFrameData = frameDataSize - frameOffset;
 
-        // 防止缓冲区溢出
+        // 计算可拷贝的字节数
         size_t remainingSpace = bufferSize - bytesWritten;
-        size_t bytesToCopy = std::min(frameDataSize, remainingSpace);
+        size_t bytesToCopy = std::min(remainingFrameData, remainingSpace);
 
         // 复制音频数据
-        std::memcpy(buffer + bytesWritten, avFrame->data[0], bytesToCopy);
+        std::memcpy(buffer + bytesWritten, avFrame->data[0] + frameOffset, bytesToCopy);
         bytesWritten += bytesToCopy;
 
         // 累计填充的样本数
         size_t samplesCopied = bytesToCopy / (audioChannels_ * sampleSize);
         totalSamplesFilled += samplesCopied;
 
-        // 如果帧数据无法完全放入缓冲区，记录警告
-        // 这种情况理论上不应该发生，因为我们的缓冲区应该足够大
-        if (bytesToCopy < frameDataSize) {
-            LOG_WARN("Audio frame partially copied: " + std::to_string(bytesToCopy) +
-                    "/" + std::to_string(frameDataSize) + " bytes");
+        // 如果帧没有完全消费，保存残留部分供下次使用
+        if (bytesToCopy < remainingFrameData) {
+            pendingAudioFrame_ = audioFrame;
+            pendingAudioOffset_ = frameOffset + bytesToCopy;
             break;
         }
     }
 
-    // 更新队列深度统计（用于监控和调试）
+    // 更新队列深度统计
     audioQueueDepth_.store(queueDepth);
 
     // 更新音频时钟
-    // 策略：使用第一帧的PTS + 已填充的总样本数对应的时长
-    // 这样可以准确反映音频播放的实际位置
     if (hasValidFrame && avSync_ && audioSampleRate_ > 0) {
-        // 计算已填充的总时长
         double filledDuration = static_cast<double>(totalSamplesFilled) / static_cast<double>(audioSampleRate_);
         double currentAudioPTS = firstFramePTS + filledDuration;
 

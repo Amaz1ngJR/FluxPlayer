@@ -307,6 +307,10 @@ private:
     int audioSampleRate_;                         // 音频采样率
     int audioChannels_;                           // 音频声道数
 
+    // 音频帧残留缓冲（处理部分消费的帧）
+    std::shared_ptr<Frame> pendingAudioFrame_;   // 未完全消费的音频帧
+    size_t pendingAudioOffset_;                  // 已消费的字节偏移
+
     // 音频缓冲延迟管理
     double audioBufferDelay_;                     // 动态计算的音频缓冲延迟（秒）
     std::atomic<size_t> audioQueueDepth_;        // 当前音频队列深度
