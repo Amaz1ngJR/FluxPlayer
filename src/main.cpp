@@ -110,6 +110,7 @@ static std::string playMedia(const std::string& mediaPath) {
         videoInfo.width,
         videoInfo.height,
         mediaInfo.getDuration(),
+        videoInfo.fps,
         videoInfo.codecName,
         audioInfo.codecName,
         audioInfo.sampleRate,

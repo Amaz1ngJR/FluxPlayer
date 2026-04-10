@@ -24,6 +24,7 @@ Controller::Controller(Player& player, Window& window)
     , filename_("")
     , videoWidth_(0)
     , videoHeight_(0)
+    , videoFps_(0.0)
     , duration_(0.0)
     , videoCodec_("")
     , audioCodec_("")
@@ -144,6 +145,7 @@ void Controller::setMediaInfo(const std::string& filename,
                                int width,
                                int height,
                                double duration,
+                               double videoFps,
                                const std::string& videoCodec,
                                const std::string& audioCodec,
                                int audioSampleRate,
@@ -152,6 +154,7 @@ void Controller::setMediaInfo(const std::string& filename,
     videoWidth_ = width;
     videoHeight_ = height;
     duration_ = duration;
+    videoFps_ = videoFps;
     videoCodec_ = videoCodec;
     audioCodec_ = audioCodec;
     audioSampleRate_ = audioSampleRate;
@@ -421,6 +424,9 @@ void Controller::renderMediaInfo() {
     ImGui::Indent();
     ImGui::Text("Resolution: %dx%d", videoWidth_, videoHeight_);
     ImGui::Text("Codec: %s", videoCodec_.empty() ? "Unknown" : videoCodec_.c_str());
+    if (videoFps_ > 0) {
+        ImGui::Text("FPS: %.2f", videoFps_);
+    }
     ImGui::Unindent();
 
     ImGui::Separator();
