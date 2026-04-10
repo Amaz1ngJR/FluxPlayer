@@ -284,6 +284,7 @@ private:
     double duration_;
     int videoWidth_;
     int videoHeight_;
+    double videoFrameInterval_;  // 视频帧间隔（秒），由帧率计算得出
 
     // 实时流处理
     bool isLiveStream_;                            // 是否为实时流
@@ -296,6 +297,8 @@ private:
     std::atomic<int> videoFrameCount_;            // 已接收的视频帧计数（用于稳定基准）
     std::atomic<int> audioFrameCount_;            // 已接收的音频帧计数（用于稳定基准）
     std::atomic<double> liveStreamStartTime_;     // 实时流开始播放的系统时间
+    std::atomic<double> lastValidVideoPTS_;         // 最后一个有效的归一化视频 PTS
+    std::atomic<double> lastValidAudioPTS_;         // 最后一个有效的归一化音频 PTS
 
     // 音量控制
     std::atomic<float> volume_;
