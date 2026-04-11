@@ -12,6 +12,8 @@
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <glad/glad.h>
+#include <algorithm>
+#include <utility>
 
 namespace FluxPlayer {
 
@@ -19,6 +21,8 @@ Window::Window(int width, int height, const std::string& title)
     : m_window(nullptr)
     , m_width(width)
     , m_height(height)
+    , m_windowedWidth(width)
+    , m_windowedHeight(height)
     , m_title(title)
     , m_fullscreen(false) {
     LOG_DEBUG("Window constructor called: " + std::to_string(width) + "x" +
@@ -28,6 +32,28 @@ Window::Window(int width, int height, const std::string& title)
 Window::~Window() {
     LOG_DEBUG("Window destructor called");
     destroy();
+}
+
+std::pair<int, int> Window::clampToPrimaryMonitor(int requestedWidth, int requestedHeight) {
+    if (!glfwInit()) {
+        return {requestedWidth, requestedHeight};
+    }
+
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    if (!monitor) {
+        return {requestedWidth, requestedHeight};
+    }
+
+    const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+    if (!mode) {
+        return {requestedWidth, requestedHeight};
+    }
+
+    const int maxWidth = std::max(640, static_cast<int>(mode->width * 0.8));
+    const int maxHeight = std::max(480, static_cast<int>(mode->height * 0.8));
+    const int width = std::clamp(requestedWidth, 640, maxWidth);
+    const int height = std::clamp(requestedHeight, 480, maxHeight);
+    return {width, height};
 }
 
 /**
@@ -154,6 +180,9 @@ void Window::setFullscreen(bool fullscreen) {
     m_fullscreen = fullscreen;
 
     if (fullscreen) {
+        // 保存当前窗口逻辑尺寸（非 framebuffer 尺寸），用于退出全屏时恢复
+        glfwGetWindowSize(m_window, &m_windowedWidth, &m_windowedHeight);
+
         // 切换到全屏模式
         LOG_INFO("Switching to fullscreen mode");
         GLFWmonitor* monitor = glfwGetPrimaryMonitor();  // 获取主显示器
@@ -163,11 +192,10 @@ void Window::setFullscreen(bool fullscreen) {
         LOG_DEBUG("Fullscreen resolution: " + std::to_string(mode->width) + "x" +
                  std::to_string(mode->height) + " @ " + std::to_string(mode->refreshRate) + "Hz");
     } else {
-        // 切换到窗口模式
+        // 切换到窗口模式，使用进入全屏前保存的尺寸
         LOG_INFO("Switching to windowed mode");
-        // 恢复为窗口模式，位置 (100, 100)，使用原始窗口尺寸
-        glfwSetWindowMonitor(m_window, nullptr, 100, 100, m_width, m_height, 0);
-        LOG_DEBUG("Window size: " + std::to_string(m_width) + "x" + std::to_string(m_height));
+        glfwSetWindowMonitor(m_window, nullptr, 100, 100, m_windowedWidth, m_windowedHeight, 0);
+        LOG_DEBUG("Window size: " + std::to_string(m_windowedWidth) + "x" + std::to_string(m_windowedHeight));
     }
 }
 

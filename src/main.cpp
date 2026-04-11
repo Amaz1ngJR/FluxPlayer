@@ -135,7 +135,7 @@ static std::string playMedia(const std::string& mediaPath) {
     LOG_INFO("  ESC         - Quit player");
     LOG_INFO("  I           - Toggle media info panel");
     LOG_INFO("  S           - Toggle statistics panel");
-    LOG_INFO("  H           - Toggle UI visibility");
+    LOG_INFO("  H           - Force toggle UI (auto show/hide on mouse move)");
     LOG_INFO("========================================");
 
     // 进入播放主循环（阻塞，直到播放结束或用户按 ESC 退出）

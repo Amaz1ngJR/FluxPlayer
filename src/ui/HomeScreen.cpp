@@ -131,9 +131,10 @@ void HomeScreen::setupStyle() {
 bool HomeScreen::init() {
     LOG_INFO("Initializing HomeScreen...");
 
-    // 从配置读取窗口大小
+    // 从配置读取窗口大小，限制在屏幕 80% 以内
     auto& cfg = Config::getInstance().get();
-    window_ = std::make_unique<Window>(cfg.windowWidth, cfg.windowHeight, "FluxPlayer");
+    auto [w, h] = Window::clampToPrimaryMonitor(cfg.windowWidth, cfg.windowHeight);
+    window_ = std::make_unique<Window>(w, h, "FluxPlayer");
     if (!window_->init()) {
         LOG_ERROR("Failed to create HomeScreen window");
         return false;

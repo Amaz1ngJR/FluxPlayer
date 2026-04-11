@@ -11,6 +11,7 @@
 
 #include <sstream>
 #include <iomanip>
+#include <cmath>
 
 namespace FluxPlayer {
 
@@ -33,6 +34,10 @@ Controller::Controller(Player& player, Window& window)
     , isDraggingProgress_(false)
     , draggedProgress_(0.0f)
     , seekPrecision_(0.1)
+    , volumeHovered_(false)
+    , volumeLeaveTime_(0.0)
+    , lastMouseMoveTime_(0.0)
+    , forceVisible_(false)
 {
 }
 
@@ -113,6 +118,26 @@ void Controller::processInput() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
+
+    // 利用 ImGui 已有的鼠标状态检测活动（零额外开销）
+    if (!forceVisible_) {
+        const ImGuiIO& io = ImGui::GetIO();
+        // 检查鼠标是否在窗口可视区域内（glfwGetCursorPos 在鼠标离开窗口后
+        // 仍返回坐标，可能超出窗口范围但为正数，所以必须检查上界）
+        bool mouseInWindow = (io.MousePos.x >= 0.0f && io.MousePos.y >= 0.0f &&
+                              io.MousePos.x < io.DisplaySize.x && io.MousePos.y < io.DisplaySize.y);
+        // 检测鼠标移动（含 2px 死区过滤抖动）
+        if (io.MouseDelta.x * io.MouseDelta.x + io.MouseDelta.y * io.MouseDelta.y >= 4.0f) {
+            lastMouseMoveTime_ = glfwGetTime();
+        }
+        double now = glfwGetTime();
+        bool shouldShow = mouseInWindow && (now - lastMouseMoveTime_ < AUTO_HIDE_DELAY);
+        // 正在拖动进度条或操作音量时保持显示
+        if (isDraggingProgress_ || volumeHovered_) {
+            shouldShow = true;
+        }
+        visible_ = shouldShow;
+    }
 }
 
 void Controller::render() {
@@ -123,15 +148,13 @@ void Controller::render() {
         return;
     }
 
-    // 渲染各个 UI 组件
-    renderControlPanel();
-    renderProgressBar();
-    renderVolumeControl();
+    // 渲染底部统一浮层
+    renderBottomOverlay();
 
+    // 渲染独立面板
     if (showMediaInfo_) {
         renderMediaInfo();
     }
-
     if (showStats_) {
         renderStats();
     }
@@ -142,14 +165,9 @@ void Controller::render() {
 }
 
 void Controller::setMediaInfo(const std::string& filename,
-                               int width,
-                               int height,
-                               double duration,
-                               double videoFps,
-                               const std::string& videoCodec,
-                               const std::string& audioCodec,
-                               int audioSampleRate,
-                               int audioChannels) {
+                               int width, int height, double duration, double videoFps,
+                               const std::string& videoCodec, const std::string& audioCodec,
+                               int audioSampleRate, int audioChannels) {
     filename_ = filename;
     videoWidth_ = width;
     videoHeight_ = height;
@@ -159,114 +177,52 @@ void Controller::setMediaInfo(const std::string& filename,
     audioCodec_ = audioCodec;
     audioSampleRate_ = audioSampleRate;
     audioChannels_ = audioChannels;
-
     LOG_INFO("Controller: Media info set - " + filename);
 }
 
-void Controller::renderControlPanel() {
-    // 设置窗口位置和大小
-    int windowWidth = window_.getWidth();
-    int windowHeight = window_.getHeight();
+// ===== 底部统一浮层 =====
 
-    // 控制面板在进度条上方，避免遮挡
-    ImGui::SetNextWindowPos(ImVec2(10, windowHeight - 150), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(300, 70), ImGuiCond_Always);
+void Controller::renderBottomOverlay() {
+    const ImVec2& ds = ImGui::GetIO().DisplaySize;
+    const float overlayH = 64.0f;
+    const float pad = 8.0f;
 
-    ImGui::Begin("Control Panel", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoCollapse);
+    // 半透明无边框浮层
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, 4.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.75f));
 
-    // 获取播放器状态
-    PlayerState state = player_.getState();
-    bool isPlaying = (state == PlayerState::PLAYING);
-    bool isPaused = (state == PlayerState::PAUSED);
+    ImGui::SetNextWindowPos(ImVec2(0, ds.y - overlayH), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(ds.x, overlayH), ImGuiCond_Always);
 
-    // 播放/暂停按钮
-    if (isPlaying) {
-        if (ImGui::Button("Pause", ImVec2(90, 40))) {
-            player_.pause();
-            LOG_INFO("UI: Pause button clicked");
-        }
-    } else if (isPaused) {
-        if (ImGui::Button("Resume", ImVec2(90, 40))) {
-            player_.resume();
-            LOG_INFO("UI: Resume button clicked");
-        }
-    } else {
-        ImGui::BeginDisabled();
-        ImGui::Button("Play", ImVec2(90, 40));
-        ImGui::EndDisabled();
-    }
-
-    ImGui::SameLine();
-
-    // 停止按钮
-    if (state == PlayerState::PLAYING || state == PlayerState::PAUSED) {
-        if (ImGui::Button("Stop", ImVec2(90, 40))) {
-            player_.stop();
-            LOG_INFO("UI: Stop button clicked");
-        }
-    } else {
-        ImGui::BeginDisabled();
-        ImGui::Button("Stop", ImVec2(90, 40));
-        ImGui::EndDisabled();
-    }
-
-    ImGui::SameLine();
-
-    // 静音按钮
-    bool isMuted = player_.isMuted();
-    if (ImGui::Button(isMuted ? "Unmute" : "Mute", ImVec2(90, 40))) {
-        player_.setMute(!isMuted);
-        LOG_INFO(isMuted ? "UI: Unmute clicked" : "UI: Mute clicked");
-    }
-
-    ImGui::End();
-}
-
-void Controller::renderProgressBar() {
-    int windowWidth = window_.getWidth();
-    int windowHeight = window_.getHeight();
-
-    // 进度条在最底部
-    ImGui::SetNextWindowPos(ImVec2(10, windowHeight - 70), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(windowWidth - 20, 60), ImGuiCond_Always);
-
-    ImGui::Begin("Progress Bar", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoCollapse);
+    ImGui::Begin("##BottomOverlay", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoSavedSettings);
 
     // 获取当前播放时间和总时长
     double currentTime = player_.getCurrentTime();
     double duration = player_.getDuration();
 
     // 计算进度（0.0 - 1.0）
-    float progress = 0.0f;
-    if (duration > 0.0) {
-        progress = static_cast<float>(currentTime / duration);
-    }
+    float progress = (duration > 0.0) ? static_cast<float>(currentTime / duration) : 0.0f;
 
     // 如果正在拖动，使用拖动的进度值
-    if (isDraggingProgress_) {
-        progress = draggedProgress_;
-    }
+    if (isDraggingProgress_) progress = draggedProgress_;
+
+    // 时间文本（先计算宽度以确定进度条宽度）
+    std::string timeText = formatTime(currentTime) + " / " + formatTime(duration);
+    float timeTextW = ImGui::CalcTextSize(timeText.c_str()).x;
+    float progressBarWidth = ds.x - timeTextW - pad * 4;
+    const float progressBarHeight = 16.0f;
 
     // ===== 自定义进度条：支持精确点击和拖动 =====
-
-    const float progressBarWidth = windowWidth - 220.0f;
-    const float progressBarHeight = 20.0f;
 
     // 创建一个不可见按钮作为可交互区域
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0, 0, 0, 0));
-
     ImGui::Button("##progressbar", ImVec2(progressBarWidth, progressBarHeight));
 
     // 获取进度条的屏幕位置
@@ -283,11 +239,9 @@ void Controller::renderProgressBar() {
 
     // 计算鼠标在进度条上的相对位置（原始值，不量化）
     float mouseProgress = 0.0f;
-    double mouseTime = 0.0;
     if (isHovered || isActive) {
         mouseProgress = (mousePos.x - barMin.x) / (barMax.x - barMin.x);
         mouseProgress = std::max(0.0f, std::min(1.0f, mouseProgress));
-        mouseTime = mouseProgress * duration;
     }
 
     // 处理点击和拖动（拖动过程保持流畅，不量化）
@@ -307,9 +261,7 @@ void Controller::renderProgressBar() {
             targetTime = std::round(targetTime / seekPrecision_) * seekPrecision_;
             targetTime = std::max(0.0, std::min(duration, targetTime));
         }
-
         player_.seek(targetTime);
-        LOG_INFO("UI: Precise seek to " + std::to_string(targetTime) + " seconds (precision: " + std::to_string(seekPrecision_) + "s)");
     }
 
     // 绘制进度条背景
@@ -340,81 +292,173 @@ void Controller::renderProgressBar() {
         float previewX = barMin.x + (barMax.x - barMin.x) * displayProgress;
 
         // 绘制预览线
-        drawList->AddLine(
-            ImVec2(previewX, barMin.y),
-            ImVec2(previewX, barMax.y),
-            IM_COL32(255, 255, 255, 200),
-            2.0f
-        );
+        drawList->AddLine(ImVec2(previewX, barMin.y), ImVec2(previewX, barMax.y),
+                          IM_COL32(255, 255, 255, 200), 2.0f);
 
         // 显示量化后的时间
         std::string previewText = formatTime(quantizedTime);
-
         ImVec2 textSize = ImGui::CalcTextSize(previewText.c_str());
-        ImVec2 tooltipPos = ImVec2(
-            previewX - textSize.x * 0.5f,
-            barMin.y - textSize.y - 5.0f
-        );
+        ImVec2 tooltipPos(previewX - textSize.x * 0.5f, barMin.y - textSize.y - 5.0f);
 
         // 确保提示框不超出窗口边界
         tooltipPos.x = std::max(barMin.x, std::min(tooltipPos.x, barMax.x - textSize.x));
 
-        drawList->AddRectFilled(
-            ImVec2(tooltipPos.x - 5, tooltipPos.y - 2),
-            ImVec2(tooltipPos.x + textSize.x + 5, tooltipPos.y + textSize.y + 2),
-            IM_COL32(40, 40, 40, 230),
-            3.0f
-        );
-        drawList->AddText(tooltipPos, IM_COL32(255, 255, 255, 255), previewText.c_str());
+        // 使用前景 DrawList 绘制 tooltip（不受浮层窗口裁剪）
+        ImDrawList* fgDrawList = ImGui::GetForegroundDrawList();
+        fgDrawList->AddRectFilled(ImVec2(tooltipPos.x - 5, tooltipPos.y - 2),
+                                ImVec2(tooltipPos.x + textSize.x + 5, tooltipPos.y + textSize.y + 2),
+                                IM_COL32(40, 40, 40, 230), 3.0f);
+        fgDrawList->AddText(tooltipPos, IM_COL32(255, 255, 255, 255), previewText.c_str());
     }
 
     ImGui::PopStyleColor(3);
 
+    // 时间文本（同行右侧）
     ImGui::SameLine();
-
-    // 时间显示
-    std::string timeText = formatTime(currentTime) + " / " + formatTime(duration);
     ImGui::Text("%s", timeText.c_str());
 
-    ImGui::End();
-}
+    // ── 第二行：控制按钮（居中） + 音量（右） ──
+    const float btnH = 22.0f;
 
-void Controller::renderVolumeControl() {
-    int windowWidth = window_.getWidth();
-    int windowHeight = window_.getHeight();
+    // 获取播放器状态
+    PlayerState state = player_.getState();
+    bool isPlaying = (state == PlayerState::PLAYING);
+    bool isPaused = (state == PlayerState::PAUSED);
+    bool canStop = isPlaying || isPaused;
 
-    // 音量控制在进度条上方，右侧
-    ImGui::SetNextWindowPos(ImVec2(windowWidth - 210, windowHeight - 150), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(200, 70), ImGuiCond_Always);
+    // 计算按钮组总宽度，居中定位
+    const float btnSpacing = ImGui::GetStyle().ItemSpacing.x;
+    float buttonsW = 60.0f + btnSpacing + 50.0f;  // Play/Pause + spacing + Stop
+    float centerX = (ds.x - buttonsW) * 0.5f;
+    ImGui::SetCursorPosX(centerX);
 
-    ImGui::Begin("Volume Control", nullptr,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoCollapse);
-
-    ImGui::Text("Volume");
-
-    // 音量滑块
-    float volume = player_.getVolume();
-    ImGui::PushItemWidth(180);
-    if (ImGui::SliderFloat("##volume", &volume, 0.0f, 1.0f, "%.2f")) {
-        player_.setVolume(volume);
+    // 播放/暂停按钮
+    if (isPlaying) {
+        if (ImGui::Button("Pause", ImVec2(60, btnH))) player_.pause();
+    } else if (isPaused) {
+        if (ImGui::Button("Play", ImVec2(60, btnH))) player_.resume();
+    } else {
+        ImGui::BeginDisabled();
+        ImGui::Button("Play", ImVec2(60, btnH));
+        ImGui::EndDisabled();
     }
-    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
+
+    // 停止按钮
+    if (canStop) {
+        if (ImGui::Button("Stop", ImVec2(50, btnH))) player_.stop();
+    } else {
+        ImGui::BeginDisabled();
+        ImGui::Button("Stop", ImVec2(50, btnH));
+        ImGui::EndDisabled();
+    }
+
+    // 音量区域（图标固定，滑块向右展开，延迟关闭）
+    bool isMuted = player_.isMuted();
+    float volume = player_.getVolume();
+    const float volSliderW = 100.0f;
+    const float volBtnW = btnH + 4.0f;
+    const float volIconX = ds.x - volBtnW - volSliderW - 12.0f;
+    constexpr double VOL_CLOSE_DELAY = 0.4;  // 延迟关闭时间（秒）
+
+    // 音量图标按钮（固定位置）
+    ImGui::SameLine(volIconX);
+    if (ImGui::Button("##volbtn", ImVec2(volBtnW, btnH))) {
+        player_.setMute(!isMuted);
+    }
+    bool iconHovered = ImGui::IsItemHovered();
+    // 立即保存按钮的 rect（后面画滑块会改变 GetItemRect）
+    ImVec2 volBtnMin = ImGui::GetItemRectMin();
+    ImVec2 volBtnMax = ImGui::GetItemRectMax();
+
+    // 音量滑块（在图标右侧展开）
+    bool sliderHovered = false;
+    bool sliderActive = false;
+    if (volumeHovered_) {
+        ImGui::SameLine(0, 4.0f);
+        ImGui::PushItemWidth(volSliderW);
+        if (ImGui::SliderFloat("##vol", &volume, 0.0f, 1.0f, "%.2f")) {
+            player_.setVolume(volume);
+        }
+        sliderHovered = ImGui::IsItemHovered();
+        sliderActive = ImGui::IsItemActive();
+        ImGui::PopItemWidth();
+    }
+
+    // 延迟关闭逻辑：
+    // - 图标或滑块上有鼠标 → 保持展开，重置离开时间
+    // - 鼠标离开后，等 VOL_CLOSE_DELAY 秒才真正关闭
+    // - 正在拖拽滑块时始终保持
+    bool anyHovered = iconHovered || sliderHovered || sliderActive;
+    if (anyHovered) {
+        volumeHovered_ = true;
+        volumeLeaveTime_ = 0.0;  // 重置
+    } else if (volumeHovered_) {
+        // 刚离开，记录离开时间
+        if (volumeLeaveTime_ == 0.0) {
+            volumeLeaveTime_ = glfwGetTime();
+        }
+        // 超过延迟时间才关闭
+        if (glfwGetTime() - volumeLeaveTime_ > VOL_CLOSE_DELAY) {
+            volumeHovered_ = false;
+            volumeLeaveTime_ = 0.0;
+        }
+    }
+
+    // 在音量按钮上手绘喇叭图标（使用保存的按钮 rect）
+    {
+        float cx = (volBtnMin.x + volBtnMax.x) * 0.5f;
+        float cy = (volBtnMin.y + volBtnMax.y) * 0.5f;
+        float sz = (volBtnMax.y - volBtnMin.y) * 0.35f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 col = IM_COL32(220, 220, 220, 255);
+
+        // 喇叭主体（梯形：左窄右宽）
+        dl->AddRectFilled(ImVec2(cx - sz * 0.8f, cy - sz * 0.3f),
+                          ImVec2(cx - sz * 0.2f, cy + sz * 0.3f), col);
+        // 喇叭喇叭口（三角形）
+        ImVec2 tri[3] = {
+            ImVec2(cx - sz * 0.2f, cy - sz * 0.3f),
+            ImVec2(cx + sz * 0.4f, cy - sz * 0.8f),
+            ImVec2(cx + sz * 0.4f, cy + sz * 0.8f)
+        };
+        dl->AddTriangleFilled(tri[0], tri[1], ImVec2(cx - sz * 0.2f, cy + sz * 0.3f), col);
+        dl->AddTriangleFilled(tri[0], tri[1], tri[2], col);
+
+        if (isMuted) {
+            // 静音：红色斜线
+            ImU32 red = IM_COL32(220, 60, 60, 255);
+            dl->AddLine(ImVec2(cx - sz, cy - sz), ImVec2(cx + sz, cy + sz), red, 2.0f);
+        } else {
+            // 声波弧线
+            ImU32 wave = IM_COL32(180, 180, 180, 180);
+            float arcX = cx + sz * 0.6f;
+            if (volume > 0.3f) {
+                dl->AddBezierQuadratic(
+                    ImVec2(arcX, cy - sz * 0.4f),
+                    ImVec2(arcX + sz * 0.4f, cy),
+                    ImVec2(arcX, cy + sz * 0.4f), wave, 1.5f, 8);
+            }
+            if (volume > 0.6f) {
+                dl->AddBezierQuadratic(
+                    ImVec2(arcX + sz * 0.2f, cy - sz * 0.7f),
+                    ImVec2(arcX + sz * 0.7f, cy),
+                    ImVec2(arcX + sz * 0.2f, cy + sz * 0.7f), wave, 1.5f, 8);
+            }
+        }
+    }
 
     ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 void Controller::renderMediaInfo() {
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(450, 250), ImGuiCond_Always);
-
     ImGui::Begin("Media Info", &showMediaInfo_,
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoCollapse);
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
     ImGui::Text("File: %s", filename_.c_str());
     ImGui::Separator();
@@ -424,9 +468,7 @@ void Controller::renderMediaInfo() {
     ImGui::Indent();
     ImGui::Text("Resolution: %dx%d", videoWidth_, videoHeight_);
     ImGui::Text("Codec: %s", videoCodec_.empty() ? "Unknown" : videoCodec_.c_str());
-    if (videoFps_ > 0) {
-        ImGui::Text("FPS: %.2f", videoFps_);
-    }
+    if (videoFps_ > 0) ImGui::Text("FPS: %.2f", videoFps_);
     ImGui::Unindent();
 
     ImGui::Separator();
@@ -435,39 +477,29 @@ void Controller::renderMediaInfo() {
     ImGui::Text("Audio:");
     ImGui::Indent();
     ImGui::Text("Codec: %s", audioCodec_.empty() ? "Unknown" : audioCodec_.c_str());
-    if (audioSampleRate_ > 0) {
-        ImGui::Text("Sample Rate: %d Hz", audioSampleRate_);
-    } else {
-        ImGui::Text("Sample Rate: Unknown");
-    }
+    if (audioSampleRate_ > 0) ImGui::Text("Sample Rate: %d Hz", audioSampleRate_);
+    else ImGui::Text("Sample Rate: Unknown");
     if (audioChannels_ > 0) {
-        std::string channelText = audioChannels_ == 1 ? "Mono" :
-                                 audioChannels_ == 2 ? "Stereo" :
-                                 std::to_string(audioChannels_) + " Channels";
-        ImGui::Text("Channels: %s", channelText.c_str());
+        std::string ch = audioChannels_ == 1 ? "Mono" :
+                         audioChannels_ == 2 ? "Stereo" :
+                         std::to_string(audioChannels_) + " Channels";
+        ImGui::Text("Channels: %s", ch.c_str());
     } else {
         ImGui::Text("Channels: Unknown");
     }
     ImGui::Unindent();
-
     ImGui::Separator();
     ImGui::Text("Duration: %s", formatTime(duration_).c_str());
-
     ImGui::End();
 }
 
 void Controller::renderStats() {
-    int windowWidth = window_.getWidth();
-
+    float windowWidth = ImGui::GetIO().DisplaySize.x;
     ImGui::SetNextWindowPos(ImVec2(windowWidth - 250, 10), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(240, 180), ImGuiCond_Always);
-
     ImGui::Begin("Statistics", &showStats_,
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoMove |
-                 ImGuiWindowFlags_NoCollapse);
+                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
-    // 获取播放器统计信息
     PlayerStats stats = player_.getStats();
 
     // 性能统计
@@ -497,34 +529,33 @@ void Controller::renderStats() {
         case PlayerState::PLAYING: stateText = "PLAYING"; break;
         case PlayerState::PAUSED:  stateText = "PAUSED"; break;
         case PlayerState::STOPPED: stateText = "STOPPED"; break;
-        case PlayerState::ERRORED:   stateText = "ERROR"; break;
+        case PlayerState::ERRORED: stateText = "ERROR"; break;
         default:                   stateText = "UNKNOWN"; break;
     }
     ImGui::Text("State: %s", stateText.c_str());
-
     ImGui::End();
 }
 
+/**
+ * 格式化时间显示（秒 -> MM:SS 或 HH:MM:SS）
+ * @param seconds 时间（秒）
+ * @return 格式化的时间字符串
+ */
 std::string Controller::formatTime(double seconds) {
-    if (seconds < 0.0) {
-        seconds = 0.0;
-    }
-
-    int totalSeconds = static_cast<int>(seconds);
-    int hours = totalSeconds / 3600;
-    int minutes = (totalSeconds % 3600) / 60;
-    int secs = totalSeconds % 60;
-
+    if (seconds < 0.0) seconds = 0.0;
+    int total = static_cast<int>(seconds);
+    int h = total / 3600;
+    int m = (total % 3600) / 60;
+    int s = total % 60;
     std::ostringstream oss;
-    if (hours > 0) {
-        oss << std::setfill('0') << std::setw(2) << hours << ":"
-            << std::setfill('0') << std::setw(2) << minutes << ":"
-            << std::setfill('0') << std::setw(2) << secs;
+    if (h > 0) {
+        oss << std::setfill('0') << std::setw(2) << h << ":"
+            << std::setfill('0') << std::setw(2) << m << ":"
+            << std::setfill('0') << std::setw(2) << s;
     } else {
-        oss << std::setfill('0') << std::setw(2) << minutes << ":"
-            << std::setfill('0') << std::setw(2) << secs;
+        oss << std::setfill('0') << std::setw(2) << m << ":"
+            << std::setfill('0') << std::setw(2) << s;
     }
-
     return oss.str();
 }
 

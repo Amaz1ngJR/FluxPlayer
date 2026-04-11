@@ -1048,8 +1048,19 @@ void Player::cleanup() {
 bool Player::initWindowAndRenderer() {
     LOG_INFO("Initializing window and renderer");
 
+    // 将视频原始分辨率限制在屏幕 80% 以内，保持宽高比
+    auto [clampedW, clampedH] = Window::clampToPrimaryMonitor(videoWidth_, videoHeight_);
+    if (clampedW != videoWidth_ || clampedH != videoHeight_) {
+        // 按比例缩放，取较小的缩放因子
+        double scale = std::min(static_cast<double>(clampedW) / videoWidth_,
+                                static_cast<double>(clampedH) / videoHeight_);
+        clampedW = static_cast<int>(videoWidth_ * scale);
+        clampedH = static_cast<int>(videoHeight_ * scale);
+        LOG_INFO("Window size clamped to screen: " + std::to_string(clampedW) + "x" + std::to_string(clampedH));
+    }
+
     // 创建窗口
-    window_ = std::make_unique<Window>(videoWidth_, videoHeight_,
+    window_ = std::make_unique<Window>(clampedW, clampedH,
                                        "FluxPlayer - " + filePath_);
     if (!window_->init()) {
         LOG_ERROR("Failed to initialize window");
