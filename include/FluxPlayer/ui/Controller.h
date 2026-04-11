@@ -80,6 +80,10 @@ private:
     double seekPrecision_;
     bool volumeHovered_;        // 音量区域悬停（控制滑块展开）
     double volumeLeaveTime_;    // 鼠标离开音量区域的时间（用于延迟关闭）
+    bool settingsHovered_;      // 设置按钮悬停状态
+    bool showSettingsMenu_;     // 设置菜单显示状态
+    float settingsMenuPosX_;    // 设置菜单X坐标
+    float settingsMenuPosY_;    // 设置菜单Y坐标
 
     // 鼠标活动追踪（自动显示/隐藏）
     double lastMouseMoveTime_;

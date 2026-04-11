@@ -50,6 +50,7 @@ Player::Player()
     , lastValidAudioPTS_(0.0)
     , volume_(Config::getInstance().get().volume)
     , muted_(false)
+    , loopPlayback_(false)
     , currentAudioFramePTS_(0.0)
     , samplesPlayedInFrame_(0)
     , audioSampleRate_(0)
@@ -339,14 +340,17 @@ void Player::run() {
 
     LOG_INFO("Entering main loop");
 
-    FPSCounter fpsCounter;
-    Timer timer;
-    timer.start();
+    // 外层循环用于支持循环播放
+    bool shouldLoop = true;
+    while (shouldLoop) {
+        FPSCounter fpsCounter;
+        Timer timer;
+        timer.start();
 
-    double lastFrameTime = 0.0;
+        double lastFrameTime = 0.0;
 
-    while (!window_->shouldClose() && !shouldQuit_.load()) {
-        double currentTime = timer.getElapsedSeconds();
+        while (!window_->shouldClose() && !shouldQuit_.load()) {
+            double currentTime = timer.getElapsedSeconds();
 
         // 从队列获取视频帧并渲染
         if (state_ == PlayerState::PLAYING) {
@@ -492,9 +496,50 @@ void Player::run() {
 
     LOG_INFO("Exiting main loop");
 
-    // 触发播放完成回调
-    if (playbackFinishedCallback_) {
-        playbackFinishedCallback_();
+        // 触发播放完成回调
+        if (playbackFinishedCallback_) {
+            playbackFinishedCallback_();
+        }
+
+        // 检查是否需要循环播放
+        if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !window_->shouldClose()) {
+            LOG_INFO("Loop playback enabled, restarting...");
+
+            // 等待解码线程结束
+            if (decodingThread_ && decodingThread_->joinable()) {
+                decodingThread_->join();
+            }
+
+            // 清空帧队列
+            {
+                std::lock_guard<std::mutex> lock(videoQueueMutex_);
+                while (!videoFrameQueue_.empty()) videoFrameQueue_.pop();
+            }
+            {
+                std::lock_guard<std::mutex> lock(audioQueueMutex_);
+                while (!audioFrameQueue_.empty()) audioFrameQueue_.pop();
+            }
+            pendingAudioFrame_.reset();
+            pendingAudioOffset_ = 0;
+
+            // seek demuxer到开头
+            demuxer_->seek(0);
+            videoDecoder_->flush();
+            if (audioDecoder_) audioDecoder_->flush();
+
+            // 重置同步时钟
+            avSync_->seekTo(0.0);
+            lastRenderedPTS_.store(0.0);
+            currentAudioFramePTS_.store(0.0);
+            samplesPlayedInFrame_.store(0);
+
+            // 重启解码线程
+            shouldQuit_.store(false);
+            decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
+            setState(PlayerState::PLAYING);
+        } else {
+            shouldLoop = false;
+        }
     }
 }
 
@@ -555,6 +600,11 @@ void Player::setMute(bool mute) {
         audioOutput_->setVolume(mute ? 0.0f : volume_.load());
     }
     LOG_INFO(mute ? "Muted" : "Unmuted");
+}
+
+void Player::setLoopPlayback(bool loop) {
+    loopPlayback_.store(loop);
+    LOG_INFO("Loop playback " + std::string(loop ? "enabled" : "disabled"));
 }
 
 void Player::decodingThread() {

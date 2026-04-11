@@ -17,6 +17,7 @@ public:
         bool uiVisible = true;
         bool showMediaInfo = true;
         bool showStats = true;
+        bool loopPlayback = false;
     };
 
     static Config& getInstance();

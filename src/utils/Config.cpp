@@ -59,6 +59,7 @@ bool Config::load() {
         else if (key == "uiVisible") settings_.uiVisible = (value == "true" || value == "1");
         else if (key == "showMediaInfo") settings_.showMediaInfo = (value == "true" || value == "1");
         else if (key == "showStats") settings_.showStats = (value == "true" || value == "1");
+        else if (key == "loopPlayback") settings_.loopPlayback = (value == "true" || value == "1");
     }
 
     lastModTime_ = getFileModTime();
@@ -87,7 +88,9 @@ bool Config::save() {
     file << "[UI]\n";
     file << "uiVisible=" << (settings_.uiVisible ? "true" : "false") << "\n";
     file << "showMediaInfo=" << (settings_.showMediaInfo ? "true" : "false") << "\n";
-    file << "showStats=" << (settings_.showStats ? "true" : "false") << "\n";
+    file << "showStats=" << (settings_.showStats ? "true" : "false") << "\n\n";
+    file << "[Playback]\n";
+    file << "loopPlayback=" << (settings_.loopPlayback ? "true" : "false") << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
     return true;

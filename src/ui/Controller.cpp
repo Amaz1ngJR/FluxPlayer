@@ -38,6 +38,10 @@ Controller::Controller(Player& player, Window& window)
     , volumeLeaveTime_(0.0)
     , lastMouseMoveTime_(0.0)
     , forceVisible_(false)
+    , settingsHovered_(false)
+    , showSettingsMenu_(false)
+    , settingsMenuPosX_(0.0f)
+    , settingsMenuPosY_(0.0f)
 {
 }
 
@@ -150,6 +154,41 @@ void Controller::render() {
 
     // 渲染底部统一浮层
     renderBottomOverlay();
+
+    // 渲染设置菜单（独立窗口，不受底部浮层裁剪）
+    if (showSettingsMenu_) {
+        ImGui::SetNextWindowPos(ImVec2(settingsMenuPosX_, settingsMenuPosY_));
+        ImGui::SetNextWindowSize(ImVec2(150, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowFocus();  // 确保窗口获得焦点
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 6));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 5.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.15f, 0.15f, 0.95f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.4f, 0.8f));
+
+        ImGui::Begin("SettingsMenu", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+
+        bool loopEnabled = player_.isLoopPlayback();
+        if (ImGui::Checkbox("Loop Playback", &loopEnabled)) {
+            LOG_INFO("Loop playback checkbox clicked: " + std::string(loopEnabled ? "enabled" : "disabled"));
+            Config::getInstance().getMutable().loopPlayback = loopEnabled;
+            player_.setLoopPlayback(loopEnabled);
+            Config::getInstance().save();
+        }
+
+        // 点击菜单外部关闭
+        if (!ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() && ImGui::IsMouseClicked(0)) {
+            LOG_INFO("Clicked outside menu, closing");
+            showSettingsMenu_ = false;
+        }
+
+        ImGui::End();
+
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(2);
+    }
 
     // 渲染独立面板
     if (showMediaInfo_) {
@@ -359,8 +398,62 @@ void Controller::renderBottomOverlay() {
     float volume = player_.getVolume();
     const float volSliderW = 100.0f;
     const float volBtnW = btnH + 4.0f;
+    const float settingsBtnW = volBtnW;
+    const float settingsIconX = ds.x - volBtnW - volSliderW - settingsBtnW - 20.0f;
     const float volIconX = ds.x - volBtnW - volSliderW - 12.0f;
     constexpr double VOL_CLOSE_DELAY = 0.4;  // 延迟关闭时间（秒）
+
+    // 设置图标按钮（在音量图标左侧）
+    ImGui::SameLine(settingsIconX);
+    bool settingsClicked = ImGui::Button("##settingsbtn", ImVec2(settingsBtnW, btnH));
+    settingsHovered_ = ImGui::IsItemHovered();
+    ImVec2 settingsBtnMin = ImGui::GetItemRectMin();
+    ImVec2 settingsBtnMax = ImGui::GetItemRectMax();
+
+    if (settingsClicked) {
+        showSettingsMenu_ = !showSettingsMenu_;
+        // 保存菜单位置
+        settingsMenuPosX_ = settingsBtnMin.x;
+        settingsMenuPosY_ = settingsBtnMin.y - 50;
+        LOG_INFO("Settings menu toggled: " + std::string(showSettingsMenu_ ? "shown" : "hidden"));
+    }
+
+    // 绘制齿轮图标
+    {
+        float cx = (settingsBtnMin.x + settingsBtnMax.x) * 0.5f;
+        float cy = (settingsBtnMin.y + settingsBtnMax.y) * 0.5f;
+        float radius = (settingsBtnMax.y - settingsBtnMin.y) * 0.25f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 col = IM_COL32(220, 220, 220, 255);
+
+        // 绘制齿轮齿（8个矩形）
+        const int numTeeth = 8;
+        const float toothWidth = radius * 0.3f;
+        const float toothLength = radius * 0.4f;
+        for (int i = 0; i < numTeeth; i++) {
+            float angle = (i * 2.0f * 3.14159f / numTeeth);
+            float cos_a = std::cos(angle);
+            float sin_a = std::sin(angle);
+            float innerR = radius * 0.7f;
+            float outerR = radius + toothLength;
+
+            ImVec2 p1(cx + cos_a * innerR - sin_a * toothWidth * 0.5f,
+                     cy + sin_a * innerR + cos_a * toothWidth * 0.5f);
+            ImVec2 p2(cx + cos_a * innerR + sin_a * toothWidth * 0.5f,
+                     cy + sin_a * innerR - cos_a * toothWidth * 0.5f);
+            ImVec2 p3(cx + cos_a * outerR + sin_a * toothWidth * 0.5f,
+                     cy + sin_a * outerR - cos_a * toothWidth * 0.5f);
+            ImVec2 p4(cx + cos_a * outerR - sin_a * toothWidth * 0.5f,
+                     cy + sin_a * outerR + cos_a * toothWidth * 0.5f);
+
+            dl->AddQuadFilled(p1, p2, p3, p4, col);
+        }
+
+        // 绘制中心圆
+        dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.5f, col);
+        // 绘制中心孔
+        dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.25f, IM_COL32(0, 0, 0, 255));
+    }
 
     // 音量图标按钮（固定位置）
     ImGui::SameLine(volIconX);

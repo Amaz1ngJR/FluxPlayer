@@ -87,6 +87,9 @@ static std::string playMedia(const std::string& mediaPath) {
         return "Failed to start playback";
     }
 
+    // 从配置加载循环播放设置
+    player.setLoopPlayback(Config::getInstance().get().loopPlayback);
+
     // 获取 Player 内部创建的窗口，用于初始化 Controller UI
     LOG_INFO("Creating UI controller...");
     Window* window = player.getWindow();

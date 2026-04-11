@@ -180,6 +180,16 @@ public:
      */
     bool isMuted() const { return muted_; }
 
+    /**
+     * 设置循环播放
+     */
+    void setLoopPlayback(bool loop);
+
+    /**
+     * 是否循环播放
+     */
+    bool isLoopPlayback() const { return loopPlayback_; }
+
     // ===== 事件回调 =====
 
     /**
@@ -303,6 +313,9 @@ private:
     // 音量控制
     std::atomic<float> volume_;
     std::atomic<bool> muted_;
+
+    // 循环播放控制
+    std::atomic<bool> loopPlayback_;
 
     // 音频播放位置跟踪
     std::atomic<double> currentAudioFramePTS_;   // 当前正在播放的音频帧PTS
