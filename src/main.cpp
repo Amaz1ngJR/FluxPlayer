@@ -37,6 +37,9 @@ using namespace FluxPlayer;
  * @return 错误信息字符串，空字符串表示播放正常结束（无错误）
  */
 static std::string playMedia(const std::string& mediaPath) {
+    // 进入播放前重新加载配置
+    Config::getInstance().checkAndReload();
+
     LOG_INFO("Playing media: " + mediaPath);
 
     // 创建播放器实例（每次播放创建新实例，确保状态干净）
@@ -139,6 +142,7 @@ static std::string playMedia(const std::string& mediaPath) {
     LOG_INFO("  I           - Toggle media info panel");
     LOG_INFO("  S           - Toggle statistics panel");
     LOG_INFO("  H           - Force toggle UI (auto show/hide on mouse move)");
+    LOG_INFO("  P           - Save screenshot of current frame");
     LOG_INFO("========================================");
 
     // 进入播放主循环（阻塞，直到播放结束或用户按 ESC 退出）
@@ -203,6 +207,9 @@ int main(int argc, char* argv[]) {
 
     // ── 外层循环：HomeScreen ↔ 播放 交替执行 ──
     while (!shouldQuit) {
+        // 每次切换界面时重新加载配置
+        Config::getInstance().checkAndReload();
+
         // 如果没有待播放的媒体路径，显示主界面让用户选择
         if (mediaPath.empty()) {
             HomeScreen homeScreen;

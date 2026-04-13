@@ -1,17 +1,37 @@
 # FluxPlayer Configuration
+# This file is auto-generated on first run. Modify values as needed.
+# Changes take effect when switching between HomeScreen and Player.
 
 [Audio]
+# volume: 音量 (0.0 ~ 1.0)
 volume=0.6
 
 [Log]
+# logLevel: 日志级别 (DEBUG / INFO / WARN / ERROR)
 logLevel=INFO
+# tcpLogPort: TCP 远程日志端口 (用 nc ip port 查看实时日志)
 tcpLogPort=9999
 
 [Window]
+# windowWidth: 窗口默认宽度 (像素)
 windowWidth=960
+# windowHeight: 窗口默认高度 (像素)
 windowHeight=600
 
 [UI]
+# uiVisible: 是否显示控制面板 (true / false)
 uiVisible=true
+# showMediaInfo: 是否显示媒体信息面板 (true / false)
 showMediaInfo=true
+# showStats: 是否显示统计信息面板 (true / false)
 showStats=true
+
+[Playback]
+# loopPlayback: 是否循环播放 (true / false)
+loopPlayback=false
+
+[Screenshot]
+# screenshotDir: 截图保存目录 (相对于 ini 文件所在目录)
+screenshotDir=Screenshot
+# screenshotFormat: 截图格式 (png / jpg)
+screenshotFormat=png

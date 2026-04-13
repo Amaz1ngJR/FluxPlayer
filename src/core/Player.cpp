@@ -1,4 +1,5 @@
 #include "FluxPlayer/core/Player.h"
+#include "FluxPlayer/utils/Screenshot.h"
 #include "FluxPlayer/core/AVSync.h"
 #include "FluxPlayer/core/MediaInfo.h"
 #include "FluxPlayer/ui/Window.h"
@@ -1169,6 +1170,21 @@ bool Player::initWindowAndRenderer() {
                     if (controller_) {
                         controller_->toggleVisible();
                         LOG_INFO("Toggle UI visibility");
+                    }
+                    break;
+                case GLFW_KEY_P:
+                    {
+                        std::shared_ptr<Frame> frameCopy;
+                        {
+                            std::lock_guard<std::mutex> lock(lastFrameMutex_);
+                            frameCopy = lastRenderedFrame_;
+                        }
+                        if (frameCopy) {
+                            auto& cfg = Config::getInstance().get();
+                            Screenshot::saveFrame(frameCopy, cfg.screenshotDir, cfg.screenshotFormat);
+                        } else {
+                            LOG_WARN("Screenshot: no frame available");
+                        }
                     }
                     break;
             }

@@ -18,6 +18,8 @@ public:
         bool showMediaInfo = true;
         bool showStats = true;
         bool loopPlayback = false;
+        std::string screenshotDir = "Screenshot";
+        std::string screenshotFormat = "png";  // png 或 jpg
     };
 
     static Config& getInstance();
