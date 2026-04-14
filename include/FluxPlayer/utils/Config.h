@@ -17,6 +17,11 @@ public:
         bool uiVisible = true;
         bool showMediaInfo = true;
         bool showStats = true;
+        bool loopPlayback = false;
+        std::string screenshotDir = "Screenshot";
+        std::string screenshotFormat = "png";  // png 或 jpg
+        std::string recordDir = "Record";
+        std::string recordQuality = "original";  // low / medium / high / original
     };
 
     static Config& getInstance();

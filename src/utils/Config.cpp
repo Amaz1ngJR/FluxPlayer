@@ -26,43 +26,55 @@ long Config::getFileModTime() {
     return 0;
 }
 
-// 从配置文件加载设置
+// 从配置文件加载设置（不存在则自动生成默认配置）
 bool Config::load() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::ifstream file(configPath_);
-    if (!file.is_open()) {
-        LOG_INFO("Config file not found, using defaults: " + configPath_);
-        return false;
+    bool fileExists = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::ifstream file(configPath_);
+        if (file.is_open()) {
+            fileExists = true;
+            std::string line;
+            while (std::getline(file, line)) {
+                if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+
+                size_t pos = line.find('=');
+                if (pos == std::string::npos) continue;
+
+                std::string key = line.substr(0, pos);
+                std::string value = line.substr(pos + 1);
+
+                // Trim spaces
+                key.erase(0, key.find_first_not_of(" \t"));
+                key.erase(key.find_last_not_of(" \t") + 1);
+                value.erase(0, value.find_first_not_of(" \t"));
+                value.erase(value.find_last_not_of(" \t") + 1);
+
+                if (key == "volume") settings_.volume = std::stof(value);
+                else if (key == "logLevel") settings_.logLevel = value;
+                else if (key == "tcpLogPort") settings_.tcpLogPort = std::stoi(value);
+                else if (key == "windowWidth") settings_.windowWidth = std::stoi(value);
+                else if (key == "windowHeight") settings_.windowHeight = std::stoi(value);
+                else if (key == "uiVisible") settings_.uiVisible = (value == "true" || value == "1");
+                else if (key == "showMediaInfo") settings_.showMediaInfo = (value == "true" || value == "1");
+                else if (key == "showStats") settings_.showStats = (value == "true" || value == "1");
+                else if (key == "loopPlayback") settings_.loopPlayback = (value == "true" || value == "1");
+                else if (key == "screenshotDir") settings_.screenshotDir = value;
+                else if (key == "screenshotFormat") settings_.screenshotFormat = value;
+                else if (key == "recordDir") settings_.recordDir = value;
+                else if (key == "recordQuality") settings_.recordQuality = value;
+            }
+
+            lastModTime_ = getFileModTime();
+            LOG_INFO("Config loaded from: " + configPath_);
+        }
     }
 
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
-
-        size_t pos = line.find('=');
-        if (pos == std::string::npos) continue;
-
-        std::string key = line.substr(0, pos);
-        std::string value = line.substr(pos + 1);
-
-        // Trim spaces
-        key.erase(0, key.find_first_not_of(" \t"));
-        key.erase(key.find_last_not_of(" \t") + 1);
-        value.erase(0, value.find_first_not_of(" \t"));
-        value.erase(value.find_last_not_of(" \t") + 1);
-
-        if (key == "volume") settings_.volume = std::stof(value);
-        else if (key == "logLevel") settings_.logLevel = value;
-        else if (key == "tcpLogPort") settings_.tcpLogPort = std::stoi(value);
-        else if (key == "windowWidth") settings_.windowWidth = std::stoi(value);
-        else if (key == "windowHeight") settings_.windowHeight = std::stoi(value);
-        else if (key == "uiVisible") settings_.uiVisible = (value == "true" || value == "1");
-        else if (key == "showMediaInfo") settings_.showMediaInfo = (value == "true" || value == "1");
-        else if (key == "showStats") settings_.showStats = (value == "true" || value == "1");
+    if (!fileExists) {
+        LOG_INFO("Config file not found, creating with defaults: " + configPath_);
     }
-
-    lastModTime_ = getFileModTime();
-    LOG_INFO("Config loaded from: " + configPath_);
+    // 无论是新建还是旧文件缺少新配置项，都回写一次完整配置
+    save();
     return true;
 }
 
@@ -87,7 +99,15 @@ bool Config::save() {
     file << "[UI]\n";
     file << "uiVisible=" << (settings_.uiVisible ? "true" : "false") << "\n";
     file << "showMediaInfo=" << (settings_.showMediaInfo ? "true" : "false") << "\n";
-    file << "showStats=" << (settings_.showStats ? "true" : "false") << "\n";
+    file << "showStats=" << (settings_.showStats ? "true" : "false") << "\n\n";
+    file << "[Playback]\n";
+    file << "loopPlayback=" << (settings_.loopPlayback ? "true" : "false") << "\n\n";
+    file << "[Screenshot]\n";
+    file << "screenshotDir=" << settings_.screenshotDir << "\n";
+    file << "screenshotFormat=" << settings_.screenshotFormat << "\n\n";
+    file << "[Record]\n";
+    file << "recordDir=" << settings_.recordDir << "\n";
+    file << "recordQuality=" << settings_.recordQuality << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
     return true;

@@ -1,5 +1,8 @@
 # FluxPlayer
 
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
+![Language](https://img.shields.io/badge/language-C%2B%2B17-orange)
+
 基于 FFmpeg + OpenGL 的跨平台视频播放器，使用 C++17 开发。支持本地文件播放和网络流（RTSP/RTMP/HTTP/HLS）播放，具备完整的音视频同步、GPU 渲染和 ImGui 控制界面。
 
 ## 功能特性
@@ -11,9 +14,15 @@
 - 🎛️ ImGui 控制界面（播放控制、进度条、音量、媒体信息、统计面板）
 - 📂 支持文件拖放打开
 - ⏱️ 音视频同步（音频时钟 / 视频时钟 / 外部时钟三种模式）
+- 🚀 FFmpeg 多线程解码，YUV420P 源帧零拷贝直通渲染
+- 📡 RTSP 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看
 - ⚙️ INI 配置文件，支持热重载
+- 📸 截图功能（PNG / JPEG，快捷键 P）
+- 🎥 录像功能（转封装原始流，支持 low/medium/high/original 四档质量）
+- 🎙️ 录音功能（自动适配 M4A / MKA 容器）
+- 🔁 循环播放
 
 ## 跨平台支持
 
@@ -27,25 +36,20 @@
 
 ```
 FluxPlayer/
-├── include/FluxPlayer/       # 头文件
-│   ├── core/                 # 核心模块（Player、AVSync、MediaInfo）
-│   ├── decoder/              # 解码模块（Demuxer、VideoDecoder、AudioDecoder、Frame）
-│   ├── renderer/             # 渲染模块（GLRenderer、Shader）
-│   ├── audio/                # 音频输出（AudioOutput）
-│   ├── ui/                   # UI 模块（Controller、HomeScreen、Window）
-│   └── utils/                # 工具类（Logger、Config、Timer）
-├── src/                      # 源文件（与头文件目录结构对应）
-├── assets/shaders/           # GLSL 着色器（video.vert / video.frag）
-├── third_party/              # 第三方库（源码编译）
-│   ├── ffmpeg/               # FFmpeg（头文件 + 库文件）
-│   ├── glfw-3.3.8/           # GLFW 窗口库
-│   ├── glad/                 # OpenGL 加载器
-│   ├── glm/                  # 数学库
-│   ├── imgui/                # ImGui UI 库
-│   └── tinyfiledialogs/      # 原生文件对话框
-├── xmake.lua                 # xmake 构建配置
-├── CMakeLists.txt            # CMake 构建配置
-└── fluxplayer.ini.sample     # 配置文件示例
+├── src/                  # 源代码
+│   ├── main.cpp
+│   ├── audio/            # 音频输出 (AudioOutput)
+│   ├── core/             # 播放器核心 (Player, AVSync, MediaInfo)
+│   ├── decoder/          # 解码器 (Demuxer, VideoDecoder, AudioDecoder, Frame)
+│   ├── recorder/         # 录制器 (Recorder)
+│   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
+│   ├── ui/               # 界面 (Window, Controller, HomeScreen)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot)
+├── include/FluxPlayer/   # 头文件
+├── assets/shaders/       # GLSL 着色器
+├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs
+├── CMakeLists.txt
+└── xmake.lua
 ```
 
 ## 环境依赖
@@ -62,16 +66,7 @@ brew install ffmpeg@4
 
 ### Windows
 
-将 FFmpeg 开发包（include / lib / bin）放入 `third_party/ffmpeg/` 目录：
-
-```
-third_party/ffmpeg/
-├── include/    # FFmpeg 头文件
-├── lib/        # .lib 或 .a 静态库
-└── bin/        # .dll 动态库（构建后自动复制到输出目录）
-```
-
-推荐从 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 或 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) 下载预编译包。
+FFmpeg 已集成在 `third_party/ffmpeg/` 中，无需额外安装。
 
 ### Linux
 
@@ -140,40 +135,117 @@ mingw32-make -j
 | 快捷键 | 功能 |
 |-------|------|
 | `Space` | 播放 / 暂停 |
-| `Escape` | 退出 |
-| `Tab` | 显示 / 隐藏 UI 控制面板 |
-| `I` | 显示 / 隐藏媒体信息 |
-| `S` | 显示 / 隐藏统计信息 |
+| `F` | 全屏切换 |
+| `←` / `→` | 后退 / 前进 16 秒 |
+| `I` | 媒体信息 |
+| `S` | 统计信息 |
+| `H` | 强制切换 UI（默认鼠标移动自动显示/隐藏） |
+| `P` | 截图（保存当前视频帧） |
+| `Esc` | 退出 |
 
-### 配置文件
+## UI 控制按钮
 
-复制 `fluxplayer.ini.sample` 为 `fluxplayer.ini` 并按需修改：
+| 按钮 | 功能 |
+|------|------|
+| `Rec V` / `Stop V` | 开始 / 停止录像（录制中按钮变红，显示时长和文件大小） |
+| `Rec A` / `Stop A` | 开始 / 停止录音（录制中按钮变红，显示时长和文件大小） |
+
+## 支持格式
+
+- 视频: H.264, H.265/HEVC, VP8, VP9, AV1
+- 音频: AAC, MP3, Opus, PCM
+- 容器: MP4, MKV, AVI, MOV, FLV, WebM
+
+## 配置文件
+
+程序首次运行时自动生成 `fluxplayer.ini`，后续修改值即可，切换界面时自动重载。
 
 ```ini
 [Audio]
-volume=0.6
+volume=0.6                    # 音量 (0.0 ~ 1.0)
 
 [Log]
-logLevel=INFO        # DEBUG / INFO / WARN / ERROR
-tcpLogPort=9999
+logLevel=INFO                 # 日志级别 (DEBUG / INFO / WARN / ERROR)
+tcpLogPort=9999               # TCP 远程日志端口
 
 [Window]
-windowWidth=960
-windowHeight=600
+windowWidth=960               # 窗口默认宽度
+windowHeight=600              # 窗口默认高度
 
 [UI]
-uiVisible=true
-showMediaInfo=true
-showStats=true
+uiVisible=true                # 是否显示控制面板
+showMediaInfo=true            # 是否显示媒体信息面板
+showStats=true                # 是否显示统计信息面板
+
+[Playback]
+loopPlayback=false            # 是否循环播放
+
+[Screenshot]
+screenshotDir=Screenshot      # 截图保存目录
+screenshotFormat=png          # 截图格式 (png / jpg)
+
+[Record]
+recordDir=Record              # 录制文件保存目录
+recordQuality=original        # 录像质量 (low / medium / high / original)
 ```
 
-### TCP 远程日志
+录像质量说明：
+- `original`：直接转封装原始流，零质量损失
+- `high`：H.264 重编码，8Mbps / CRF 18
+- `medium`：H.264 重编码，4Mbps / CRF 23
+- `low`：H.264 重编码，1Mbps / CRF 28
 
-启用 `tcp_log` 编译选项后，可通过 netcat 远程查看实时日志：
+## TCP 远程日志
+
+编译时启用：
+
+```bash
+# xmake
+xmake f --tcp_log=y && xmake
+
+# CMake
+cmake -B build -DENABLE_TCP_LOG=ON && cmake --build build
+```
+
+使用 `nc` 查看实时日志：
 
 ```bash
 nc <播放器IP> 9999
 ```
+
+## 测试流地址
+
+### RTMP
+
+| 说明 | 地址 |
+|------|------|
+| 伊拉克 Al Sharqiya 电视台 | `rtmp://ns8.indexforce.com/home/mystream` |
+
+### RTSP
+
+| 说明 | 地址 |
+|------|------|
+| Big Buck Bunny（Wowza 公共测试） | `rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4` |
+| 公共摄像头测试流 | `rtsp://demo:demo@ipvmdemo.dyndns.org:5541/onvif-media/media.amp?profile=profile_1_h264` |
+
+### HLS / M3U8
+
+| 说明 | 地址 |
+|------|------|
+| Apple 官方 HLS 测试流（BipBop） | `http://devimages.apple.com/iphone/samples/bipbop/gear1/prog_index.m3u8` |
+| Apple HLS 多码率测试 | `http://devimages.apple.com/iphone/samples/bipbop/bipbopall.m3u8` |
+| Wowza Big Buck Bunny HLS | `https://wowzaec2demo.streamlock.net/vod-chunklist/mp4:BigBuckBunny_115k.mp4/chunklist.m3u8` |
+| Akamai 直播测试流 | `https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8` |
+| ARTE 欧洲文化频道（法语） | `https://artesimulcast.akamaized.net/hls/live/2031003/artelive_fr/master.m3u8` |
+
+### HTTP 渐进式下载
+
+| 说明 | 地址 |
+|------|------|
+| Big Buck Bunny 360p MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4` |
+| Elephant Dream MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4` |
+
+> 注意：公共测试流可用性随时可能变化，如无法连接请更换其他地址。
 
 ## 技术要点
 
@@ -191,15 +263,18 @@ nc <播放器IP> 9999
 
 ### 音视频同步
 
-- 默认以音频时钟为主时钟（Audio Master Clock）
-- 视频帧根据 PTS 与音频时钟的差值动态调整延迟
-- 支持自适应丢帧策略（阈值 40ms ~ 100ms）
-- 音频缓冲延迟动态补偿
+- VSync 驱动渲染循环，基于主时钟 PTS 比较决定帧显示时机
+- 本地文件使用外部时钟（系统时钟），实时流同样使用外部时钟
+- 视频帧落后时连续丢帧追赶，无效 PTS 帧基于帧间隔估算补偿
+- 音频帧部分消费残留缓冲，避免数据丢失导致播放速度异常
 
 ### 网络流处理
 
 - 支持 RTSP / RTMP / HTTP / HLS 协议
 - 实时流 PTS 基准校准（音视频首帧 PTS 对齐）
+- PTS 回绕检测：视频回绕时跳帧等待，音频回绕时统一重校准基准
+- 无效 PTS（AV_NOPTS_VALUE）帧基于实际帧率 / 采样率估算 PTS，不丢弃
+- 网络断流指数退避重试（100ms → 3000ms，最多 30 次）
 - 动态音频队列深度调整
 
 ### FFmpeg 版本兼容

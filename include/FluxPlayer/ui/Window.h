@@ -7,6 +7,7 @@
 
 #include <string>
 #include <functional>
+#include <utility>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -103,6 +104,14 @@ public:
      */
     bool isFullscreen() const { return m_fullscreen; }
 
+    /**
+     * @brief 根据主显示器尺寸限制窗口大小，并返回最终尺寸
+     * @param requestedWidth 请求宽度
+     * @param requestedHeight 请求高度
+     * @return 适配后的窗口尺寸
+     */
+    static std::pair<int, int> clampToPrimaryMonitor(int requestedWidth, int requestedHeight);
+
 private:
     /** @brief GLFW 键盘事件的静态回调包装，通过用户指针转发到 Window 实例 */
     static void keyCallbackWrapper(GLFWwindow* window, int key, int scancode, int action, int mods);
@@ -113,6 +122,8 @@ private:
     GLFWwindow* m_window;           ///< GLFW 窗口指针
     int m_width;                    ///< 当前窗口宽度（像素）
     int m_height;                   ///< 当前窗口高度（像素）
+    int m_windowedWidth;            ///< 进入全屏前的窗口宽度
+    int m_windowedHeight;           ///< 进入全屏前的窗口高度
     std::string m_title;            ///< 窗口标题
     bool m_fullscreen;              ///< 是否处于全屏模式
 

@@ -177,19 +177,22 @@ void AVSync::reset() {
 void AVSync::pause() {
     if (!paused_.load()) {
         LOG_INFO("AVSync paused");
-        paused_.store(true);
+        // 必须在设置 paused_ 之前读取时钟，否则 getExternalClock()
+        // 会因为 paused_==true 返回旧的 offset 而非当前实际值
         pauseStartTime_ = getMasterClock();
+        paused_.store(true);
     }
 }
 
 void AVSync::resume() {
     if (paused_.load()) {
         LOG_INFO("AVSync resumed");
-        paused_.store(false);
 
-        // 重置外部时钟基准，补偿暂停时间
+        // 必须在设置 paused_=false 之前更新时钟基准，
+        // 否则 getExternalClock() 会用旧的 base 计算出错误值
         externalClockBase_ = std::chrono::steady_clock::now();
         externalClockOffset_.store(pauseStartTime_);
+        paused_.store(false);
     }
 }
 

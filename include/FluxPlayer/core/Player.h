@@ -24,6 +24,7 @@ class AVSync;
 class Frame;
 class AudioOutput;
 class Controller;
+class Recorder;
 
 /**
  * 播放器状态枚举
@@ -180,6 +181,29 @@ public:
      */
     bool isMuted() const { return muted_; }
 
+    /**
+     * 设置循环播放
+     */
+    void setLoopPlayback(bool loop);
+
+    /**
+     * 是否循环播放
+     */
+    bool isLoopPlayback() const { return loopPlayback_; }
+
+    // ===== 录制控制 =====
+
+    void startVideoRecording();
+    void stopVideoRecording();
+    void startAudioRecording();
+    void stopAudioRecording();
+    bool isVideoRecording() const;
+    bool isAudioRecording() const;
+    double getVideoRecordingTime() const;
+    double getAudioRecordingTime() const;
+    int64_t getVideoRecordingSize() const;
+    int64_t getAudioRecordingSize() const;
+
     // ===== 事件回调 =====
 
     /**
@@ -304,6 +328,9 @@ private:
     std::atomic<float> volume_;
     std::atomic<bool> muted_;
 
+    // 循环播放控制
+    std::atomic<bool> loopPlayback_;
+
     // 音频播放位置跟踪
     std::atomic<double> currentAudioFramePTS_;   // 当前正在播放的音频帧PTS
     std::atomic<int> samplesPlayedInFrame_;      // 当前帧内已播放的样本数
@@ -330,6 +357,10 @@ private:
 
     // UI 控制器（不拥有，由外部管理）
     Controller* controller_;
+
+    // 录制器
+    std::unique_ptr<Recorder> videoRecorder_;
+    std::unique_ptr<Recorder> audioRecorder_;
 
     // 最后渲染的帧（用于暂停时保留画面）
     std::shared_ptr<Frame> lastRenderedFrame_;
