@@ -1,5 +1,6 @@
 #include "FluxPlayer/core/Player.h"
 #include "FluxPlayer/utils/Screenshot.h"
+#include "FluxPlayer/recorder/Recorder.h"
 #include "FluxPlayer/core/AVSync.h"
 #include "FluxPlayer/core/MediaInfo.h"
 #include "FluxPlayer/ui/Window.h"
@@ -983,8 +984,16 @@ void Player::decodingThread() {
                 totalBytesRead_.fetch_add(packet->size);
 
                 if (packet->stream_index == demuxer_->getVideoStreamIndex()) {
+                    // 录像：写入视频 packet
+                    if (videoRecorder_ && videoRecorder_->isRecording()) {
+                        videoRecorder_->writePacket(packet, packet->stream_index);
+                    }
                     videoDecoder_->sendPacket(packet);
                 } else if (audioDecoder_ && packet->stream_index == demuxer_->getAudioStreamIndex()) {
+                    // 录音：写入音频 packet
+                    if (audioRecorder_ && audioRecorder_->isRecording()) {
+                        audioRecorder_->writePacket(packet, packet->stream_index);
+                    }
                     audioDecoder_->sendPacket(packet);
                 }
                 av_packet_unref(packet);
@@ -1057,6 +1066,12 @@ void Player::cleanup() {
 
     // 停止所有线程
     shouldQuit_.store(true);
+
+    // 停止录制
+    if (videoRecorder_ && videoRecorder_->isRecording()) videoRecorder_->stop();
+    if (audioRecorder_ && audioRecorder_->isRecording()) audioRecorder_->stop();
+    videoRecorder_.reset();
+    audioRecorder_.reset();
 
     if (decodingThread_ && decodingThread_->joinable()) {
         decodingThread_->join();
@@ -1358,6 +1373,127 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     }
 
     return bytesWritten;
+}
+
+// ===== 录制控制 =====
+
+void Player::startVideoRecording() {
+    if (!demuxer_ || demuxer_->getVideoStreamIndex() < 0) {
+        LOG_WARN("Cannot record video: no video stream");
+        return;
+    }
+    if (videoRecorder_ && videoRecorder_->isRecording()) {
+        LOG_WARN("Video recording already in progress");
+        return;
+    }
+
+    auto& cfg = Config::getInstance().get();
+    auto quality = Recorder::parseQuality(cfg.recordQuality);
+
+    // 确定输出扩展名
+    std::string ext;
+    if (isLiveStream_ || quality != Recorder::Quality::ORIGINAL) {
+        ext = "mp4";
+    } else {
+        // 本地文件保留源格式
+        std::string src = filePath_;
+        auto dotPos = src.rfind('.');
+        ext = (dotPos != std::string::npos) ? src.substr(dotPos + 1) : "mp4";
+    }
+
+    // 生成文件名
+    auto now = std::chrono::system_clock::now();
+    auto timeT = std::chrono::system_clock::to_time_t(now);
+    std::tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &timeT);
+#else
+    localtime_r(&timeT, &tm);
+#endif
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
+    std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + "." + ext;
+
+    videoRecorder_ = std::make_unique<Recorder>();
+    if (!videoRecorder_->start(outputPath, Recorder::Mode::VIDEO_ONLY, quality,
+                                demuxer_->getFormatContext(),
+                                demuxer_->getVideoStreamIndex(),
+                                demuxer_->getAudioStreamIndex())) {
+        LOG_ERROR("Failed to start video recording");
+        videoRecorder_.reset();
+    }
+}
+
+void Player::stopVideoRecording() {
+    if (videoRecorder_ && videoRecorder_->isRecording()) {
+        videoRecorder_->stop();
+        LOG_INFO("Video recording stopped");
+    }
+}
+
+void Player::startAudioRecording() {
+    if (!demuxer_ || !audioDecoder_ || demuxer_->getAudioStreamIndex() < 0) {
+        LOG_WARN("Cannot record audio: no audio stream");
+        return;
+    }
+    if (audioRecorder_ && audioRecorder_->isRecording()) {
+        LOG_WARN("Audio recording already in progress");
+        return;
+    }
+
+    auto& cfg = Config::getInstance().get();
+
+    auto now = std::chrono::system_clock::now();
+    auto timeT = std::chrono::system_clock::to_time_t(now);
+    std::tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &timeT);
+#else
+    localtime_r(&timeT, &tm);
+#endif
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
+    std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + ".m4a";
+
+    audioRecorder_ = std::make_unique<Recorder>();
+    if (!audioRecorder_->start(outputPath, Recorder::Mode::AUDIO_ONLY, Recorder::Quality::ORIGINAL,
+                                demuxer_->getFormatContext(),
+                                demuxer_->getVideoStreamIndex(),
+                                demuxer_->getAudioStreamIndex())) {
+        LOG_ERROR("Failed to start audio recording");
+        audioRecorder_.reset();
+    }
+}
+
+void Player::stopAudioRecording() {
+    if (audioRecorder_ && audioRecorder_->isRecording()) {
+        audioRecorder_->stop();
+        LOG_INFO("Audio recording stopped");
+    }
+}
+
+bool Player::isVideoRecording() const {
+    return videoRecorder_ && videoRecorder_->isRecording();
+}
+
+bool Player::isAudioRecording() const {
+    return audioRecorder_ && audioRecorder_->isRecording();
+}
+
+double Player::getVideoRecordingTime() const {
+    return videoRecorder_ ? videoRecorder_->getElapsedSeconds() : 0.0;
+}
+
+double Player::getAudioRecordingTime() const {
+    return audioRecorder_ ? audioRecorder_->getElapsedSeconds() : 0.0;
+}
+
+int64_t Player::getVideoRecordingSize() const {
+    return videoRecorder_ ? videoRecorder_->getFileSize() : 0;
+}
+
+int64_t Player::getAudioRecordingSize() const {
+    return audioRecorder_ ? audioRecorder_->getFileSize() : 0;
 }
 
 } // namespace FluxPlayer

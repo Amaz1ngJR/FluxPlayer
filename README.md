@@ -19,6 +19,10 @@
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看
 - ⚙️ INI 配置文件，支持热重载
+- 📸 截图功能（PNG / JPEG，快捷键 P）
+- 🎥 录像功能（转封装原始流，支持 low/medium/high/original 四档质量）
+- 🎙️ 录音功能（自动适配 M4A / MKA 容器）
+- 🔁 循环播放
 
 ## 技术栈
 
@@ -41,9 +45,10 @@ FluxPlayer/
 │   ├── audio/            # 音频输出 (AudioOutput)
 │   ├── core/             # 播放器核心 (Player, AVSync, MediaInfo)
 │   ├── decoder/          # 解码器 (Demuxer, VideoDecoder, AudioDecoder, Frame)
+│   ├── recorder/         # 录制器 (Recorder)
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── ui/               # 界面 (Window, Controller, HomeScreen)
-│   └── utils/            # 工具 (Logger, Timer)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs
@@ -109,13 +114,60 @@ cmake -B build -DFFMPEG_ROOT="C:/ffmpeg"
 | `I` | 媒体信息 |
 | `S` | 统计信息 |
 | `H` | 强制切换 UI（默认鼠标移动自动显示/隐藏） |
+| `P` | 截图（保存当前视频帧） |
 | `Esc` | 退出 |
+
+## UI 控制按钮
+
+| 按钮 | 功能 |
+|------|------|
+| `Rec V` / `Stop V` | 开始 / 停止录像（录制中按钮变红，显示时长和文件大小） |
+| `Rec A` / `Stop A` | 开始 / 停止录音（录制中按钮变红，显示时长和文件大小） |
 
 ## 支持格式
 
 - 视频: H.264, H.265/HEVC, VP8, VP9, AV1
 - 音频: AAC, MP3, Opus, PCM
 - 容器: MP4, MKV, AVI, MOV, FLV, WebM
+
+## 配置文件
+
+程序首次运行时自动生成 `fluxplayer.ini`，后续修改值即可，切换界面时自动重载。
+
+```ini
+[Audio]
+volume=0.6                    # 音量 (0.0 ~ 1.0)
+
+[Log]
+logLevel=INFO                 # 日志级别 (DEBUG / INFO / WARN / ERROR)
+tcpLogPort=9999               # TCP 远程日志端口
+
+[Window]
+windowWidth=960               # 窗口默认宽度
+windowHeight=600              # 窗口默认高度
+
+[UI]
+uiVisible=true                # 是否显示控制面板
+showMediaInfo=true            # 是否显示媒体信息面板
+showStats=true                # 是否显示统计信息面板
+
+[Playback]
+loopPlayback=false            # 是否循环播放
+
+[Screenshot]
+screenshotDir=Screenshot      # 截图保存目录
+screenshotFormat=png          # 截图格式 (png / jpg)
+
+[Record]
+recordDir=Record              # 录制文件保存目录
+recordQuality=original        # 录像质量 (low / medium / high / original)
+```
+
+录像质量说明：
+- `original`：直接转封装原始流，零质量损失
+- `high`：H.264 重编码，8Mbps / CRF 18
+- `medium`：H.264 重编码，4Mbps / CRF 23
+- `low`：H.264 重编码，1Mbps / CRF 28
 
 ## TCP 远程日志
 
@@ -134,6 +186,40 @@ cmake -B build -DENABLE_TCP_LOG=ON && cmake --build build
 ```bash
 nc 127.0.0.1 9999
 ```
+
+## 测试流地址
+
+### RTMP
+
+| 说明 | 地址 |
+|------|------|
+| 伊拉克 Al Sharqiya 电视台 | `rtmp://ns8.indexforce.com/home/mystream` |
+
+### RTSP
+
+| 说明 | 地址 |
+|------|------|
+| Big Buck Bunny（Wowza 公共测试） | `rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4` |
+| 公共摄像头测试流 | `rtsp://demo:demo@ipvmdemo.dyndns.org:5541/onvif-media/media.amp?profile=profile_1_h264` |
+
+### HLS / M3U8
+
+| 说明 | 地址 |
+|------|------|
+| Apple 官方 HLS 测试流（BipBop） | `http://devimages.apple.com/iphone/samples/bipbop/gear1/prog_index.m3u8` |
+| Apple HLS 多码率测试 | `http://devimages.apple.com/iphone/samples/bipbop/bipbopall.m3u8` |
+| Wowza Big Buck Bunny HLS | `https://wowzaec2demo.streamlock.net/vod-chunklist/mp4:BigBuckBunny_115k.mp4/chunklist.m3u8` |
+| Akamai 直播测试流 | `https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8` |
+| ARTE 欧洲文化频道（法语） | `https://artesimulcast.akamaized.net/hls/live/2031003/artelive_fr/master.m3u8` |
+
+### HTTP 渐进式下载
+
+| 说明 | 地址 |
+|------|------|
+| Big Buck Bunny 360p MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4` |
+| Elephant Dream MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4` |
+
+> 注意：公共测试流可用性随时可能变化，如无法连接请更换其他地址。
 
 ## 技术要点
 

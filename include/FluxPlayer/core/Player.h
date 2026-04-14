@@ -24,6 +24,7 @@ class AVSync;
 class Frame;
 class AudioOutput;
 class Controller;
+class Recorder;
 
 /**
  * 播放器状态枚举
@@ -190,6 +191,19 @@ public:
      */
     bool isLoopPlayback() const { return loopPlayback_; }
 
+    // ===== 录制控制 =====
+
+    void startVideoRecording();
+    void stopVideoRecording();
+    void startAudioRecording();
+    void stopAudioRecording();
+    bool isVideoRecording() const;
+    bool isAudioRecording() const;
+    double getVideoRecordingTime() const;
+    double getAudioRecordingTime() const;
+    int64_t getVideoRecordingSize() const;
+    int64_t getAudioRecordingSize() const;
+
     // ===== 事件回调 =====
 
     /**
@@ -343,6 +357,10 @@ private:
 
     // UI 控制器（不拥有，由外部管理）
     Controller* controller_;
+
+    // 录制器
+    std::unique_ptr<Recorder> videoRecorder_;
+    std::unique_ptr<Recorder> audioRecorder_;
 
     // 最后渲染的帧（用于暂停时保留画面）
     std::shared_ptr<Frame> lastRenderedFrame_;

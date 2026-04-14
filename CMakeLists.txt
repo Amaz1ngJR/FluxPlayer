@@ -152,6 +152,7 @@ set(FLUXPLAYER_SOURCES
     src/utils/Logger.cpp
     src/utils/Screenshot.cpp
     src/utils/Timer.cpp
+    src/recorder/Recorder.cpp
     third_party/tinyfiledialogs/tinyfiledialogs.c
 )
 

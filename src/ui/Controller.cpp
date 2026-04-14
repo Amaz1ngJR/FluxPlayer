@@ -367,7 +367,11 @@ void Controller::renderBottomOverlay() {
 
     // 计算按钮组总宽度，居中定位
     const float btnSpacing = ImGui::GetStyle().ItemSpacing.x;
-    float buttonsW = 60.0f + btnSpacing + 50.0f;  // Play/Pause + spacing + Stop
+    bool isRecV = player_.isVideoRecording();
+    bool isRecA = player_.isAudioRecording();
+    float recVBtnW = isRecV ? 60.0f : 50.0f;
+    float recABtnW = isRecA ? 60.0f : 50.0f;
+    float buttonsW = 60.0f + btnSpacing + 50.0f + btnSpacing + recVBtnW + btnSpacing + recABtnW;
     float centerX = (ds.x - buttonsW) * 0.5f;
     ImGui::SetCursorPosX(centerX);
 
@@ -391,6 +395,72 @@ void Controller::renderBottomOverlay() {
         ImGui::BeginDisabled();
         ImGui::Button("Stop", ImVec2(50, btnH));
         ImGui::EndDisabled();
+    }
+
+    ImGui::SameLine();
+
+    // 录像按钮
+    if (isRecV) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::Button("Stop V", ImVec2(recVBtnW, btnH))) player_.stopVideoRecording();
+        ImGui::PopStyleColor(2);
+    } else if (canStop) {
+        if (ImGui::Button("Rec V", ImVec2(recVBtnW, btnH))) player_.startVideoRecording();
+    } else {
+        ImGui::BeginDisabled();
+        ImGui::Button("Rec V", ImVec2(recVBtnW, btnH));
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SameLine();
+
+    // 录音按钮
+    if (isRecA) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::Button("Stop A", ImVec2(recABtnW, btnH))) player_.stopAudioRecording();
+        ImGui::PopStyleColor(2);
+    } else if (canStop) {
+        if (ImGui::Button("Rec A", ImVec2(recABtnW, btnH))) player_.startAudioRecording();
+    } else {
+        ImGui::BeginDisabled();
+        ImGui::Button("Rec A", ImVec2(recABtnW, btnH));
+        ImGui::EndDisabled();
+    }
+
+    // 录制信息显示（时长 + 文件大小）
+    if (isRecV || isRecA) {
+        ImGui::SameLine();
+        std::string recInfo;
+        if (isRecV) {
+            double t = player_.getVideoRecordingTime();
+            int64_t sz = player_.getVideoRecordingSize();
+            int min = (int)t / 60, sec = (int)t % 60;
+            char buf[64];
+            if (sz < 1024 * 1024) {
+                snprintf(buf, sizeof(buf), "V %02d:%02d %.0fKB", min, sec, sz / 1024.0);
+            } else {
+                snprintf(buf, sizeof(buf), "V %02d:%02d %.1fMB", min, sec, sz / (1024.0 * 1024.0));
+            }
+            recInfo += buf;
+        }
+        if (isRecA) {
+            if (!recInfo.empty()) recInfo += " | ";
+            double t = player_.getAudioRecordingTime();
+            int64_t sz = player_.getAudioRecordingSize();
+            int min = (int)t / 60, sec = (int)t % 60;
+            char buf[64];
+            if (sz < 1024 * 1024) {
+                snprintf(buf, sizeof(buf), "A %02d:%02d %.0fKB", min, sec, sz / 1024.0);
+            } else {
+                snprintf(buf, sizeof(buf), "A %02d:%02d %.1fMB", min, sec, sz / (1024.0 * 1024.0));
+            }
+            recInfo += buf;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+        ImGui::Text("%s", recInfo.c_str());
+        ImGui::PopStyleColor();
     }
 
     // 音量区域（图标固定，滑块向右展开，延迟关闭）
