@@ -63,6 +63,7 @@ bool Config::load() {
                 else if (key == "screenshotFormat") settings_.screenshotFormat = value;
                 else if (key == "recordDir") settings_.recordDir = value;
                 else if (key == "recordQuality") settings_.recordQuality = value;
+                else if (key == "hwaccel") settings_.hwaccel = (value == "true" || value == "1");
             }
 
             lastModTime_ = getFileModTime();
@@ -107,7 +108,12 @@ bool Config::save() {
     file << "screenshotFormat=" << settings_.screenshotFormat << "\n\n";
     file << "[Record]\n";
     file << "recordDir=" << settings_.recordDir << "\n";
-    file << "recordQuality=" << settings_.recordQuality << "\n";
+    file << "recordQuality=" << settings_.recordQuality << "\n\n";
+    file << "[Decoder]\n";
+    file << "# hwaccel: 是否启用硬件加速解码 (true / false)\n";
+    file << "# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2\n";
+    file << "# 硬件解码可显著降低 CPU 占用，不支持时自动降级为软件解码\n";
+    file << "hwaccel=" << (settings_.hwaccel ? "true" : "false") << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
     return true;

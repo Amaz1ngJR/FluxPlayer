@@ -153,7 +153,7 @@ target("FluxPlayer")
     if is_plat("macosx") then
         add_frameworks("OpenGL", "Cocoa", "CoreVideo", "IOKit", "CoreFoundation", "AudioToolbox")
     elseif is_plat("windows") then
-        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32")
+        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32", "d3d11", "dxgi")
     elseif is_plat("linux") then
         add_syslinks("GL", "X11", "pthread", "dl")
     end

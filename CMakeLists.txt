@@ -196,6 +196,8 @@ elseif(WIN32)
         winmm
         ole32
         comdlg32
+        d3d11       # D3D11VA 硬件解码
+        dxgi        # DXGI 设备枚举
     )
 elseif(UNIX)
     target_link_libraries(FluxPlayer PRIVATE

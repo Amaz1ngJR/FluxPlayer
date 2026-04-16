@@ -400,9 +400,12 @@ void Player::run() {
                 // 渲染帧
                 renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
                 AVFrame* avFrame = frame->getAVFrame();
+                // 判断帧格式：硬件解码输出 NV12，软件解码输出 YUV420P
+                bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
                 renderer_->renderFrame(
                     avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                    avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2]
+                    avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
+                    isNV12
                 );
 
                 // 保存最后渲染的帧（用于暂停时显示）
@@ -419,9 +422,11 @@ void Player::run() {
                 if (lastRenderedFrame_) {
                     renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
                     AVFrame* avFrame = lastRenderedFrame_->getAVFrame();
+                    bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
                     renderer_->renderFrame(
                         avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                        avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2]
+                        avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
+                        isNV12
                     );
                 } else {
                     // 如果还没有渲染过任何帧，则清空屏幕
@@ -434,9 +439,11 @@ void Player::run() {
             if (lastRenderedFrame_) {
                 renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
                 AVFrame* avFrame = lastRenderedFrame_->getAVFrame();
+                bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
                 renderer_->renderFrame(
                     avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                    avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2]
+                    avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
+                    isNV12
                 );
             } else {
                 // 如果还没有渲染过任何帧，则清空屏幕
@@ -805,7 +812,7 @@ void Player::decodingThread() {
 
             // ===== 不需要丢弃的帧：进行 YUV 转换并加入队列 =====
             auto framePtr = std::make_shared<Frame>();
-            if (videoDecoder_->convertToYUV420P(rawFrame.getAVFrame(), *framePtr)) {
+            if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *framePtr)) {
                 // 等待直到队列有空间（带超时保护）
                 int waitCount = 0;
                 const int maxWait = 100;  // 最多等待100次 * 5ms = 500ms

@@ -12,6 +12,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <libavutil/hwcontext.h>
 }
 
 namespace FluxPlayer {
@@ -73,15 +74,18 @@ public:
     AVPixelFormat getPixelFormat() const { return m_pixelFormat; }
 
     /**
-     * @brief 将解码帧转换为 YUV420P 格式
+     * @brief 将解码帧转换为可渲染格式（NV12 或 YUV420P）
      *
-     * 当源帧不是 YUV420P 时（如 YUV422P、RGB 等），使用 libswscale 进行转换。
-     * SwsContext 会在首次调用时延迟初始化。
-     * @param srcFrame 源帧（解码器输出的原始格式）
-     * @param dstFrame 目标帧（转换后的 YUV420P 格式）
+     * 硬件解码帧：GPU→CPU 传输后输出 NV12（零拷贝，跳过 sws_scale）
+     * 软件解码帧：YUV420P 直接引用；其他格式通过 sws_scale 转换
+     * @param srcFrame 源帧（解码器输出）
+     * @param dstFrame 目标帧（可渲染格式）
      * @return 成功返回 true，失败返回 false
      */
-    bool convertToYUV420P(AVFrame* srcFrame, Frame& dstFrame);
+    bool prepareFrame(AVFrame* srcFrame, Frame& dstFrame);
+
+    /** @brief 是否正在使用硬件加速解码 */
+    bool isHWAccelActive() const { return m_hwDeviceCtx != nullptr; }
 
 private:
     AVCodecContext* m_codecCtx;     ///< 视频解码器上下文
@@ -91,6 +95,17 @@ private:
     int m_width;                    ///< 视频宽度（像素）
     int m_height;                   ///< 视频高度（像素）
     AVPixelFormat m_pixelFormat;    ///< 解码后的原始像素格式
+
+    // ==================== 硬件加速 ====================
+    AVBufferRef*  m_hwDeviceCtx;    ///< 硬件设备上下文，null = 软件解码
+    AVFrame*      m_hwTransferFrame;///< 可复用的 GPU→CPU 传输帧，避免每帧 alloc/free
+    AVPixelFormat m_lastSwsFormat;  ///< 上次 sws_scale 的源格式，用于检测格式变化
+
+    /** @brief 按平台优先级尝试初始化硬件解码设备 */
+    bool initHWAccel(AVCodecContext* codecCtx);
+
+    /** @brief 将硬件帧从 GPU 传输到 CPU（复用 outFrame 缓冲） */
+    bool transferHWFrame(AVFrame* hwFrame, AVFrame* outFrame);
 };
 
 } // namespace FluxPlayer

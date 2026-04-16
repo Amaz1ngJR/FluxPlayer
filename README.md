@@ -15,6 +15,8 @@
 - 📂 支持文件拖放打开
 - ⏱️ 音视频同步（音频时钟 / 视频时钟 / 外部时钟三种模式）
 - 🚀 FFmpeg 多线程解码，YUV420P 源帧零拷贝直通渲染
+- ⚡ 硬件加速解码（macOS VideoToolbox / Windows CUDA(NVDEC)、D3D11VA、DXVA2），默认开启，自动降级
+- 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU
 - 📡 RTSP 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看
@@ -29,7 +31,7 @@
 | 组件 | 技术 |
 |------|------|
 | 语言 | C++17 |
-| 视频解码 | FFmpeg 4.x / 6.x（自动适配） |
+| 视频解码 | FFmpeg 4.x / 6.x（自动适配），支持硬件加速 |
 | 图形渲染 | OpenGL 3.3+ |
 | 窗口管理 | GLFW 3.3.8 |
 | UI | Dear ImGui |
@@ -51,6 +53,7 @@ FluxPlayer/
 │   └── utils/            # 工具 (Config, Logger, Timer, Screenshot)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
+├── docs/                 # 技术文档
 ├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs
 ├── CMakeLists.txt
 └── xmake.lua
@@ -161,6 +164,9 @@ screenshotFormat=png          # 截图格式 (png / jpg)
 [Record]
 recordDir=Record              # 录制文件保存目录
 recordQuality=original        # 录像质量 (low / medium / high / original)
+
+[Decoder]
+hwaccel=true                  # 硬件加速解码 (macOS: VideoToolbox / Windows: CUDA > D3D11VA > DXVA2)
 ```
 
 录像质量说明：
@@ -231,9 +237,19 @@ nc 127.0.0.1 9999
 
 ### 视频渲染
 
-- YUV420P 三平面纹理上传（Y / U / V 独立纹理）
-- GLSL 片段着色器实现 YUV→RGB 色彩空间转换
+- 双格式纹理支持：YUV420P（Y/U/V 三纹理）和 NV12（Y + UV 双纹理）
+- GLSL 片段着色器通过 `isNV12` uniform 切换 YUV420P/NV12 采样路径
+- NV12 UV 交错平面直接映射为 GL_RG8 纹理，零拷贝跳过 sws_scale
 - 处理 FFmpeg linesize 与视频宽度不一致的内存对齐问题
+
+### 硬件加速解码
+
+- macOS: VideoToolbox（Apple Silicon / Intel Mac 专用媒体引擎）
+- Windows: CUDA(NVDEC) → D3D11VA → DXVA2 按优先级自动选择
+- 硬件帧通过 `av_hwframe_transfer_data()` 传输到 CPU（NV12 格式）
+- 复用传输帧缓冲（`m_hwTransferFrame`），避免每帧 alloc/free
+- 全部候选失败时自动降级为软件解码，用户无感知
+- 可通过 `hwaccel=false` 配置项强制关闭
 
 ### 音视频同步
 

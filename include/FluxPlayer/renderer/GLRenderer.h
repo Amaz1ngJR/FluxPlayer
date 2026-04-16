@@ -34,16 +34,18 @@ public:
     void destroy();
 
     /**
-     * @brief 渲染一帧 YUV420P 视频数据
+     * @brief 渲染一帧视频数据（支持 YUV420P 和 NV12 两种格式）
      * @param yData  Y（亮度）平面数据指针
-     * @param uData  U（色度Cb）平面数据指针
-     * @param vData  V（色度Cr）平面数据指针
-     * @param yPitch Y 平面每行字节数（linesize），可能因内存对齐大于视频宽度
-     * @param uPitch U 平面每行字节数
-     * @param vPitch V 平面每行字节数
+     * @param uData  YUV420P: U平面 / NV12: UV交错平面
+     * @param vData  YUV420P: V平面 / NV12: 不使用
+     * @param yPitch Y 平面每行字节数（linesize）
+     * @param uPitch YUV420P: U平面行字节数 / NV12: UV平面行字节数
+     * @param vPitch YUV420P: V平面行字节数 / NV12: 不使用
+     * @param isNV12 true = NV12 格式（硬件解码输出），false = YUV420P
      */
     void renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
-                     int yPitch, int uPitch, int vPitch);
+                     int yPitch, int uPitch, int vPitch,
+                     bool isNV12 = false);
 
     /**
      * @brief 清除屏幕为指定颜色
@@ -73,6 +75,15 @@ private:
     void updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                           int yPitch, int uPitch, int vPitch);
 
+    /**
+     * @brief 将 NV12 数据上传到 GPU 纹理（Y + UV 两个纹理）
+     * @param yData   Y 平面数据指针
+     * @param uvData  UV 交错平面数据指针
+     * @param yPitch  Y 平面行跨度
+     * @param uvPitch UV 平面行跨度
+     */
+    void updateNV12Textures(uint8_t* yData, uint8_t* uvData, int yPitch, int uvPitch);
+
     std::unique_ptr<Shader> m_shader;   ///< YUV→RGB 转换着色器程序
 
     GLuint m_VAO;       ///< 全屏四边形的顶点数组对象
@@ -81,6 +92,7 @@ private:
     GLuint m_textureY;  ///< Y（亮度）平面纹理，全分辨率
     GLuint m_textureU;  ///< U（色度Cb）平面纹理，1/2 宽 x 1/2 高
     GLuint m_textureV;  ///< V（色度Cr）平面纹理，1/2 宽 x 1/2 高
+    GLuint m_textureUV; ///< NV12 色度纹理（GL_RG8），硬件解码零拷贝渲染用
 
     int m_videoWidth;   ///< 当前视频帧宽度
     int m_videoHeight;  ///< 当前视频帧高度
