@@ -195,37 +195,47 @@ nc 127.0.0.1 9999
 
 ## 测试流地址
 
+> **提示**：公开测试流地址随时可能失效。如需稳定测试，建议用 FFmpeg 本地推流（见下方说明）。
+
+### HTTP 点播（最稳定，推荐先用这些测试）
+
+| 说明 | 地址 |
+|------|------|
+|||
+
 ### RTMP
 
 | 说明 | 地址 |
 |------|------|
 | 伊拉克 Al Sharqiya 电视台 | `rtmp://ns8.indexforce.com/home/mystream` |
 
-### RTSP
+### HLS 直播/点播
 
 | 说明 | 地址 |
 |------|------|
-| Big Buck Bunny（Wowza 公共测试） | `rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4` |
-| 公共摄像头测试流 | `rtsp://demo:demo@ipvmdemo.dyndns.org:5541/onvif-media/media.amp?profile=profile_1_h264` |
+| Apple 官方 HLS 测试流（HEVC，稳定） | `https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8` |
+| Apple 官方 HLS 测试流（H.264） | `https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8` |
 
-### HLS / M3U8
+### 本地推流测试（最可靠）
 
-| 说明 | 地址 |
-|------|------|
-| Apple 官方 HLS 测试流（BipBop） | `http://devimages.apple.com/iphone/samples/bipbop/gear1/prog_index.m3u8` |
-| Apple HLS 多码率测试 | `http://devimages.apple.com/iphone/samples/bipbop/bipbopall.m3u8` |
-| Wowza Big Buck Bunny HLS | `https://wowzaec2demo.streamlock.net/vod-chunklist/mp4:BigBuckBunny_115k.mp4/chunklist.m3u8` |
-| Akamai 直播测试流 | `https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8` |
-| ARTE 欧洲文化频道（法语） | `https://artesimulcast.akamaized.net/hls/live/2031003/artelive_fr/master.m3u8` |
+使用 FFmpeg + [MediaMTX](https://github.com/bluenviron/mediamtx) 搭建本地测试流：
 
-### HTTP 渐进式下载
+```bash
+# 1. 启动 MediaMTX（下载后直接运行即可）
+./mediamtx
 
-| 说明 | 地址 |
-|------|------|
-| Big Buck Bunny 360p MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4` |
-| Elephant Dream MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4` |
+# 2. 用 FFmpeg 推送本地文件为 RTSP 流（循环播放）
+ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f rtsp rtsp://localhost:8554/stream
 
-> 注意：公共测试流可用性随时可能变化，如无法连接请更换其他地址。
+# 3. 用 FluxPlayer 播放
+./FluxPlayer rtsp://localhost:8554/stream
+```
+
+也可以推 RTMP 流：
+
+```bash
+ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stream
+```
 
 ## 技术要点
 

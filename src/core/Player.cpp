@@ -118,11 +118,11 @@ bool Player::open(const std::string& filePath) {
         firstVideoPTS_.store(0.0);
         firstAudioPTS_.store(0.0);
 
-        // 实时流使用更大的音频队列，减少音频欠载（underrun）
-        // 网络抖动和延迟可能导致音频队列短暂为空
+        // 实时流使用更大的帧队列，减少网络抖动导致的欠载
+        MAX_VIDEO_QUEUE_SIZE = 30;  // 从10增大到30帧，应对网络抖动
         MAX_AUDIO_QUEUE_SIZE = 50;  // 从20增大到50帧
-        LOG_INFO("Live stream: Audio queue size increased to " +
-                std::to_string(MAX_AUDIO_QUEUE_SIZE) + " frames");
+        LOG_INFO("Live stream: Video queue=" + std::to_string(MAX_VIDEO_QUEUE_SIZE) +
+                 ", Audio queue=" + std::to_string(MAX_AUDIO_QUEUE_SIZE));
     }
 
     // 初始化解码器
@@ -217,7 +217,9 @@ bool Player::play() {
         videoFrameCount_.store(0);
         audioFrameCount_.store(0);
         liveStreamStartTime_.store(0.0);
-        LOG_INFO("Live stream: Reset PTS normalization state");
+        // 启动预缓冲：等待队列填充到安全水位再开始渲染
+        prebuffering_.store(true);
+        LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
     }
 
     // 启动解码线程
@@ -357,6 +359,19 @@ void Player::run() {
         // 从队列获取视频帧并渲染
         if (state_ == PlayerState::PLAYING) {
             std::shared_ptr<Frame> frame;
+
+            // ===== 预缓冲期间不取帧，等待队列填充到安全水位 =====
+            // 网络流起播时先缓冲一定帧数，避免因网络延迟导致的起播卡顿
+            if (prebuffering_.load()) {
+                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+                // 渲染 UI（如果有，让用户看到控制面板）
+                if (renderCallback_) {
+                    renderCallback_();
+                }
+                window_->swapBuffers();
+                glfwPollEvents();
+                continue;
+            }
 
             // ===== Seek期间暂停渲染，避免关键帧闪烁 =====
             // 在解码到目标位置的过程中，不从队列取帧，保持显示上一帧
@@ -681,6 +696,29 @@ void Player::decodingThread() {
         size_t audioQueueSize = 0;
         bool videoQueueFull = false;
         bool audioQueueFull = false;
+
+        // ===== 网络流预缓冲完成检测 =====
+        // 等待视频队列积累到 5 帧后再允许渲染线程取帧
+        if (prebuffering_.load()) {
+            std::lock_guard<std::mutex> lock(videoQueueMutex_);
+            size_t buffered = videoFrameQueue_.size();
+            if (buffered >= 5) {
+                prebuffering_.store(false);
+                LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
+            }
+        }
+
+        // ===== 动态音频队列扩容 =====
+        // 音频欠载过于频繁时，自动扩大队列深度以应对网络抖动
+        if (isLiveStream_) {
+            int underruns = audioUnderrunCount_.load();
+            if (underruns > 10 && MAX_AUDIO_QUEUE_SIZE < 100) {
+                MAX_AUDIO_QUEUE_SIZE = std::min(MAX_AUDIO_QUEUE_SIZE + 20, (size_t)100);
+                audioUnderrunCount_.store(0);
+                LOG_WARN("Audio underrun frequent, expanded queue to " +
+                         std::to_string(MAX_AUDIO_QUEUE_SIZE));
+            }
+        }
 
         // 只在非丢弃模式下检查队列状态
         if (!isDiscardingMode) {

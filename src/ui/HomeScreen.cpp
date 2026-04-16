@@ -547,7 +547,7 @@ void HomeScreen::renderUI() {
 
     // ── 底部支持格式列表（淡灰色，固定在卡片底部） ──
     {
-        const char* hint = "MP4  MKV  AVI  MOV  FLV  RTSP  RTMP  HTTP  HLS";
+        const char* hint = "MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS";
         float hw = ImGui::CalcTextSize(hint).x;
         // 计算底部 Y 坐标：卡片高度 - 下内边距 - 文字行高 - 微调
         float bottomY = cardH - ImGui::GetStyle().WindowPadding.y - ImGui::GetTextLineHeight() - 4.0f;
