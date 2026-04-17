@@ -87,6 +87,11 @@ public:
     /** @brief 是否正在使用硬件加速解码 */
     bool isHWAccelActive() const { return m_hwDeviceCtx != nullptr; }
 
+#if defined(_WIN32)
+    /** @brief 获取当前硬件加速设备类型，未启用时返回 AV_HWDEVICE_TYPE_NONE */
+    AVHWDeviceType getHWDeviceType() const;
+#endif
+
 private:
     AVCodecContext* m_codecCtx;     ///< 视频解码器上下文
     SwsContext* m_swsCtx;           ///< 图像格式转换上下文（延迟初始化）

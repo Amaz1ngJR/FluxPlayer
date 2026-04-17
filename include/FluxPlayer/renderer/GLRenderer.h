@@ -8,6 +8,7 @@
 #include "Shader.h"
 #include <glad/glad.h>
 #include <memory>
+#include <vector>
 
 namespace FluxPlayer {
 
@@ -48,6 +49,17 @@ public:
                      bool isNV12 = false);
 
     /**
+     * @brief 设置 NV12 渲染是否使用 UV 解交错模式
+     *
+     * GL_RG8 纹理在某些 GPU/驱动上存在兼容性问题（如 CUDA + NVIDIA），
+     * 此时需要将 NV12 的交错 UV 解交错为独立 U/V 平面后上传。
+     * D3D11VA/DXVA2/VideoToolbox 等后端可使用 GL_RG8 真零拷贝。
+     *
+     * @param enable true = UV 解交错模式（兼容性优先），false = GL_RG8 模式（性能优先）
+     */
+    void setNV12Deinterleave(bool enable) { m_nv12Deinterleave = enable; }
+
+    /**
      * @brief 清除屏幕为指定颜色
      * @param r 红色分量 (0.0~1.0)
      * @param g 绿色分量 (0.0~1.0)
@@ -76,7 +88,12 @@ private:
                           int yPitch, int uPitch, int vPitch);
 
     /**
-     * @brief 将 NV12 数据上传到 GPU 纹理（Y + UV 两个纹理）
+     * @brief 将 NV12 数据上传到 GPU 纹理
+     *
+     * 根据 m_nv12Deinterleave 标志选择策略：
+     * - true:  UV 解交错后上传到独立 U/V 纹理（兼容模式，用于 CUDA）
+     * - false: 直接上传到 GL_RG8 纹理（零拷贝模式，用于 D3D11VA 等）
+     *
      * @param yData   Y 平面数据指针
      * @param uvData  UV 交错平面数据指针
      * @param yPitch  Y 平面行跨度
@@ -92,10 +109,17 @@ private:
     GLuint m_textureY;  ///< Y（亮度）平面纹理，全分辨率
     GLuint m_textureU;  ///< U（色度Cb）平面纹理，1/2 宽 x 1/2 高
     GLuint m_textureV;  ///< V（色度Cr）平面纹理，1/2 宽 x 1/2 高
-    GLuint m_textureUV; ///< NV12 色度纹理（GL_RG8），硬件解码零拷贝渲染用
+    GLuint m_textureUV; ///< NV12 色度纹理（GL_RG8），保留用于未来 GL_RG8 兼容的 GPU
 
     int m_videoWidth;   ///< 当前视频帧宽度
     int m_videoHeight;  ///< 当前视频帧高度
+
+    /// NV12 渲染模式：true = UV 解交错（CUDA 兼容），false = GL_RG8 零拷贝
+    bool m_nv12Deinterleave = false;
+
+    /// NV12 UV 解交错缓冲区（预分配，避免每帧动态分配）
+    std::vector<uint8_t> m_nv12UBuffer;  ///< 解交错后的 U 平面
+    std::vector<uint8_t> m_nv12VBuffer;  ///< 解交错后的 V 平面
 };
 
 } // namespace FluxPlayer

@@ -15,6 +15,25 @@ extern "C" {
 
 namespace FluxPlayer {
 
+/**
+ * get_format 回调：选择硬件加速像素格式
+ * 这是使用 FFmpeg 硬件加速的关键步骤，确保解码器正确选择 CUDA/VIDEOTOOLBOX 等格式
+ */
+static enum AVPixelFormat getHWFormat(AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) {
+    AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
+    if (ctx->hw_device_ctx)
+        type = reinterpret_cast<AVHWDeviceContext*>(ctx->hw_device_ctx->data)->type;
+
+    for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        if ((type == AV_HWDEVICE_TYPE_CUDA         && *p == AV_PIX_FMT_CUDA)         ||
+            (type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX && *p == AV_PIX_FMT_VIDEOTOOLBOX) ||
+            (type == AV_HWDEVICE_TYPE_D3D11VA      && *p == AV_PIX_FMT_D3D11)        ||
+            (type == AV_HWDEVICE_TYPE_DXVA2        && *p == AV_PIX_FMT_DXVA2_VLD))
+            return *p;
+    }
+    return pix_fmts[0];
+}
+
 VideoDecoder::VideoDecoder()
     : m_codecCtx(nullptr)
     , m_swsCtx(nullptr)
@@ -76,7 +95,12 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
 
     // 步骤3.5：尝试硬件加速（失败不影响后续软件解码）
     if (Config::getInstance().get().hwaccel) {
-        initHWAccel(m_codecCtx);
+        if (initHWAccel(m_codecCtx)) {
+            // 设置 get_format 回调，这是硬件加速的关键步骤
+            // 没有这个回调，FFmpeg 无法正确选择 CUDA/VIDEOTOOLBOX 等硬件格式
+            m_codecCtx->get_format = getHWFormat;
+            LOG_DEBUG("get_format callback set for hardware acceleration");
+        }
     }
 
     // 启用多线程解码（0 = FFmpeg 自动选择最优线程数）
@@ -227,10 +251,14 @@ void VideoDecoder::flush() {
     }
 }
 
-/**
- * 按平台优先级尝试初始化硬件解码设备
- * 失败不影响后续软件解码
- */
+#if defined(_WIN32)
+AVHWDeviceType VideoDecoder::getHWDeviceType() const {
+    if (!m_hwDeviceCtx) return AV_HWDEVICE_TYPE_NONE;
+    AVHWDeviceContext* ctx = reinterpret_cast<AVHWDeviceContext*>(m_hwDeviceCtx->data);
+    return ctx->type;
+}
+#endif
+
 bool VideoDecoder::initHWAccel(AVCodecContext* codecCtx) {
 #if defined(__APPLE__)
     const AVHWDeviceType candidates[] = {

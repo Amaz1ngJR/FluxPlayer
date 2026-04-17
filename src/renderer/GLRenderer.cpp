@@ -165,8 +165,6 @@ void GLRenderer::destroy() {
 void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                               int yPitch, int uPitch, int vPitch, bool isNV12) {
     // 步骤1：根据像素格式选择对应的纹理上传路径
-    // NV12: Y + UV 两个纹理（硬件解码零拷贝路径）
-    // YUV420P: Y + U + V 三个纹理（软件解码路径）
     if (isNV12) {
         updateNV12Textures(yData, uData, yPitch, uPitch);
     } else {
@@ -174,18 +172,21 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     }
 
     // 步骤2：绑定纹理到对应的纹理单元
-    glActiveTexture(GL_TEXTURE0);  // 纹理单元 0：Y 平面（两种格式共用）
+    // NV12 解交错模式下数据已拆分到 U/V 纹理，与 YUV420P 一致
+    // NV12 GL_RG8 模式下 UV 数据在 m_textureUV 中，需要 shader 区分采样方式
+    bool useNV12Shader = isNV12 && !m_nv12Deinterleave;
+
+    glActiveTexture(GL_TEXTURE0);  // 纹理单元 0：Y 平面（亮度）
     glBindTexture(GL_TEXTURE_2D, m_textureY);
-    glActiveTexture(GL_TEXTURE1);  // 纹理单元 1：NV12 用 UV 纹理(GL_RG8)，YUV420P 用 U 纹理(GL_RED)
-    glBindTexture(GL_TEXTURE_2D, isNV12 ? m_textureUV : m_textureU);
-    glActiveTexture(GL_TEXTURE2);  // 纹理单元 2：V 平面（仅 YUV420P 使用）
+    glActiveTexture(GL_TEXTURE1);  // 纹理单元 1：U 平面 或 NV12 UV 纹理
+    glBindTexture(GL_TEXTURE_2D, useNV12Shader ? m_textureUV : m_textureU);
+    glActiveTexture(GL_TEXTURE2);  // 纹理单元 2：V 平面（仅 YUV420P / 解交错模式使用）
     glBindTexture(GL_TEXTURE_2D, m_textureV);
 
     // 步骤3：使用着色器程序并绘制全屏四边形
-    // 着色器通过 isNV12 uniform 区分 UV 采样方式
-    // 片段着色器会对每个像素进行 YUV→RGB 转换
+    // 片段着色器对每个像素进行 YUV→RGB (BT.709) 转换
     m_shader->use();
-    m_shader->setInt("isNV12", isNV12 ? 1 : 0);
+    m_shader->setInt("isNV12", useNV12Shader ? 1 : 0);
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);  // 绘制 6 个顶点（2 个三角形）
     glBindVertexArray(0);
@@ -270,51 +271,36 @@ void GLRenderer::setupQuad() {
  * 更新 YUV 纹理数据
  * @param yData, uData, vData YUV 三个平面的数据指针
  * @param yPitch, uPitch, vPitch 各平面的行跨度（linesize）
- *
- * Pitch/Linesize 说明：
- * FFmpeg 解码后的数据可能有内存对齐，导致每行实际字节数 > 实际宽度
- * 例如：宽度 1920，但 pitch 可能是 1920 或 1984（对齐到 64 字节）
  */
 void GLRenderer::updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                                    int yPitch, int uPitch, int vPitch) {
+    // 始终显式设置像素存储参数，防止外部代码（如 ImGui）修改后未恢复
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
     // 更新 Y 纹理（亮度平面）
     glBindTexture(GL_TEXTURE_2D, m_textureY);
-    if (yPitch == m_videoWidth) {
-        // pitch 等于宽度，可以直接上传
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth, m_videoHeight, GL_RED, GL_UNSIGNED_BYTE, yData);
-    } else {
-        // pitch 不等于宽度，需要设置 GL_UNPACK_ROW_LENGTH 处理行对齐
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, yPitch);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth, m_videoHeight, GL_RED, GL_UNSIGNED_BYTE, yData);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);  // 恢复默认值
-    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, yPitch);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth, m_videoHeight, GL_RED, GL_UNSIGNED_BYTE, yData);
 
     // 更新 U 纹理（色度U平面）
     glBindTexture(GL_TEXTURE_2D, m_textureU);
-    if (uPitch == m_videoWidth / 2) {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, uData);
-    } else {
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, uPitch);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, uData);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, uPitch);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, uData);
 
     // 更新 V 纹理（色度V平面）
     glBindTexture(GL_TEXTURE_2D, m_textureV);
-    if (vPitch == m_videoWidth / 2) {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, vData);
-    } else {
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, vPitch);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, vData);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    }
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, vPitch);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, vData);
 
+    // 恢复默认值
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
     LOG_DEBUG("YUV textures updated");
 }
 
 /**
- * 更新 NV12 纹理数据（硬件解码零拷贝路径）
+ * 更新 NV12 纹理数据（硬件解码路径）
  * @param yData  Y 平面数据指针（全分辨率亮度）
  * @param uvData UV 交错平面数据指针（半分辨率，每像素 2 字节：U + V）
  * @param yPitch  Y 平面行跨度（字节数）
@@ -323,39 +309,66 @@ void GLRenderer::updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vDat
  * NV12 格式内存布局：
  * Y 平面：  [Y0][Y1][Y2][Y3]...  每行 width 字节
  * UV 平面： [U0][V0][U1][V1]...  每行 width 字节（U/V 交错存储）
- * UV 平面宽高各为 Y 平面的一半（像素维度），但每个像素占 2 字节
+ *
+ * 支持两种上传策略（由 m_nv12Deinterleave 控制）：
+ * - GL_RG8 零拷贝：直接上传交错 UV 到双通道纹理（D3D11VA/DXVA2/VideoToolbox）
+ * - UV 解交错：拆分为独立 U/V 后上传到单通道纹理（CUDA 兼容模式）
  */
 void GLRenderer::updateNV12Textures(uint8_t* yData, uint8_t* uvData,
                                      int yPitch, int uvPitch) {
-    // 更新 Y 纹理（亮度平面，与 YUV420P 完全相同）
+    // 始终显式设置像素存储参数，防止外部代码修改后未恢复
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    // ===== Y 平面上传（两种模式共用） =====
     glBindTexture(GL_TEXTURE_2D, m_textureY);
-    if (yPitch == m_videoWidth) {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth, m_videoHeight,
-                        GL_RED, GL_UNSIGNED_BYTE, yData);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, yPitch);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth, m_videoHeight,
+                    GL_RED, GL_UNSIGNED_BYTE, yData);
+
+    // ===== UV 平面上传（根据模式选择策略） =====
+    if (m_nv12Deinterleave) {
+        // 解交错模式：将 [U0,V0,U1,V1,...] 拆分为独立 U/V 平面
+        // 用于 CUDA 等 GL_RG8 纹理存在兼容性问题的后端
+        const int chromaWidth  = m_videoWidth  / 2;
+        const int chromaHeight = m_videoHeight / 2;
+        const size_t chromaSize = static_cast<size_t>(chromaWidth) * chromaHeight;
+
+        // 按需分配解交错缓冲区（仅首次或分辨率变化时分配）
+        if (m_nv12UBuffer.size() != chromaSize) {
+            m_nv12UBuffer.resize(chromaSize);
+            m_nv12VBuffer.resize(chromaSize);
+        }
+
+        for (int row = 0; row < chromaHeight; row++) {
+            const uint8_t* src = uvData + row * uvPitch;
+            uint8_t* dstU = m_nv12UBuffer.data() + row * chromaWidth;
+            uint8_t* dstV = m_nv12VBuffer.data() + row * chromaWidth;
+            for (int col = 0; col < chromaWidth; col++) {
+                dstU[col] = src[col * 2];      // 偶数字节 → U (Cb)
+                dstV[col] = src[col * 2 + 1];  // 奇数字节 → V (Cr)
+            }
+        }
+
+        // 上传到独立的 U/V 纹理（与 YUV420P 相同的 GL_RED 纹理）
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);  // 解交错后无行填充
+        glBindTexture(GL_TEXTURE_2D, m_textureU);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, chromaWidth, chromaHeight,
+                        GL_RED, GL_UNSIGNED_BYTE, m_nv12UBuffer.data());
+        glBindTexture(GL_TEXTURE_2D, m_textureV);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, chromaWidth, chromaHeight,
+                        GL_RED, GL_UNSIGNED_BYTE, m_nv12VBuffer.data());
     } else {
-        // pitch 不等于宽度，需要设置 GL_UNPACK_ROW_LENGTH 处理行对齐
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, yPitch);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth, m_videoHeight,
-                        GL_RED, GL_UNSIGNED_BYTE, yData);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        // GL_RG8 零拷贝模式：直接上传交错 UV 到双通道纹理
+        // 用于 D3D11VA/DXVA2/VideoToolbox 等 GL_RG8 兼容的后端
+        glBindTexture(GL_TEXTURE_2D, m_textureUV);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, uvPitch / 2);  // GL_RG: 2 bytes/pixel
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2,
+                        GL_RG, GL_UNSIGNED_BYTE, uvData);
     }
 
-    // 更新 UV 交错纹理（GL_RG 格式，每像素 2 字节）
-    // uvPitch 是字节数，GL_RG 每像素 2 字节，所以 ROW_LENGTH 需要除以 2
-    glBindTexture(GL_TEXTURE_2D, m_textureUV);
-    int uvWidthPixels = m_videoWidth / 2;
-    if (uvPitch == m_videoWidth) {
-        // pitch == width（字节数），即 uvPitch == uvWidthPixels * 2
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidthPixels, m_videoHeight / 2,
-                        GL_RG, GL_UNSIGNED_BYTE, uvData);
-    } else {
-        // pitch 不等于宽度，设置 ROW_LENGTH（以像素为单位）
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, uvPitch / 2);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, uvWidthPixels, m_videoHeight / 2,
-                        GL_RG, GL_UNSIGNED_BYTE, uvData);
-        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    }
-
+    // 恢复默认值
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
     LOG_DEBUG("NV12 textures updated");
 }

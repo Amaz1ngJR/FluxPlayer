@@ -1258,6 +1258,14 @@ bool Player::initWindowAndRenderer() {
         return false;
     }
 
+#if defined(_WIN32)
+    // CUDA 后端的 NV12 与 GL_RG8 纹理存在兼容性问题，启用 UV 解交错模式
+    if (videoDecoder_ && videoDecoder_->getHWDeviceType() == AV_HWDEVICE_TYPE_CUDA) {
+        renderer_->setNV12Deinterleave(true);
+        LOG_INFO("NV12 deinterleave mode enabled for CUDA backend");
+    }
+#endif
+
     LOG_INFO("Window and renderer initialized successfully");
     return true;
 }

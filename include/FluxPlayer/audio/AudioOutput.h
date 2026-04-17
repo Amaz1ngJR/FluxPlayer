@@ -28,7 +28,7 @@ namespace FluxPlayer {
  *
  * 支持跨平台音频播放：
  * - macOS: AudioToolbox/CoreAudio
- * - Windows: WinMM/WASAPI (待实现)
+ * - Windows: WinMM/WASAPI 
  * - Linux: ALSA/PulseAudio (待实现)
  */
 class AudioOutput {
