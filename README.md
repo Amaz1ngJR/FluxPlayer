@@ -16,8 +16,9 @@
 - ⏱️ 音视频同步（音频时钟 / 视频时钟 / 外部时钟三种模式）
 - 🚀 FFmpeg 多线程解码，YUV420P 源帧零拷贝直通渲染
 - ⚡ 硬件加速解码（macOS VideoToolbox / Windows CUDA(NVDEC)、D3D11VA、DXVA2），默认开启，自动降级
-- 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU
-- 📡 RTSP 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
+- 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU；CUDA 后端自动解交错兼容
+- 📡 RTSP/RTMP/HLS 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
+- 🌊 网络流自适应缓冲：视频队列 30 帧、预缓冲 5 帧起播，音频队列动态扩容（上限 100 帧）
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看
 - ⚙️ INI 配置文件，支持热重载
@@ -258,6 +259,7 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 - Windows: CUDA(NVDEC) → D3D11VA → DXVA2 按优先级自动选择
 - 硬件帧通过 `av_hwframe_transfer_data()` 传输到 CPU（NV12 格式）
 - 复用传输帧缓冲（`m_hwTransferFrame`），避免每帧 alloc/free
+- CUDA 后端：`getHWFormat` 回调确保 FFmpeg 正确协商硬件像素格式；UV 解交错模式解决 GL_RG8 兼容性绿屏问题
 - 全部候选失败时自动降级为软件解码，用户无感知
 - 可通过 `hwaccel=false` 配置项强制关闭
 
@@ -271,11 +273,13 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 ### 网络流处理
 
 - 支持 RTSP / RTMP / HTTP / HLS 协议
+- 实时流识别：URL 协议头检测 + HLS 格式名 + duration==0 多重判断，修复 RTMP 被解析为 FLV 格式名漏判
+- 按协议设置专用选项：HLS 断流重连、RTSP 1MB 缓冲区、RTMP 直播模式
 - 实时流 PTS 基准校准（音视频首帧 PTS 对齐）
 - PTS 回绕检测：视频回绕时跳帧等待，音频回绕时统一重校准基准
 - 无效 PTS（AV_NOPTS_VALUE）帧基于实际帧率 / 采样率估算 PTS，不丢弃
 - 网络断流指数退避重试（100ms → 3000ms，最多 30 次）
-- 动态音频队列深度调整
+- 网络流视频队列 30 帧 + 预缓冲 5 帧起播；音频队列欠载时动态扩容（上限 100 帧）
 
 ### FFmpeg 版本兼容
 
