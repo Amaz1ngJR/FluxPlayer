@@ -42,3 +42,9 @@ recordDir=Record
 # recordQuality: 录像质量 (low / medium / high / original)
 # low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流
 recordQuality=original
+
+[Decoder]
+# hwaccel: 是否启用硬件加速解码 (true / false)
+# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2
+# 硬件解码可显著降低 CPU 占用，对不支持的编解码器会自动降级为软件解码
+hwaccel=true

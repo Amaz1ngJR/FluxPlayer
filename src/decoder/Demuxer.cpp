@@ -37,20 +37,37 @@ bool Demuxer::open(const std::string& filename) {
                            filename.find("https://") == 0);
 
     // 步骤1：配置网络流选项（如果是网络流）
+    // 不同协议需要不同的选项，按协议类型分别设置
     AVDictionary* options = nullptr;
     if (isNetworkStream) {
         LOG_INFO("Detected network stream, setting options");
-        // RTSP 传输协议：tcp 更稳定，udp 延迟更低
-        av_dict_set(&options, "rtsp_transport", "tcp", 0);
-        // 连接超时时间（微秒），5秒
-        av_dict_set(&options, "stimeout", "5000000", 0);
-        // 最大延迟（微秒），减少缓冲延迟
+
+        // 通用选项：减少缓冲延迟
         av_dict_set(&options, "max_delay", "500000", 0);
-        // 重连次数
-        av_dict_set(&options, "reconnect", "1", 0);
-        // 重连延迟时间（秒）
-        av_dict_set(&options, "reconnect_delay_max", "2", 0);
-        LOG_DEBUG("Network options: rtsp_transport=tcp, timeout=5s");
+
+        // === HTTP/HLS 专用选项 ===
+        // HLS 通过 HTTP 分片传输，断流重连至关重要
+        if (filename.find("http://") == 0 || filename.find("https://") == 0) {
+            av_dict_set(&options, "reconnect", "1", 0);                  // 连接断开后重连
+            av_dict_set(&options, "reconnect_streamed", "1", 0);         // 流传输中也重连
+            av_dict_set(&options, "reconnect_on_network_error", "1", 0); // 网络错误时重连
+            av_dict_set(&options, "reconnect_delay_max", "5", 0);        // 最大重连延迟 5 秒
+            LOG_DEBUG("HTTP/HLS options: reconnect_streamed, reconnect_on_network_error");
+        }
+
+        // === RTSP 专用选项 ===
+        if (filename.find("rtsp://") == 0) {
+            av_dict_set(&options, "rtsp_transport", "tcp", 0);    // TCP 更稳定，UDP 延迟更低
+            av_dict_set(&options, "stimeout", "5000000", 0);      // 连接超时 5 秒
+            av_dict_set(&options, "buffer_size", "1048576", 0);   // 1MB 接收缓冲区，减少丢包
+            LOG_DEBUG("RTSP options: tcp, stimeout=5s, buffer_size=1MB");
+        }
+
+        // === RTMP 专用选项 ===
+        if (filename.find("rtmp://") == 0) {
+            av_dict_set(&options, "rtmp_live", "live", 0);  // 直播模式，禁用 seek
+            LOG_DEBUG("RTMP options: rtmp_live=live");
+        }
     }
 
     // 步骤2：打开输入文件或流
@@ -233,17 +250,26 @@ bool Demuxer::isLiveStream() const {
         return false;
     }
     // 实时流的特征：
-    // 1. duration 无效（AV_NOPTS_VALUE 或 < 0）
+    // 1. duration 无效（AV_NOPTS_VALUE、< 0 或 == 0）
     // 2. 或者是 RTSP/RTMP 等网络流格式
+    //    注意：RTMP 流被 FFmpeg 解析为 FLV 格式，formatName 是 "flv" 而非 "rtmp"
+    //    因此需要同时检查 URL 协议头
     bool hasInvalidDuration = (m_formatCtx->duration == AV_NOPTS_VALUE ||
-                               m_formatCtx->duration < 0);
+                               m_formatCtx->duration <= 0);
 
     const char* formatName = m_formatCtx->iformat ? m_formatCtx->iformat->name : "";
     bool isStreamFormat = (std::string(formatName).find("rtsp") != std::string::npos ||
                           std::string(formatName).find("rtmp") != std::string::npos ||
-                          std::string(formatName).find("rtp") != std::string::npos);
+                          std::string(formatName).find("rtp") != std::string::npos ||
+                          std::string(formatName).find("hls") != std::string::npos);
 
-    return hasInvalidDuration || isStreamFormat;
+    // 通过 URL 协议头补充检测（RTMP 流实际被解析为 FLV 格式）
+    const char* url = m_formatCtx->url ? m_formatCtx->url : "";
+    bool isNetworkProtocol = (std::string(url).find("rtsp://") == 0 ||
+                             std::string(url).find("rtmp://") == 0 ||
+                             std::string(url).find("rtp://") == 0);
+
+    return hasInvalidDuration || isStreamFormat || isNetworkProtocol;
 }
 
 int Demuxer::getWidth() const {

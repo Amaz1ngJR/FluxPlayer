@@ -236,6 +236,9 @@ bool AudioDecoder::receiveFrame(Frame& frame) {
  * @param srcFrame 源音频帧（解码后的原始格式）
  * @param dstFrame 目标音频帧（S16 格式）
  * @return 成功返回 true，失败返回 false
+ *
+ * 零拷贝优化：直接让 swr_convert 写入 AVFrame 的缓冲区，
+ * 避免中间临时 buffer 的分配和 memcpy。
  */
 bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
     if (!m_swrCtx || !srcFrame) {
@@ -243,7 +246,7 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
         return false;
     }
 
-    // 计算输出缓冲区大小
+    // 计算输出采样数（考虑重采样器内部延迟）
     int outSamples = av_rescale_rnd(
         swr_get_delay(m_swrCtx, m_sampleRate) + srcFrame->nb_samples,
         m_sampleRate,
@@ -251,32 +254,8 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
         AV_ROUND_UP
     );
 
-    // 分配输出缓冲区
-    uint8_t* outBuffer = nullptr;
-    int outLinesize = 0;
-    int ret = av_samples_alloc(&outBuffer, &outLinesize, m_channels,
-                                outSamples, AV_SAMPLE_FMT_S16, 0);
-    if (ret < 0) {
-        char errBuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to allocate audio output buffer: " + std::string(errBuf));
-        return false;
-    }
-
-    // 执行音频转换
-    int convertedSamples = swr_convert(m_swrCtx,
-        &outBuffer, outSamples,
-        (const uint8_t**)srcFrame->data, srcFrame->nb_samples);
-
-    if (convertedSamples < 0) {
-        char errBuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(convertedSamples, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to convert audio samples: " + std::string(errBuf));
-        av_freep(&outBuffer);
-        return false;
-    }
-
-    // 分配目标帧
+    // 直接在目标 AVFrame 上分配缓冲区，让 swr_convert 直接写入
+    // 省去中间临时 buffer 的分配和 memcpy
     AVFrame* dstAVFrame = dstFrame.getAVFrame();
     dstAVFrame->format = AV_SAMPLE_FMT_S16;
     dstAVFrame->sample_rate = m_sampleRate;
@@ -286,24 +265,30 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
     dstAVFrame->channels = m_channels;
     dstAVFrame->channel_layout = av_get_default_channel_layout(m_channels);
 #endif
-    dstAVFrame->nb_samples = convertedSamples;
+    dstAVFrame->nb_samples = outSamples;
 
-    // 分配帧缓冲区
-    ret = av_frame_get_buffer(dstAVFrame, 0);
+    int ret = av_frame_get_buffer(dstAVFrame, 0);
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
         LOG_ERROR("Failed to allocate frame buffer: " + std::string(errBuf));
-        av_freep(&outBuffer);
         return false;
     }
 
-    // 复制转换后的数据
-    int dataSize = convertedSamples * m_channels * 2;  // 2 bytes per sample (S16)
-    memcpy(dstAVFrame->data[0], outBuffer, dataSize);
+    // 直接将重采样结果写入 AVFrame 的 data 缓冲区（零拷贝）
+    int convertedSamples = swr_convert(m_swrCtx,
+        dstAVFrame->data, outSamples,
+        (const uint8_t**)srcFrame->data, srcFrame->nb_samples);
 
-    // 清理临时缓冲区
-    av_freep(&outBuffer);
+    if (convertedSamples < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(convertedSamples, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to convert audio samples: " + std::string(errBuf));
+        return false;
+    }
+
+    // 更新实际转换的采样数（可能少于预分配的 outSamples）
+    dstAVFrame->nb_samples = convertedSamples;
 
     LOG_DEBUG("Audio frame converted to S16: " + std::to_string(convertedSamples) + " samples");
     return true;

@@ -7,6 +7,7 @@
 
 #include "FluxPlayer/renderer/Shader.h"
 #include "FluxPlayer/utils/Logger.h"
+#include <glad/glad.h>
 #include <fstream>
 #include <sstream>
 

@@ -1,13 +1,20 @@
+# CMake 最低版本要求。3.16 起支持预编译头（target_precompile_headers）
 cmake_minimum_required(VERSION 3.16)
+
+# 声明项目名称、版本，启用 C 和 C++ 两种语言
 project(FluxPlayer VERSION 0.1.0 LANGUAGES C CXX)
 
+# 要求使用 C++17 标准，且不允许降级
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 生成 compile_commands.json，供 clangd/ccache 等工具使用
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ========================
 # 配置路径
 # ========================
-# FFmpeg 路径
+# 如果外部没有通过 -DFFMPEG_ROOT=... 指定路径，则按平台设置默认值
 if(NOT DEFINED FFMPEG_ROOT)
     if(WIN32)
         set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg")
@@ -19,21 +26,23 @@ if(NOT DEFINED FFMPEG_ROOT)
 endif()
 
 # ========================
-# 1. GLAD 库（静态库）
+# 1. GLAD（OpenGL 函数加载器）
 # ========================
+# add_library(名称 类型 源文件...) — 编译为静态库 .a/.lib
 add_library(glad STATIC
     third_party/glad/src/glad.c
 )
+# PUBLIC 表示：使用 glad 的目标也会自动获得这个头文件搜索路径
 target_include_directories(glad PUBLIC
     third_party/glad/include
 )
 
 # ========================
-# 2. GLFW 库（静态库，从源码编译）
+# 2. GLFW（窗口和 OpenGL 上下文管理）
 # ========================
 set(GLFW_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glfw-3.3.8)
 
-# GLFW 公共源文件
+# GLFW 各平台共用的源文件
 set(GLFW_COMMON_SOURCES
     ${GLFW_SRC_DIR}/src/context.c
     ${GLFW_SRC_DIR}/src/init.c
@@ -45,8 +54,9 @@ set(GLFW_COMMON_SOURCES
     ${GLFW_SRC_DIR}/src/osmesa_context.c
 )
 
+# 根据当前平台选择对应的平台源文件和宏定义
 if(APPLE)
-    # macOS: Cocoa 后端
+    # macOS 使用 Cocoa 后端，需要编译 Objective-C (.m) 文件
     enable_language(OBJC)
     set(GLFW_PLATFORM_SOURCES
         ${GLFW_SRC_DIR}/src/cocoa_init.m
@@ -59,7 +69,7 @@ if(APPLE)
     )
     set(GLFW_PLATFORM_DEFINES _GLFW_COCOA)
 elseif(WIN32)
-    # Windows
+    # Windows 使用 Win32 后端
     set(GLFW_PLATFORM_SOURCES
         ${GLFW_SRC_DIR}/src/win32_init.c
         ${GLFW_SRC_DIR}/src/win32_joystick.c
@@ -71,7 +81,7 @@ elseif(WIN32)
     )
     set(GLFW_PLATFORM_DEFINES _GLFW_WIN32)
 elseif(UNIX)
-    # Linux: X11 后端
+    # Linux 使用 X11 后端
     set(GLFW_PLATFORM_SOURCES
         ${GLFW_SRC_DIR}/src/x11_init.c
         ${GLFW_SRC_DIR}/src/x11_monitor.c
@@ -89,12 +99,14 @@ add_library(glfw STATIC
     ${GLFW_COMMON_SOURCES}
     ${GLFW_PLATFORM_SOURCES}
 )
+# PUBLIC：glfw 的头文件路径会传递给所有依赖 glfw 的目标
 target_include_directories(glfw PUBLIC
     ${GLFW_SRC_DIR}/include
 )
+# PRIVATE：平台宏只在编译 glfw 自身时生效，不传递给使用者
 target_compile_definitions(glfw PRIVATE ${GLFW_PLATFORM_DEFINES})
 
-# macOS: Objective-C 文件禁用 ARC
+# macOS 的 .m 文件需要禁用 ARC（自动引用计数），GLFW 自己管理内存
 if(APPLE)
     set_source_files_properties(
         ${GLFW_SRC_DIR}/src/cocoa_init.m
@@ -106,32 +118,41 @@ if(APPLE)
     )
 endif()
 
-# 禁用 GLFW 编译警告
-target_compile_options(glfw PRIVATE -w)
+# 禁用 GLFW 的编译警告（第三方库，不需要关注其警告）
+# $<...> 是生成器表达式，意思是：非 MSVC 编译器才加 -w 参数
+target_compile_options(glfw PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-w>)
 
 # ========================
-# 3. ImGui 库（静态库）
+# 3. ImGui（即时模式 GUI 库）
 # ========================
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui)
 
 add_library(imgui STATIC
     ${IMGUI_DIR}/imgui.cpp
-    ${IMGUI_DIR}/imgui_demo.cpp
+    ${IMGUI_DIR}/imgui_demo.cpp       # 演示窗口，可在 debug 时查看所有控件
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
     ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp     # GLFW 输入后端
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp  # OpenGL3 渲染后端
 )
 target_include_directories(imgui PUBLIC
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )
+# imgui 依赖 glfw 和 glad，PUBLIC 表示使用 imgui 的目标也会自动链接它们
 target_link_libraries(imgui PUBLIC glfw glad)
-target_compile_options(imgui PRIVATE -w)
+target_compile_options(imgui PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-w>)
 
 # ========================
-# 4. 主程序目标
+# 4. tinyfiledialogs（系统文件对话框）
+# ========================
+# 纯 C 文件，单独编译为静态库，避免与 C++ 预编译头（PCH）冲突
+add_library(tinyfiledialogs STATIC third_party/tinyfiledialogs/tinyfiledialogs.c)
+target_include_directories(tinyfiledialogs PUBLIC third_party/tinyfiledialogs)
+
+# ========================
+# 5. FluxPlayer 主程序
 # ========================
 set(FLUXPLAYER_SOURCES
     src/main.cpp
@@ -153,34 +174,38 @@ set(FLUXPLAYER_SOURCES
     src/utils/Screenshot.cpp
     src/utils/Timer.cpp
     src/recorder/Recorder.cpp
-    third_party/tinyfiledialogs/tinyfiledialogs.c
 )
 
+# add_executable：将源文件编译并链接为可执行程序
 add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
 
-# 项目头文件
+# 预编译头（PCH）：把常用的 STL 头和 Logger.h 预先编译好，
+# 后续每个 .cpp 直接复用，避免重复解析，显著加快编译速度
+target_precompile_headers(FluxPlayer PRIVATE "include/FluxPlayer/pch.h")
+
+# 项目自身的头文件搜索路径（PRIVATE：只对 FluxPlayer 自身生效）
 target_include_directories(FluxPlayer PRIVATE
-    include
-    third_party/glm
-    third_party/tinyfiledialogs
+    include           # 项目头文件根目录
+    third_party/glm   # 数学库（仅头文件）
 )
 
-# 链接本地第三方库
-target_link_libraries(FluxPlayer PRIVATE glfw glad imgui)
+# 链接第三方静态库
+target_link_libraries(FluxPlayer PRIVATE glfw glad imgui tinyfiledialogs)
 
-# FFmpeg
+# FFmpeg：添加头文件路径和库搜索路径，然后链接各个模块
 target_include_directories(FluxPlayer PRIVATE ${FFMPEG_ROOT}/include)
 target_link_directories(FluxPlayer PRIVATE ${FFMPEG_ROOT}/lib)
 target_link_libraries(FluxPlayer PRIVATE avformat avcodec avutil swscale swresample)
 
-# 平台相关链接
+# 平台相关的系统库链接
 if(APPLE)
+    # macOS 使用 framework 形式的系统库
     find_library(OPENGL_FRAMEWORK OpenGL)
     find_library(COCOA_FRAMEWORK Cocoa)
     find_library(COREVIDEO_FRAMEWORK CoreVideo)
     find_library(IOKIT_FRAMEWORK IOKit)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
-    find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox)
+    find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox)  # 音频输出
     target_link_libraries(FluxPlayer PRIVATE
         ${OPENGL_FRAMEWORK}
         ${COCOA_FRAMEWORK}
@@ -191,34 +216,37 @@ if(APPLE)
     )
 elseif(WIN32)
     target_link_libraries(FluxPlayer PRIVATE
-        opengl32
-        gdi32
-        winmm
-        ole32
-        comdlg32
+        opengl32    # OpenGL
+        gdi32       # Windows 图形设备接口
+        winmm       # Windows 多媒体（音频输出）
+        ole32       # COM 组件
+        comdlg32    # 文件对话框
+        d3d11       # D3D11VA 硬件解码
+        dxgi        # DXGI 设备枚举
     )
 elseif(UNIX)
     target_link_libraries(FluxPlayer PRIVATE
-        GL
-        X11
-        pthread
-        dl
-        asound
+        GL          # OpenGL
+        X11         # X 窗口系统
+        pthread     # 多线程
+        dl          # 动态库加载
+        asound      # ALSA 音频输出
     )
 endif()
 
-# 构建类型配置
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(FluxPlayer PRIVATE DEBUG)
-endif()
+# Debug 模式下定义 DEBUG 宏，用于条件编译调试代码
+# $<$<CONFIG:Debug>:DEBUG> 是生成器表达式，支持 Xcode/VS 等多配置生成器
+target_compile_definitions(FluxPlayer PRIVATE $<$<CONFIG:Debug>:DEBUG>)
 
-# TCP日志系统（用 nc ip port 远程查看实时日志）
+# TCP 日志选项：编译时可通过 -DENABLE_TCP_LOG=ON 开启，
+# 开启后可用 nc <ip> <port> 远程查看实时日志
 option(ENABLE_TCP_LOG "Enable TCP log server for remote log viewing" OFF)
 if(ENABLE_TCP_LOG)
     target_compile_definitions(FluxPlayer PRIVATE ENABLE_TCP_LOG)
 endif()
 
-# 构建后复制着色器文件到可执行文件目录
+# 构建完成后，自动把 assets/shaders/ 目录复制到可执行文件旁边
+# $<TARGET_FILE_DIR:FluxPlayer> 会自动解析为实际的输出目录
 add_custom_command(TARGET FluxPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders
@@ -226,7 +254,7 @@ add_custom_command(TARGET FluxPlayer POST_BUILD
     COMMENT "Copying shader files..."
 )
 
-# Windows: 构建后复制 FFmpeg DLL 到可执行文件目录
+# Windows：构建完成后把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
 if(WIN32)
     file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
     if(FFMPEG_DLLS)

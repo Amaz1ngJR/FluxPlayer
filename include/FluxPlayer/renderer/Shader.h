@@ -6,7 +6,6 @@
 #pragma once
 
 #include <string>
-#include <glad/glad.h>
 
 namespace FluxPlayer {
 
@@ -48,7 +47,7 @@ public:
      * @brief 获取底层 OpenGL 着色器程序 ID
      * @return 着色器程序 ID
      */
-    GLuint getProgram() const { return m_program; }
+    unsigned int getProgram() const { return m_program; }
 
     // ==================== Uniform 设置函数 ====================
 
@@ -101,7 +100,7 @@ private:
      * @param source GLSL 源码
      * @return 编译成功返回 true，失败返回 false 并输出错误日志
      */
-    bool compileShader(GLuint shader, const std::string& source);
+    bool compileShader(unsigned int shader, const std::string& source);
 
     /**
      * @brief 链接着色器程序，将顶点和片段着色器组合为可执行程序
@@ -116,9 +115,9 @@ private:
      */
     std::string readFile(const std::string& filepath);
 
-    GLuint m_program;         ///< 链接后的着色器程序 ID
-    GLuint m_vertexShader;    ///< 顶点着色器对象 ID（链接后被删除，置为 0）
-    GLuint m_fragmentShader;  ///< 片段着色器对象 ID（链接后被删除，置为 0）
+    unsigned int m_program;             ///< 链接后的着色器程序 ID
+    unsigned int m_vertexShader;        ///< 顶点着色器对象 ID（链接后被删除，置为 0）
+    unsigned int m_fragmentShader;      ///< 片段着色器对象 ID（链接后被删除，置为 0）
 };
 
 } // namespace FluxPlayer

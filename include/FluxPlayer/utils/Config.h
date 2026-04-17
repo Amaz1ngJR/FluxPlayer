@@ -22,6 +22,7 @@ public:
         std::string screenshotFormat = "png";  // png 或 jpg
         std::string recordDir = "Record";
         std::string recordQuality = "original";  // low / medium / high / original
+        bool hwaccel = true;  // 硬件加速解码，默认开启
     };
 
     static Config& getInstance();

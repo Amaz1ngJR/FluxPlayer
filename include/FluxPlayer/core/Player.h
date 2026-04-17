@@ -8,10 +8,6 @@
 #include <mutex>
 #include <queue>
 
-extern "C" {
-#include <libavformat/avformat.h>
-}
-
 namespace FluxPlayer {
 
 // 前向声明
@@ -376,8 +372,11 @@ private:
     mutable std::mutex videoQueueMutex_;
     mutable std::mutex audioQueueMutex_;
 
-    const size_t MAX_VIDEO_QUEUE_SIZE = 10;  // 最大视频帧队列大小
+    size_t MAX_VIDEO_QUEUE_SIZE = 10;  // 最大视频帧队列大小（网络流在 open() 中动态调整）
     size_t MAX_AUDIO_QUEUE_SIZE;  // 最大音频帧队列大小（实时流会动态调整）
+
+    // 网络流预缓冲状态
+    std::atomic<bool> prebuffering_{false};  // 是否正在预缓冲（等待队列填充到安全水位）
 
     // 统计信息
     std::atomic<int> droppedFrames_;

@@ -15,7 +15,10 @@
 - 📂 支持文件拖放打开
 - ⏱️ 音视频同步（音频时钟 / 视频时钟 / 外部时钟三种模式）
 - 🚀 FFmpeg 多线程解码，YUV420P 源帧零拷贝直通渲染
-- 📡 RTSP 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
+- ⚡ 硬件加速解码（macOS VideoToolbox / Windows CUDA(NVDEC)、D3D11VA、DXVA2），默认开启，自动降级
+- 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU；CUDA 后端自动解交错兼容
+- 📡 RTSP/RTMP/HLS 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
+- 🌊 网络流自适应缓冲：视频队列 30 帧、预缓冲 5 帧起播，音频队列动态扩容（上限 100 帧）
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看
 - ⚙️ INI 配置文件，支持热重载
@@ -24,11 +27,22 @@
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
 - 🔁 循环播放
 
+## 技术栈
+| 组件 | 技术 |
+|------|------|
+| 语言 | C++17 |
+| 视频解码 | FFmpeg 4.x / 6.x（自动适配），支持硬件加速 |
+| 图形渲染 | OpenGL 3.3+ |
+| 窗口管理 | GLFW 3.3.8 |
+| UI | Dear ImGui |
+| 数学库 | GLM |
+| 构建系统 | xmake / CMake |
+
 ## 跨平台支持
 
 | 平台 | 窗口系统 | 音频后端 | 状态 |
 |------|---------|---------|------|
-| macOS | Cocoa (GLFW) | AudioToolbox | ✅ 已支持 |
+| macOS | Cocoa (GLFW) | AudioToolbox | ✅ 已支持，支持硬件加速 |
 | Windows | Win32 (GLFW) | WinMM | ✅ 已支持 |
 | Linux | X11 (GLFW) | ALSA | ✅ 已支持 |
 
@@ -47,6 +61,7 @@ FluxPlayer/
 │   └── utils/            # 工具 (Config, Logger, Timer, Screenshot)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
+├── docs/                 # 技术文档
 ├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs
 ├── CMakeLists.txt
 └── xmake.lua
@@ -187,6 +202,9 @@ screenshotFormat=png          # 截图格式 (png / jpg)
 [Record]
 recordDir=Record              # 录制文件保存目录
 recordQuality=original        # 录像质量 (low / medium / high / original)
+
+[Decoder]
+hwaccel=true                  # 硬件加速解码 (macOS: VideoToolbox / Windows: CUDA > D3D11VA > DXVA2)
 ```
 
 录像质量说明：
@@ -215,37 +233,47 @@ nc <播放器IP> 9999
 
 ## 测试流地址
 
+> **提示**：公开测试流地址随时可能失效。如需稳定测试，建议用 FFmpeg 本地推流（见下方说明）。
+
+### HTTP 点播（最稳定，推荐先用这些测试）
+
+| 说明 | 地址 |
+|------|------|
+|||
+
 ### RTMP
 
 | 说明 | 地址 |
 |------|------|
 | 伊拉克 Al Sharqiya 电视台 | `rtmp://ns8.indexforce.com/home/mystream` |
 
-### RTSP
+### HLS 直播/点播
 
 | 说明 | 地址 |
 |------|------|
-| Big Buck Bunny（Wowza 公共测试） | `rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4` |
-| 公共摄像头测试流 | `rtsp://demo:demo@ipvmdemo.dyndns.org:5541/onvif-media/media.amp?profile=profile_1_h264` |
+| Apple 官方 HLS 测试流（HEVC，稳定） | `https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8` |
+| Apple 官方 HLS 测试流（H.264） | `https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_4x3/bipbop_4x3_variant.m3u8` |
 
-### HLS / M3U8
+### 本地推流测试（最可靠）
 
-| 说明 | 地址 |
-|------|------|
-| Apple 官方 HLS 测试流（BipBop） | `http://devimages.apple.com/iphone/samples/bipbop/gear1/prog_index.m3u8` |
-| Apple HLS 多码率测试 | `http://devimages.apple.com/iphone/samples/bipbop/bipbopall.m3u8` |
-| Wowza Big Buck Bunny HLS | `https://wowzaec2demo.streamlock.net/vod-chunklist/mp4:BigBuckBunny_115k.mp4/chunklist.m3u8` |
-| Akamai 直播测试流 | `https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8` |
-| ARTE 欧洲文化频道（法语） | `https://artesimulcast.akamaized.net/hls/live/2031003/artelive_fr/master.m3u8` |
+使用 FFmpeg + [MediaMTX](https://github.com/bluenviron/mediamtx) 搭建本地测试流：
 
-### HTTP 渐进式下载
+```bash
+# 1. 启动 MediaMTX（下载后直接运行即可）
+./mediamtx
 
-| 说明 | 地址 |
-|------|------|
-| Big Buck Bunny 360p MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4` |
-| Elephant Dream MP4 | `http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4` |
+# 2. 用 FFmpeg 推送本地文件为 RTSP 流（循环播放）
+ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f rtsp rtsp://localhost:8554/stream
 
-> 注意：公共测试流可用性随时可能变化，如无法连接请更换其他地址。
+# 3. 用 FluxPlayer 播放
+./FluxPlayer rtsp://localhost:8554/stream
+```
+
+也可以推 RTMP 流：
+
+```bash
+ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stream
+```
 
 ## 技术要点
 
@@ -257,9 +285,20 @@ nc <播放器IP> 9999
 
 ### 视频渲染
 
-- YUV420P 三平面纹理上传（Y / U / V 独立纹理）
-- GLSL 片段着色器实现 YUV→RGB 色彩空间转换
+- 双格式纹理支持：YUV420P（Y/U/V 三纹理）和 NV12（Y + UV 双纹理）
+- GLSL 片段着色器通过 `isNV12` uniform 切换 YUV420P/NV12 采样路径
+- NV12 UV 交错平面直接映射为 GL_RG8 纹理，零拷贝跳过 sws_scale
 - 处理 FFmpeg linesize 与视频宽度不一致的内存对齐问题
+
+### 硬件加速解码
+
+- macOS: VideoToolbox（Apple Silicon / Intel Mac 专用媒体引擎）
+- Windows: CUDA(NVDEC) → D3D11VA → DXVA2 按优先级自动选择
+- 硬件帧通过 `av_hwframe_transfer_data()` 传输到 CPU（NV12 格式）
+- 复用传输帧缓冲（`m_hwTransferFrame`），避免每帧 alloc/free
+- CUDA 后端：`getHWFormat` 回调确保 FFmpeg 正确协商硬件像素格式；UV 解交错模式解决 GL_RG8 兼容性绿屏问题
+- 全部候选失败时自动降级为软件解码，用户无感知
+- 可通过 `hwaccel=false` 配置项强制关闭
 
 ### 音视频同步
 
@@ -271,11 +310,13 @@ nc <播放器IP> 9999
 ### 网络流处理
 
 - 支持 RTSP / RTMP / HTTP / HLS 协议
+- 实时流识别：URL 协议头检测 + HLS 格式名 + duration==0 多重判断，修复 RTMP 被解析为 FLV 格式名漏判
+- 按协议设置专用选项：HLS 断流重连、RTSP 1MB 缓冲区、RTMP 直播模式
 - 实时流 PTS 基准校准（音视频首帧 PTS 对齐）
 - PTS 回绕检测：视频回绕时跳帧等待，音频回绕时统一重校准基准
 - 无效 PTS（AV_NOPTS_VALUE）帧基于实际帧率 / 采样率估算 PTS，不丢弃
 - 网络断流指数退避重试（100ms → 3000ms，最多 30 次）
-- 动态音频队列深度调整
+- 网络流视频队列 30 帧 + 预缓冲 5 帧起播；音频队列欠载时动态扩容（上限 100 帧）
 
 ### FFmpeg 版本兼容
 
