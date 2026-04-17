@@ -10,6 +10,7 @@
 
 #include "FluxPlayer/renderer/GLRenderer.h"
 #include "FluxPlayer/utils/Logger.h"
+#include <glad/glad.h>
 
 namespace FluxPlayer {
 

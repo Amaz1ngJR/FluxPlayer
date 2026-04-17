@@ -12,6 +12,7 @@
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <glad/glad.h>
+#include <GLFW/glfw3.h>
 #include <algorithm>
 #include <utility>
 

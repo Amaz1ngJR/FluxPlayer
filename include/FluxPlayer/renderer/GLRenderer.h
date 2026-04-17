@@ -6,7 +6,6 @@
 #pragma once
 
 #include "Shader.h"
-#include <glad/glad.h>
 #include <memory>
 #include <vector>
 
@@ -103,13 +102,13 @@ private:
 
     std::unique_ptr<Shader> m_shader;   ///< YUV→RGB 转换着色器程序
 
-    GLuint m_VAO;       ///< 全屏四边形的顶点数组对象
-    GLuint m_VBO;       ///< 全屏四边形的顶点缓冲对象
+    unsigned int m_VAO;       ///< 全屏四边形的顶点数组对象
+    unsigned int m_VBO;       ///< 全屏四边形的顶点缓冲对象
 
-    GLuint m_textureY;  ///< Y（亮度）平面纹理，全分辨率
-    GLuint m_textureU;  ///< U（色度Cb）平面纹理，1/2 宽 x 1/2 高
-    GLuint m_textureV;  ///< V（色度Cr）平面纹理，1/2 宽 x 1/2 高
-    GLuint m_textureUV; ///< NV12 色度纹理（GL_RG8），保留用于未来 GL_RG8 兼容的 GPU
+    unsigned int m_textureY;  ///< Y（亮度）平面纹理，全分辨率
+    unsigned int m_textureU;  ///< U（色度Cb）平面纹理，1/2 宽 x 1/2 高
+    unsigned int m_textureV;  ///< V（色度Cr）平面纹理，1/2 宽 x 1/2 高
+    unsigned int m_textureUV; ///< NV12 色度纹理（GL_RG8），保留用于未来 GL_RG8 兼容的 GPU
 
     int m_videoWidth;   ///< 当前视频帧宽度
     int m_videoHeight;  ///< 当前视频帧高度

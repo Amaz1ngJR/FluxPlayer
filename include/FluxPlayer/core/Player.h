@@ -8,10 +8,6 @@
 #include <mutex>
 #include <queue>
 
-extern "C" {
-#include <libavformat/avformat.h>
-}
-
 namespace FluxPlayer {
 
 // 前向声明

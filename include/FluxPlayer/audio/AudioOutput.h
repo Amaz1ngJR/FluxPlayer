@@ -1,25 +1,9 @@
-#ifndef FLUXPLAYER_AUDIO_AUDIOOUTPUT_H
-#define FLUXPLAYER_AUDIO_AUDIOOUTPUT_H
+#pragma once
 
 #include <cstdint>
 #include <functional>
 #include <atomic>
-
-#ifdef __APPLE__
-#include <AudioToolbox/AudioToolbox.h>
-#elif defined(_WIN32)
-#include <windows.h>
-#include <mmsystem.h>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#elif defined(__linux__)
-#include <alsa/asoundlib.h>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <vector>
-#endif
+#include <memory>
 
 namespace FluxPlayer {
 
@@ -28,8 +12,10 @@ namespace FluxPlayer {
  *
  * 支持跨平台音频播放：
  * - macOS: AudioToolbox/CoreAudio
- * - Windows: WinMM/WASAPI 
- * - Linux: ALSA/PulseAudio (待实现)
+ * - Windows: WinMM/WASAPI
+ * - Linux: ALSA/PulseAudio
+ *
+ * 使用 pImpl 模式隔离平台相关实现，头文件不暴露任何平台 SDK 类型。
  */
 class AudioOutput {
 public:
@@ -37,9 +23,9 @@ public:
      * @brief 音频格式
      */
     struct AudioFormat {
-        int sampleRate;      // 采样率 (44100, 48000 等)
-        int channels;        // 声道数 (1=单声道, 2=立体声)
-        int bitsPerSample;   // 位深度 (8, 16, 24, 32)
+        int sampleRate;      ///< 采样率 (44100, 48000 等)
+        int channels;        ///< 声道数 (1=单声道, 2=立体声)
+        int bitsPerSample;   ///< 位深度 (8, 16, 24, 32)
 
         AudioFormat()
             : sampleRate(44100), channels(2), bitsPerSample(16) {}
@@ -69,24 +55,16 @@ public:
      */
     bool init(const AudioFormat& format, AudioCallback callback);
 
-    /**
-     * @brief 启动音频播放
-     */
+    /** @brief 启动音频播放 */
     void start();
 
-    /**
-     * @brief 暂停音频播放
-     */
+    /** @brief 暂停音频播放 */
     void pause();
 
-    /**
-     * @brief 恢复音频播放
-     */
+    /** @brief 恢复音频播放 */
     void resume();
 
-    /**
-     * @brief 停止音频播放并释放资源
-     */
+    /** @brief 停止音频播放并释放资源 */
     void stop();
 
     /**
@@ -101,57 +79,15 @@ public:
      */
     float getVolume() const { return volume_.load(); }
 
-    /**
-     * @brief 检查是否正在播放
-     */
+    /** @brief 检查是否正在播放 */
     bool isPlaying() const { return isPlaying_.load(); }
 
 private:
-#ifdef __APPLE__
-    // macOS AudioQueue 回调
-    static void audioQueueCallback(void* userData, AudioQueueRef queue, AudioQueueBufferRef buffer);
-
-    AudioQueueRef audioQueue_;              // Audio Queue 对象
-    AudioQueueBufferRef buffers_[3];        // 音频缓冲区（3个缓冲）
-    static constexpr int kNumBuffers = 3;
-    size_t bufferSize_;                      // 动态缓冲区大小
-#elif defined(_WIN32)
-    // Windows WinMM 回调和音频线程
-    static void CALLBACK waveOutCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
-    void audioThread();  // 音频处理线程
-
-    HWAVEOUT hWaveOut_;                     // WaveOut 句柄
-    WAVEHDR waveHeaders_[3];                // Wave 头（3个缓冲）
-    static constexpr int kNumBuffers = 3;
-    std::vector<uint8_t> buffers_[3];       // 音频缓冲区数据
-    size_t bufferSize_;                      // 缓冲区大小
-    std::thread audioThread_;                // 音频处理线程
-    std::mutex mutex_;                       // 互斥锁
-    std::condition_variable cv_;             // 条件变量
-    bool shouldExit_;                        // 线程退出标志
-    int nextBuffer_;                         // 下一个要填充的缓冲区索引
-#elif defined(__linux__)
-    // Linux ALSA 音频线程
-    void audioThread();  // 音频处理线程
-
-    snd_pcm_t* pcmHandle_;                  // ALSA PCM 句柄
-    static constexpr int kNumBuffers = 3;
-    std::vector<uint8_t> buffer_;           // 音频缓冲区数据
-    size_t bufferSize_;                      // 缓冲区大小
-    snd_pcm_uframes_t periodSize_;          // ALSA 周期大小（帧数）
-    std::thread audioThread_;                // 音频处理线程
-    std::mutex mutex_;                       // 互斥锁
-    std::condition_variable cv_;             // 条件变量
-    bool shouldExit_;                        // 线程退出标志
-#endif
-
-    AudioFormat format_;                    // 音频格式
-    AudioCallback callback_;                // 音频数据回调
-    std::atomic<float> volume_;             // 音量 (0.0 - 1.0)
-    std::atomic<bool> isPlaying_;           // 是否正在播放
-    std::atomic<bool> isPaused_;            // 是否暂停
+    struct Impl;                        ///< 平台相关实现（定义在 .cpp 中）
+    std::unique_ptr<Impl> impl_;        ///< pImpl 指针
+    std::atomic<float> volume_{1.0f};   ///< 音量 (0.0 - 1.0)
+    std::atomic<bool> isPlaying_{false};///< 是否正在播放
+    std::atomic<bool> isPaused_{false}; ///< 是否暂停
 };
 
 } // namespace FluxPlayer
-
-#endif // FLUXPLAYER_AUDIO_AUDIOOUTPUT_H

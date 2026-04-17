@@ -8,8 +8,8 @@
 #include <string>
 #include <functional>
 #include <utility>
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
+
+struct GLFWwindow;
 
 namespace FluxPlayer {
 
