@@ -1,6 +1,7 @@
 #include "FluxPlayer/ui/Controller.h"
 #include "FluxPlayer/core/Player.h"
 #include "FluxPlayer/ui/Window.h"
+#include "FluxPlayer/subtitle/SubtitleManager.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 
@@ -9,9 +10,11 @@
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
 
+#include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <vector>
 
 namespace FluxPlayer {
 
@@ -42,6 +45,9 @@ Controller::Controller(Player& player, Window& window)
     , showSettingsMenu_(false)
     , settingsMenuPosX_(0.0f)
     , settingsMenuPosY_(0.0f)
+    , subtitleEnabled_(Config::getInstance().get().subtitleEnabled)
+    , subtitleFontScale_(Config::getInstance().get().subtitleFontScale)
+    , subtitleFont_(nullptr)
 {
 }
 
@@ -85,6 +91,10 @@ bool Controller::init() {
         LOG_ERROR("Failed to initialize ImGui GLFW backend");
         return false;
     }
+
+    // 加载字幕专用字体（含 CJK 字符表）
+    // 必须在 OpenGL3 后端初始化前调用：AddFont 只是注册，真正上传纹理在 OpenGL3 初始化时完成
+    loadSubtitleFont();
 
     // 设置 OpenGL 3.3 GLSL 版本
     const char* glsl_version = "#version 330";
@@ -145,8 +155,15 @@ void Controller::processInput() {
 }
 
 void Controller::render() {
-    if (!initialized_ || !visible_) {
-        // 即使不可见也需要渲染（否则会有警告）
+    if (!initialized_) {
+        return;
+    }
+
+    // 字幕独立于 UI 面板的可见性：即使 UI 自动隐藏，字幕仍需持续显示
+    renderSubtitles();
+
+    if (!visible_) {
+        // 即使不可见也需要调用 ImGui::Render，否则上一帧的 DrawData 会残留警告
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         return;
@@ -176,6 +193,13 @@ void Controller::render() {
             Config::getInstance().getMutable().loopPlayback = loopEnabled;
             player_.setLoopPlayback(loopEnabled);
             Config::getInstance().save();
+        }
+
+        // 字幕开关：仅影响渲染；要启停解码需重开媒体（见 Config::subtitleEnabled）
+        bool subEn = subtitleEnabled_;
+        if (ImGui::Checkbox("Subtitles", &subEn)) {
+            LOG_INFO("Subtitles checkbox toggled: " + std::string(subEn ? "on" : "off"));
+            setSubtitleEnabled(subEn);
         }
 
         // 点击菜单外部关闭
@@ -720,6 +744,156 @@ std::string Controller::formatTime(double seconds) {
             << std::setfill('0') << std::setw(2) << s;
     }
     return oss.str();
+}
+
+// ============================================================
+// 字幕相关实现
+// ============================================================
+
+void Controller::setSubtitleEnabled(bool enabled) {
+    subtitleEnabled_ = enabled;
+    Config::getInstance().getMutable().subtitleEnabled = enabled;
+    Config::getInstance().save();
+}
+
+void Controller::loadSubtitleFont() {
+    ImGuiIO& io = ImGui::GetIO();
+    const auto& cfg = Config::getInstance().get();
+
+    // 候选路径列表：优先使用配置项，其次按平台内建常见 CJK 字体
+    std::vector<std::string> candidates;
+    if (!cfg.subtitleFontPath.empty()) {
+        candidates.push_back(cfg.subtitleFontPath);
+    }
+#if defined(__APPLE__)
+    candidates.push_back("/System/Library/Fonts/PingFang.ttc");
+    candidates.push_back("/System/Library/Fonts/STHeiti Medium.ttc");
+    candidates.push_back("/System/Library/Fonts/Hiragino Sans GB.ttc");
+#elif defined(_WIN32)
+    candidates.push_back("C:/Windows/Fonts/msyh.ttc");      // 微软雅黑
+    candidates.push_back("C:/Windows/Fonts/msyh.ttf");
+    candidates.push_back("C:/Windows/Fonts/simhei.ttf");    // 黑体
+#else
+    candidates.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+    candidates.push_back("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc");
+    candidates.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
+    candidates.push_back("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc");
+#endif
+
+    // 使用 std::ifstream 探测文件可读（避免引入 <filesystem>，与项目已有风格一致）
+    auto fileExists = [](const std::string& p) {
+        std::ifstream f(p);
+        return f.good();
+    };
+
+    // 基准字号 22.0f
+    // 策略：先加载主 CJK 字体，再用 MergeMode 叠加覆盖其他 Unicode 范围的字体
+    // MergeMode 将后续字体的字形合并到同一 ImFont 中，缺失字形自动回退
+    for (const auto& path : candidates) {
+        if (!fileExists(path)) continue;
+        ImFont* f = io.Fonts->AddFontFromFileTTF(
+            path.c_str(), 22.0f, nullptr,
+            io.Fonts->GetGlyphRangesChineseFull());
+        if (!f) continue;
+        subtitleFont_ = static_cast<void*>(f);
+        LOG_INFO("Subtitle font loaded: " + path);
+
+        // 叠加覆盖更广 Unicode 范围的字体（MergeMode：字形合并到上面的 ImFont）
+        // 静态数组必须在 ImGui 构建字体纹理前保持有效
+        static const ImWchar rangesExtra[] = {
+            0x0020, 0x00FF,   // 基本拉丁 + Latin-1 Supplement（€ £ ©等）
+            0x0370, 0x03FF,   // 希腊文
+            0x0600, 0x06FF,   // 阿拉伯文
+            0x2000, 0x206F,   // 通用标点
+            0x2100, 0x214F,   // 字母类符号（℃ ℉ №等）
+            0x2190, 0x21FF,   // 箭头
+            0x2200, 0x22FF,   // 数学运算符（√ ∞ ±等）
+            0x25A0, 0x25FF,   // 几何图形
+            0x2600, 0x26FF,   // 杂项符号
+            0,
+        };
+        ImFontConfig cfg;
+        cfg.MergeMode = true;
+        cfg.PixelSnapH = true;
+
+        // 尝试用同一字体文件补充（部分 CJK 字体含上述范围）
+        io.Fonts->AddFontFromFileTTF(path.c_str(), 22.0f, &cfg, rangesExtra);
+
+        // macOS：Arial Unicode MS 覆盖阿拉伯文等
+#if defined(__APPLE__)
+        const char* arialUnicode = "/Library/Fonts/Arial Unicode.ttf";
+        if (fileExists(arialUnicode)) {
+            io.Fonts->AddFontFromFileTTF(arialUnicode, 22.0f, &cfg, rangesExtra);
+        }
+#endif
+        return;
+    }
+
+    subtitleFont_ = nullptr;
+    LOG_WARN("No CJK font found; subtitles will use default font (CJK may render as '?')");
+}
+
+void Controller::renderSubtitles() {
+    // 防御：渲染开关关闭或上游未提供字幕源 → 直接返回
+    if (!subtitleEnabled_) return;
+    SubtitleManager* mgr = player_.getSubtitleManager();
+    if (!mgr) return;
+
+    // 查询当前应显示的字幕文本
+    const double pts = player_.getCurrentTime();
+    const std::string text = mgr->getCurrentText(pts);
+    LOG_DEBUG("Subtitle query: pts=" + std::to_string(pts) +
+              " result=" + (text.empty() ? "(empty)" : text.substr(0, 30)));
+    if (text.empty()) return;
+
+    const ImGuiIO& io = ImGui::GetIO();
+    const float winW = io.DisplaySize.x;
+    const float winH = io.DisplaySize.y;
+
+    // 底部浮层高度 64px，字幕需在其上方留出间距
+    static constexpr float kSubtitleBottomMarginWithUI = 80.0f;  // UI 可见时距底距离
+    static constexpr float kSubtitleBottomMarginNoUI   = 24.0f;  // UI 隐藏时距底距离
+    static constexpr float kSubtitleWidthRatio         = 0.85f;  // 字幕窗口宽度占屏幕比例
+
+    const float reserveBottom = visible_ ? kSubtitleBottomMarginWithUI
+                                         : kSubtitleBottomMarginNoUI;
+
+    // 切换到 CJK 字体（若已加载）
+    if (subtitleFont_) {
+        ImGui::PushFont(static_cast<ImFont*>(subtitleFont_));
+    }
+
+    ImGui::SetNextWindowPos(
+        ImVec2(winW * 0.5f, winH - reserveBottom),
+        ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(winW * kSubtitleWidthRatio, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.55f);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+    const ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoFocusOnAppearing;
+
+    ImGui::Begin("##Subtitle", nullptr, flags);
+    ImGui::SetWindowFontScale(subtitleFontScale_);
+
+    // 计算文本宽度以实现居中对齐
+    float availW = ImGui::GetContentRegionAvail().x;
+    ImVec2 textSize = ImGui::CalcTextSize(text.c_str(), nullptr, false, availW);
+    float offsetX = (availW - textSize.x) * 0.5f;
+    if (offsetX > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offsetX);
+    ImGui::TextWrapped("%s", text.c_str());
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+
+    if (subtitleFont_) {
+        ImGui::PopFont();
+    }
 }
 
 } // namespace FluxPlayer

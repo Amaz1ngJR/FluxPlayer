@@ -11,6 +11,8 @@
 #include "FluxPlayer/decoder/AudioDecoder.h"
 #include "FluxPlayer/decoder/Frame.h"
 #include "FluxPlayer/audio/AudioOutput.h"
+#include "FluxPlayer/subtitle/SubtitleDecoder.h"
+#include "FluxPlayer/subtitle/SubtitleManager.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
@@ -29,6 +31,7 @@ namespace FluxPlayer {
 Player::Player()
     : state_(PlayerState::IDLE)
     , shouldQuit_(false)
+    , decodingFinished_(false)
     , seekRequested_(false)
     , seekTarget_(0.0)
     , lastRenderedPTS_(0.0)
@@ -197,6 +200,7 @@ bool Player::play() {
     // 重置同步器和播放时间
     avSync_->reset();
     lastRenderedPTS_.store(0.0);
+    decodingFinished_.store(false);
     currentAudioFramePTS_.store(0.0);  // 重置音频播放位置
     samplesPlayedInFrame_.store(0);
     audioUnderrunCount_.store(0);  // 重置欠载计数器
@@ -354,6 +358,14 @@ void Player::run() {
         double lastFrameTime = 0.0;
 
         while (!window_->shouldClose() && !shouldQuit_.load()) {
+            // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
+            if (decodingFinished_.load()) {
+                std::lock_guard<std::mutex> lock(videoQueueMutex_);
+                if (videoFrameQueue_.empty()) {
+                    shouldQuit_.store(true);
+                    break;
+                }
+            }
             double currentTime = timer.getElapsedSeconds();
 
         // 从队列获取视频帧并渲染
@@ -550,6 +562,9 @@ void Player::run() {
             demuxer_->seek(0);
             videoDecoder_->flush();
             if (audioDecoder_) audioDecoder_->flush();
+            // 字幕同步重置
+            if (subtitleDecoder_) subtitleDecoder_->flush();
+            if (subtitleManager_) subtitleManager_->clear();
 
             // 重置同步时钟
             avSync_->seekTo(0.0);
@@ -559,6 +574,7 @@ void Player::run() {
 
             // 重启解码线程
             shouldQuit_.store(false);
+            decodingFinished_.store(false);  // 必须重置，否则渲染循环立即退出
             decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
             setState(PlayerState::PLAYING);
         } else {
@@ -653,6 +669,13 @@ void Player::decodingThread() {
                 videoDecoder_->flush();
                 if (audioDecoder_) {
                     audioDecoder_->flush();
+                }
+                // 字幕解码器与管理器同步清空，避免 seek 后残留旧字幕
+                if (subtitleDecoder_) {
+                    subtitleDecoder_->flush();
+                }
+                if (subtitleManager_) {
+                    subtitleManager_->clear();
                 }
 
                 // 清空帧队列
@@ -1040,6 +1063,15 @@ void Player::decodingThread() {
                         audioRecorder_->writePacket(packet, packet->stream_index);
                     }
                     audioDecoder_->sendPacket(packet);
+                } else if (subtitleDecoder_ && subtitleManager_ &&
+                           packet->stream_index == demuxer_->getSubtitleStreamIndex()) {
+                    // 字幕包：同步解码，结果直接写入 SubtitleManager 供 UI 线程查询
+                    // 字幕吞吐量极低（每帧数十 ~ 数百字节），同步解码对性能无影响
+                    auto items = subtitleDecoder_->decode(packet);
+                    for (auto& it : items) {
+                        subtitleManager_->addEntry(
+                            SubtitleManager::Entry{std::move(it.text), it.startPTS, it.endPTS});
+                    }
                 }
                 av_packet_unref(packet);
             } else {
@@ -1072,8 +1104,9 @@ void Player::decodingThread() {
                     }
                 } else {
                     // 本地文件：readPacket 返回 false 即为真正的文件结束
+                    // 设 decodingFinished_ 而非 shouldQuit_，让渲染循环继续消费队列剩余帧
                     LOG_INFO("End of file reached in decoding thread");
-                    shouldQuit_.store(true);
+                    decodingFinished_.store(true);
                     break;
                 }
             }
@@ -1128,6 +1161,10 @@ void Player::cleanup() {
     window_.reset();
     audioDecoder_.reset();
     videoDecoder_.reset();
+    // 字幕模块必须在 demuxer_ 之前释放（SubtitleDecoder 不直接依赖 demuxer，
+    // 但 subtitleManager_ 的 Entry 被 Controller 引用，顺序释放保险起见）
+    subtitleDecoder_.reset();
+    subtitleManager_.reset();
     demuxer_.reset();
 
     // 清空队列
@@ -1302,6 +1339,25 @@ bool Player::initDecoders() {
             audioDecoder_.reset();
         } else {
             LOG_INFO("Audio decoder initialized successfully");
+        }
+    }
+
+    // 初始化字幕解码器（仅当媒体含字幕流且配置启用时）
+    // 字幕初始化失败不影响音视频播放，仅置空 subtitleDecoder_ 使渲染层不再工作
+    if (demuxer_->getSubtitleStreamIndex() >= 0 &&
+        Config::getInstance().get().subtitleEnabled) {
+        AVCodecParameters* subParams = demuxer_->getSubtitleCodecParams();
+        AVStream* subStream = demuxer_->getSubtitleStream();
+
+        if (subParams && subStream) {
+            auto decoder = std::make_unique<SubtitleDecoder>();
+            if (decoder->init(subParams, subStream->time_base)) {
+                subtitleDecoder_ = std::move(decoder);
+                subtitleManager_ = std::make_unique<SubtitleManager>();
+                LOG_INFO("Subtitle decoder initialized successfully");
+            } else {
+                LOG_WARN("Failed to initialize subtitle decoder, subtitles disabled");
+            }
         }
     }
 

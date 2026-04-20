@@ -48,3 +48,13 @@ recordQuality=original
 # macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2
 # 硬件解码可显著降低 CPU 占用，对不支持的编解码器会自动降级为软件解码
 hwaccel=true
+
+[Subtitle]
+# subtitleEnabled: 是否启用内嵌字幕流解码与渲染 (true / false)
+# 修改后需重新打开媒体才会启停解码；运行时仅通过设置菜单开关影响渲染
+subtitleEnabled=true
+# subtitleFontScale: 字幕字体缩放比例 (0.5 ~ 4.0)，1.0 为字体基准大小
+subtitleFontScale=1.4
+# subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)
+# 推荐字体：macOS=PingFang.ttc, Windows=msyh.ttc, Linux=NotoSansCJK-Regular.ttc
+subtitleFontPath=

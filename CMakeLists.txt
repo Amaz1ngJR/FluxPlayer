@@ -166,6 +166,8 @@ set(FLUXPLAYER_SOURCES
     src/decoder/VideoDecoder.cpp
     src/renderer/GLRenderer.cpp
     src/renderer/Shader.cpp
+    src/subtitle/SubtitleDecoder.cpp
+    src/subtitle/SubtitleManager.cpp
     src/ui/Controller.cpp
     src/ui/HomeScreen.cpp
     src/ui/Window.cpp

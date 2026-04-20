@@ -61,6 +61,14 @@ public:
      */
     int getAudioStreamIndex() const { return m_audioStreamIndex; }
 
+    /**
+     * @brief 获取字幕流索引
+     *
+     * 阶段一仅识别第一条字幕流；多语言字幕的轨道选择留待阶段二。
+     * @return 字幕流索引，未找到字幕流时返回 -1
+     */
+    int getSubtitleStreamIndex() const { return m_subtitleStreamIndex; }
+
     // ==================== 流和编解码器信息 ====================
 
     /**
@@ -86,6 +94,18 @@ public:
      * @return AVCodecParameters 指针，无音频流时返回 nullptr
      */
     AVCodecParameters* getAudioCodecParams() const;
+
+    /**
+     * @brief 获取字幕流对象
+     * @return AVStream 指针，无字幕流时返回 nullptr
+     */
+    AVStream* getSubtitleStream() const;
+
+    /**
+     * @brief 获取字幕编解码器参数（用于初始化 SubtitleDecoder）
+     * @return AVCodecParameters 指针，无字幕流时返回 nullptr
+     */
+    AVCodecParameters* getSubtitleCodecParams() const;
 
     // ==================== 媒体信息 ====================
 
@@ -135,6 +155,7 @@ private:
     AVFormatContext* m_formatCtx;    ///< FFmpeg 格式上下文，管理容器级别的信息
     int m_videoStreamIndex;          ///< 视频流索引，-1 表示未找到
     int m_audioStreamIndex;          ///< 音频流索引，-1 表示未找到
+    int m_subtitleStreamIndex;       ///< 字幕流索引，-1 表示未找到
 };
 
 } // namespace FluxPlayer

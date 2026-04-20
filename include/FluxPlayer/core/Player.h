@@ -21,6 +21,8 @@ class Frame;
 class AudioOutput;
 class Controller;
 class Recorder;
+class SubtitleDecoder;
+class SubtitleManager;
 
 /**
  * 播放器状态枚举
@@ -243,6 +245,19 @@ public:
         controller_ = controller;
     }
 
+    // ===== 字幕 =====
+
+    /**
+     * @brief 获取字幕管理器（可能为 nullptr）
+     *
+     * 当媒体无字幕流 / 配置关闭 / 解码器初始化失败时返回 nullptr。
+     * Controller 每帧查询，不持有所有权。
+     */
+    SubtitleManager* getSubtitleManager() const { return subtitleManager_.get(); }
+
+    /** @brief 当前媒体是否有可用的内嵌字幕流 */
+    bool hasSubtitleStream() const { return subtitleDecoder_ != nullptr; }
+
 private:
     /**
      * 解码线程函数
@@ -291,6 +306,7 @@ private:
     // 播放器状态
     std::atomic<PlayerState> state_;
     std::atomic<bool> shouldQuit_;
+    std::atomic<bool> decodingFinished_;  ///< 解码线程已读完所有数据（队列可能仍有剩余帧）
     std::atomic<bool> seekRequested_;
     std::atomic<double> seekTarget_;
     std::atomic<double> lastRenderedPTS_;  // 最后实际渲染的帧的 PTS
@@ -357,6 +373,10 @@ private:
     // 录制器
     std::unique_ptr<Recorder> videoRecorder_;
     std::unique_ptr<Recorder> audioRecorder_;
+
+    // 字幕模块（无字幕流时保持为空指针）
+    std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
+    std::unique_ptr<SubtitleManager> subtitleManager_;
 
     // 最后渲染的帧（用于暂停时保留画面）
     std::shared_ptr<Frame> lastRenderedFrame_;

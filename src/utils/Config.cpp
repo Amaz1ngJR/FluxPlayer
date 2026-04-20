@@ -4,7 +4,6 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
-
 namespace FluxPlayer {
 
 // 获取配置单例
@@ -64,6 +63,19 @@ bool Config::load() {
                 else if (key == "recordDir") settings_.recordDir = value;
                 else if (key == "recordQuality") settings_.recordQuality = value;
                 else if (key == "hwaccel") settings_.hwaccel = (value == "true" || value == "1");
+                else if (key == "subtitleEnabled") settings_.subtitleEnabled = (value == "true" || value == "1");
+                else if (key == "subtitleFontScale") {
+                    // 限制字体缩放范围，避免异常值导致字幕过大/过小
+                    try {
+                        float scale = std::stof(value);
+                        if (scale < 0.5f) scale = 0.5f;
+                        if (scale > 4.0f) scale = 4.0f;
+                        settings_.subtitleFontScale = scale;
+                    } catch (...) {
+                        // 解析失败保留默认值
+                    }
+                }
+                else if (key == "subtitleFontPath") settings_.subtitleFontPath = value;
             }
 
             lastModTime_ = getFileModTime();
@@ -74,6 +86,14 @@ bool Config::load() {
     if (!fileExists) {
         LOG_INFO("Config file not found, creating with defaults: " + configPath_);
     }
+
+    // 每次加载后同步日志级别（启动时 + 热重载时均生效）
+    LogLevel level = LogLevel::LOG_INFO;
+    if (settings_.logLevel == "DEBUG") level = LogLevel::LOG_DEBUG;
+    else if (settings_.logLevel == "WARN")  level = LogLevel::LOG_WARN;
+    else if (settings_.logLevel == "ERROR") level = LogLevel::LOG_ERROR;
+    Logger::getInstance().setLogLevel(level);
+
     // 无论是新建还是旧文件缺少新配置项，都回写一次完整配置
     save();
     return true;
@@ -113,13 +133,21 @@ bool Config::save() {
     file << "# hwaccel: 是否启用硬件加速解码 (true / false)\n";
     file << "# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2\n";
     file << "# 硬件解码可显著降低 CPU 占用，不支持时自动降级为软件解码\n";
-    file << "hwaccel=" << (settings_.hwaccel ? "true" : "false") << "\n";
+    file << "hwaccel=" << (settings_.hwaccel ? "true" : "false") << "\n\n";
+
+    file << "[Subtitle]\n";
+    file << "# subtitleEnabled: 是否启用内嵌字幕流解码与渲染 (true / false)\n";
+    file << "subtitleEnabled=" << (settings_.subtitleEnabled ? "true" : "false") << "\n";
+    file << "# subtitleFontScale: 字幕字体缩放比例 (0.5 ~ 4.0)\n";
+    file << "subtitleFontScale=" << settings_.subtitleFontScale << "\n";
+    file << "# subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)\n";
+    file << "subtitleFontPath=" << settings_.subtitleFontPath << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
     return true;
 }
 
-// 检查配置文件是否修改，如有修改则重新加载
+// 检查配置文件是否修改，如有修改则重新加载并同步日志级别
 void Config::checkAndReload() {
     long modTime = getFileModTime();
     if (modTime > lastModTime_) {

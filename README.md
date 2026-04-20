@@ -20,12 +20,13 @@
 - 📡 RTSP/RTMP/HLS 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
 - 🌊 网络流自适应缓冲：视频队列 30 帧、预缓冲 5 帧起播，音频队列动态扩容（上限 100 帧）
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
-- 📝 线程安全日志系统，支持 TCP 远程日志查看
+- 📝 线程安全日志系统，支持 TCP 远程日志查看，运行时热更新日志级别
 - ⚙️ INI 配置文件，支持热重载
 - 📸 截图功能（PNG / JPEG，快捷键 P）
 - 🎥 录像功能（转封装原始流，支持 low/medium/high/original 四档质量）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
 - 🔁 循环播放
+- 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
 
 ## 技术栈
 | 组件 | 技术 |
@@ -57,6 +58,7 @@ FluxPlayer/
 │   ├── decoder/          # 解码器 (Demuxer, VideoDecoder, AudioDecoder, Frame)
 │   ├── recorder/         # 录制器 (Recorder)
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
+│   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
 │   ├── ui/               # 界面 (Window, Controller, HomeScreen)
 │   └── utils/            # 工具 (Config, Logger, Timer, Screenshot)
 ├── include/FluxPlayer/   # 头文件
@@ -83,6 +85,16 @@ brew install ffmpeg@4
 
 FFmpeg 已集成在 `third_party/ffmpeg/` 中，无需额外安装。
 
+使用 xmake 构建时，需要 MinGW-w64 编译器，运行 `setup_env.ps1` 初始化构建环境：
+
+```powershell
+# 首次使用需允许脚本执行（仅需一次）
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# 初始化 MinGW + xmake 环境
+.\setup_env.ps1
+```
+
 ### Linux
 
 ```bash
@@ -98,7 +110,8 @@ sudo dnf install ffmpeg-devel alsa-lib-devel
 ### 使用 xmake（推荐）
 
 ```bash
-# 安装 xmake：https://xmake.io
+# 安装 xmake 2.9.x：https://xmake.io
+# 注意：需要 xmake 2.9.x，xmake 3.x 暂不兼容
 # Release 构建
 xmake
 

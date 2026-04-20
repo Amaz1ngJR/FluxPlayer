@@ -23,6 +23,11 @@ public:
         std::string recordDir = "Record";
         std::string recordQuality = "original";  // low / medium / high / original
         bool hwaccel = true;  // 硬件加速解码，默认开启
+
+        // ==================== 字幕设置 ====================
+        bool subtitleEnabled = true;          ///< 字幕总开关（解码+渲染）
+        float subtitleFontScale = 1.4f;       ///< 字幕字体缩放比例（1.0 ~ 2.5）
+        std::string subtitleFontPath = "";    ///< 自定义字体路径（留空按平台自动探测 CJK 字体）
     };
 
     static Config& getInstance();

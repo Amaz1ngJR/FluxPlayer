@@ -9,6 +9,11 @@ set_project("FluxPlayer")
 set_version("0.1.0")
 set_languages("cxx17")  -- 要求 C++17 标准
 
+-- Windows MinGW 环境下，确保所有 target 使用正确的工具链
+if is_plat("windows") then
+    set_toolchains("mingw")
+end
+
 -- ========================
 -- 可选编译选项
 -- ========================
@@ -168,7 +173,9 @@ target("FluxPlayer")
 
     -- 预编译头（PCH）：把常用的 STL 头和 Logger.h 预先编译好，
     -- 后续每个 .cpp 直接复用，避免重复解析，显著加快编译速度
-    set_pcxxheader("include/FluxPlayer/pch.h")
+    if not is_plat("windows") then
+        set_pcxxheader("include/FluxPlayer/pch.h")
+    end
 
     -- Unity Build：把多个 .cpp 合并成一个大文件一起编译，
     -- 减少重复解析头文件的开销，batchsize=8 表示每组合并 8 个文件

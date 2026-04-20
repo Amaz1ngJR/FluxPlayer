@@ -8,6 +8,7 @@ namespace FluxPlayer {
 // 前向声明
 class Player;
 class Window;
+class SubtitleManager;
 
 /**
  * Controller 类 - UI 控制界面
@@ -48,11 +49,33 @@ public:
     void setSeekPrecision(double precision) { seekPrecision_ = precision; }
     double getSeekPrecision() const { return seekPrecision_; }
 
+    // ==================== 字幕控制 ====================
+
+    /**
+     * @brief 启用 / 停用字幕渲染（运行时开关）
+     *
+     * 注意：此开关只影响 UI 侧是否绘制字幕，解码线程是否工作由 Config
+     * 在打开媒体时一次性决定；要彻底停止解码需重新打开媒体。
+     */
+    void setSubtitleEnabled(bool enabled);
+    bool isSubtitleEnabled() const { return subtitleEnabled_; }
+
 private:
     void renderBottomOverlay();
     void renderMediaInfo();
     void renderStats();
     std::string formatTime(double seconds);
+
+    /** @brief 绘制字幕浮层（在 render() 中每帧调用，独立于 UI 可见性） */
+    void renderSubtitles();
+
+    /**
+     * @brief 按平台探测并加载支持 CJK 的字体
+     *
+     * 优先级：配置项 subtitleFontPath → 平台内建系统字体 → ImGui 默认字体。
+     * 失败时 subtitleFont_ 保持 nullptr，字幕仍会渲染但中文字符可能显示为方框。
+     */
+    void loadSubtitleFont();
 
 private:
     Player& player_;
@@ -89,6 +112,11 @@ private:
     double lastMouseMoveTime_;
     bool forceVisible_;
     static constexpr double AUTO_HIDE_DELAY = 3.0;
+
+    // ==================== 字幕状态 ====================
+    bool subtitleEnabled_;       ///< 是否启用字幕渲染
+    float subtitleFontScale_;    ///< 字幕字体缩放比例
+    void* subtitleFont_;         ///< ImFont* 的不透明句柄（隔离 ImGui 依赖）
 };
 
 } // namespace FluxPlayer

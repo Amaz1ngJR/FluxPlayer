@@ -13,7 +13,8 @@ namespace FluxPlayer {
 Demuxer::Demuxer()
     : m_formatCtx(nullptr)
     , m_videoStreamIndex(-1)
-    , m_audioStreamIndex(-1) {
+    , m_audioStreamIndex(-1)
+    , m_subtitleStreamIndex(-1) {
     LOG_DEBUG("Demuxer constructor called");
 }
 
@@ -132,10 +133,15 @@ bool Demuxer::open(const std::string& filename) {
             m_audioStreamIndex = i;
             LOG_INFO("Found audio stream at index " + std::to_string(i) +
                     " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));
+        } else if (codecType == AVMEDIA_TYPE_SUBTITLE && m_subtitleStreamIndex == -1) {
+            // 仅识别第一条字幕流，多语言字幕轨选择留待阶段二
+            m_subtitleStreamIndex = i;
+            LOG_INFO("Found subtitle stream at index " + std::to_string(i) +
+                    " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));
         }
     }
 
-    // 检查是否至少找到一个流
+    // 检查是否至少找到一个音视频流（字幕流不是必需的）
     if (m_videoStreamIndex == -1 && m_audioStreamIndex == -1) {
         LOG_ERROR("No video or audio stream found in file");
         close();
@@ -180,6 +186,7 @@ void Demuxer::close() {
     }
     m_videoStreamIndex = -1;
     m_audioStreamIndex = -1;
+    m_subtitleStreamIndex = -1;
 }
 
 /**
@@ -235,6 +242,18 @@ AVCodecParameters* Demuxer::getVideoCodecParams() const {
 
 AVCodecParameters* Demuxer::getAudioCodecParams() const {
     AVStream* stream = getAudioStream();
+    return stream ? stream->codecpar : nullptr;
+}
+
+AVStream* Demuxer::getSubtitleStream() const {
+    if (!m_formatCtx || m_subtitleStreamIndex < 0) {
+        return nullptr;
+    }
+    return m_formatCtx->streams[m_subtitleStreamIndex];
+}
+
+AVCodecParameters* Demuxer::getSubtitleCodecParams() const {
+    AVStream* stream = getSubtitleStream();
     return stream ? stream->codecpar : nullptr;
 }
 
