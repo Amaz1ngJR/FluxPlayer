@@ -224,19 +224,13 @@ std::string SubtitleDecoder::stripASSOverrides(const std::string& raw) {
 
     if (raw.empty()) return {};
 
-    // --- Step 1: 若是 "Dialogue: ..." 格式，跳过前 9 个逗号字段（标准 ASS Event 列数）---
-    // FFmpeg 4.x 的 rects[i]->ass 往往是完整 Dialogue 行；FFmpeg 5+ 已直接给文本部分
+    // --- Step 1: 提取 ASS 文本字段 ---
+    // FFmpeg 输出的 ass 字段格式：[Dialogue: ]Layer,Start,End,Style,Name,ML,MR,MV,Effect,,Text
+    // 无论是否有 "Dialogue:" 前缀，文本字段始终在最后一个 ",," 之后
     std::string body;
-    if (raw.compare(0, 9, "Dialogue:") == 0) {
-        size_t pos = 0;
-        int commasToSkip = 9;
-        while (commasToSkip > 0 && pos < raw.size()) {
-            size_t c = raw.find(',', pos);
-            if (c == std::string::npos) break;
-            pos = c + 1;
-            --commasToSkip;
-        }
-        body = (pos < raw.size()) ? raw.substr(pos) : std::string();
+    size_t lastDoubleComma = raw.rfind(",,");
+    if (lastDoubleComma != std::string::npos) {
+        body = raw.substr(lastDoubleComma + 2);
     } else {
         body = raw;
     }
