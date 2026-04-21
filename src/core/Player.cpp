@@ -367,7 +367,8 @@ void Player::run() {
 
         while (!window_->shouldClose() && !shouldQuit_.load()) {
             // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
-            if (decodingFinished_.load() && videoQueue_->size() == 0) {
+            // 用 numReadable() 而非 size()：keep-last 保留的已显示帧不算"待消费"
+            if (decodingFinished_.load() && videoQueue_->numReadable() == 0) {
                 shouldQuit_.store(true);
                 break;
             }

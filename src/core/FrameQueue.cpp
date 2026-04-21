@@ -124,4 +124,9 @@ int FrameQueue::size() const {
     return size_;
 }
 
+int FrameQueue::numReadable() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return size_ - (keepLast_ && rindexShown_ ? 1 : 0);
+}
+
 } // namespace FluxPlayer

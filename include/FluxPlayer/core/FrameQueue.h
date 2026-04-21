@@ -128,11 +128,15 @@ public:
 
     // ==================== 状态查询 ====================
 
-    /**
-     * @brief 获取当前队列中的有效帧数
-     * @return 帧数（含 keep-last 保留的帧）
-     */
+    /** @brief 获取当前队列中的有效帧数 */
     int size() const;
+
+    /**
+     * @brief 获取可消费的新帧数（不含 keep-last 保留的已显示帧）
+     *
+     * 用于 EOF 检测：解码结束后此值为 0 表示所有帧已渲染完毕。
+     */
+    int numReadable() const;
 
     /** @brief 获取队列容量 */
     int maxSize() const { return maxSize_; }
