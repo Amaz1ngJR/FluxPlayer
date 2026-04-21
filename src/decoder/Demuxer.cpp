@@ -53,7 +53,10 @@ bool Demuxer::open(const std::string& filename) {
             av_dict_set(&options, "reconnect_streamed", "1", 0);         // 流传输中也重连
             av_dict_set(&options, "reconnect_on_network_error", "1", 0); // 网络错误时重连
             av_dict_set(&options, "reconnect_delay_max", "5", 0);        // 最大重连延迟 5 秒
-            LOG_DEBUG("HTTP/HLS options: reconnect_streamed, reconnect_on_network_error");
+            // HTTP/HLS 流头部清晰，可缩小探测降低初始内存
+            av_dict_set(&options, "probesize", "524288", 0);              // 512 KB（默认 5 MB）
+            av_dict_set(&options, "analyzeduration", "2000000", 0);       // 2 秒（默认 5 秒）
+            LOG_DEBUG("HTTP/HLS options: reconnect_streamed, reconnect_on_network_error, probesize=512KB");
         }
 
         // === RTSP 专用选项 ===

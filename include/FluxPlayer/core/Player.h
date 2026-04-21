@@ -5,8 +5,6 @@
 #include <functional>
 #include <thread>
 #include <atomic>
-#include <mutex>
-#include <queue>
 
 namespace FluxPlayer {
 
@@ -18,6 +16,7 @@ class VideoDecoder;
 class AudioDecoder;
 class AVSync;
 class Frame;
+class FrameQueue;
 class AudioOutput;
 class Controller;
 class Recorder;
@@ -349,9 +348,9 @@ private:
     int audioSampleRate_;                         // 音频采样率
     int audioChannels_;                           // 音频声道数
 
-    // 音频帧残留缓冲（处理部分消费的帧）
-    std::shared_ptr<Frame> pendingAudioFrame_;   // 未完全消费的音频帧
-    size_t pendingAudioOffset_;                  // 已消费的字节偏移
+    // 音频帧残留偏移（处理部分消费的帧）
+    // 帧本身保留在 audioQueue_ 中（不 next()），下次 peek() 返回同一帧
+    size_t pendingAudioOffset_;                  // 当前队头帧已消费的字节偏移
 
     // 音频缓冲延迟管理
     double audioBufferDelay_;                     // 动态计算的音频缓冲延迟（秒）
@@ -378,22 +377,14 @@ private:
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
     std::unique_ptr<SubtitleManager> subtitleManager_;
 
-    // 最后渲染的帧（用于暂停时保留画面）
-    std::shared_ptr<Frame> lastRenderedFrame_;
-    std::mutex lastFrameMutex_;
-
     // 线程相关
     std::unique_ptr<std::thread> decodingThread_;
     std::unique_ptr<std::thread> renderingThread_;
 
-    // 帧队列（用于解码线程和渲染线程之间传递数据）
-    std::queue<std::shared_ptr<Frame>> videoFrameQueue_;
-    std::queue<std::shared_ptr<Frame>> audioFrameQueue_;
-    mutable std::mutex videoQueueMutex_;
-    mutable std::mutex audioQueueMutex_;
-
-    size_t MAX_VIDEO_QUEUE_SIZE = 10;  // 最大视频帧队列大小（网络流在 open() 中动态调整）
-    size_t MAX_AUDIO_QUEUE_SIZE;  // 最大音频帧队列大小（实时流会动态调整）
+    // 帧队列（环形缓冲 + condition_variable 背压，对标 ffplay FrameQueue）
+    // 视频队列启用 keep-last（暂停/截图时保留最后帧），音频队列不启用
+    std::unique_ptr<FrameQueue> videoQueue_;
+    std::unique_ptr<FrameQueue> audioQueue_;
 
     // 网络流预缓冲状态
     std::atomic<bool> prebuffering_{false};  // 是否正在预缓冲（等待队列填充到安全水位）

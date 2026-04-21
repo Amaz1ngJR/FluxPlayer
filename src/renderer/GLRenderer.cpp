@@ -192,6 +192,32 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     glDrawArrays(GL_TRIANGLES, 0, 6);  // 绘制 6 个顶点（2 个三角形）
     glBindVertexArray(0);
     m_shader->unuse();
+
+    // 纹理数据已上传，标记 GPU 侧帧有效（暂停时可复用）
+    m_hasValidTexture = true;
+    m_lastIsNV12Shader = useNV12Shader;
+}
+
+/**
+ * 使用 GPU 纹理中已有的帧数据重新渲染
+ * 用于暂停、队列为空等场景，避免保留 CPU 侧帧数据
+ */
+void GLRenderer::renderCachedFrame() {
+    if (!m_hasValidTexture) return;
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_textureY);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_lastIsNV12Shader ? m_textureUV : m_textureU);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_textureV);
+
+    m_shader->use();
+    m_shader->setInt("isNV12", m_lastIsNV12Shader ? 1 : 0);
+    glBindVertexArray(m_VAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    m_shader->unuse();
 }
 
 void GLRenderer::clear(float r, float g, float b, float a) {
@@ -206,6 +232,7 @@ void GLRenderer::setVideoSize(int width, int height) {
 
     m_videoWidth = width;
     m_videoHeight = height;
+    m_hasValidTexture = false;  // 分辨率变化，纹理数据失效
 
     // 重新创建纹理
     glBindTexture(GL_TEXTURE_2D, m_textureY);

@@ -158,6 +158,7 @@ set(FLUXPLAYER_SOURCES
     src/main.cpp
     src/audio/AudioOutput.cpp
     src/core/AVSync.cpp
+    src/core/FrameQueue.cpp
     src/core/MediaInfo.cpp
     src/core/Player.cpp
     src/decoder/AudioDecoder.cpp

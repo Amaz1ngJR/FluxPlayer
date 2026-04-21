@@ -18,7 +18,7 @@
 - ⚡ 硬件加速解码（macOS VideoToolbox / Windows CUDA(NVDEC)、D3D11VA、DXVA2），默认开启，自动降级
 - 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU；CUDA 后端自动解交错兼容
 - 📡 RTSP/RTMP/HLS 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
-- 🌊 网络流自适应缓冲：视频队列 30 帧、预缓冲 5 帧起播，音频队列动态扩容（上限 100 帧）
+- 🌊 网络流自适应缓冲：环形帧队列（对标 ffplay FrameQueue），本地 4 帧 / 网络 8 帧，预缓冲 5 帧起播
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看，运行时热更新日志级别
 - ⚙️ INI 配置文件，支持热重载
@@ -218,6 +218,11 @@ recordQuality=original        # 录像质量 (low / medium / high / original)
 
 [Decoder]
 hwaccel=true                  # 硬件加速解码 (macOS: VideoToolbox / Windows: CUDA > D3D11VA > DXVA2)
+
+[Subtitle]
+subtitleEnabled=true          # 是否启用内嵌字幕流解码与渲染
+subtitleFontScale=1.4         # 字幕字体缩放比例 (0.5 ~ 4.0)
+subtitleFontPath=             # 自定义字体路径（留空则按平台自动探测 CJK 字体）
 ```
 
 录像质量说明：
@@ -329,7 +334,7 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 - PTS 回绕检测：视频回绕时跳帧等待，音频回绕时统一重校准基准
 - 无效 PTS（AV_NOPTS_VALUE）帧基于实际帧率 / 采样率估算 PTS，不丢弃
 - 网络断流指数退避重试（100ms → 3000ms，最多 30 次）
-- 网络流视频队列 30 帧 + 预缓冲 5 帧起播；音频队列欠载时动态扩容（上限 100 帧）
+- 网络流视频帧队列 8 帧 + 预缓冲 5 帧起播；音频帧队列 20 帧；背压机制防止欠载
 
 ### FFmpeg 版本兼容
 

@@ -10,6 +10,7 @@
 #include "FluxPlayer/decoder/VideoDecoder.h"
 #include "FluxPlayer/decoder/AudioDecoder.h"
 #include "FluxPlayer/decoder/Frame.h"
+#include "FluxPlayer/core/FrameQueue.h"
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/subtitle/SubtitleDecoder.h"
 #include "FluxPlayer/subtitle/SubtitleManager.h"
@@ -65,7 +66,6 @@ Player::Player()
     , audioUnderrunCount_(0)
     , pendingAudioOffset_(0)
     , controller_(nullptr)
-    , MAX_AUDIO_QUEUE_SIZE(20)  // 默认20帧，实时流会增大
     , droppedFrames_(0)
     , currentFPS_(0.0)
     , totalBytesRead_(0)
@@ -120,13 +120,25 @@ bool Player::open(const std::string& filePath) {
         firstAudioFrameReceived_.store(false);
         firstVideoPTS_.store(0.0);
         firstAudioPTS_.store(0.0);
-
-        // 实时流使用更大的帧队列，减少网络抖动导致的欠载
-        MAX_VIDEO_QUEUE_SIZE = 30;  // 从10增大到30帧，应对网络抖动
-        MAX_AUDIO_QUEUE_SIZE = 50;  // 从20增大到50帧
-        LOG_INFO("Live stream: Video queue=" + std::to_string(MAX_VIDEO_QUEUE_SIZE) +
-                 ", Audio queue=" + std::to_string(MAX_AUDIO_QUEUE_SIZE));
+        // 启动预缓冲：等待队列填充到安全水位再开始渲染
+        prebuffering_.store(true);
+        LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
     }
+
+    // 创建帧队列：本地文件用小队列降低内存占用，网络流用大队列应对抖动
+    // 视频队列启用 keep-last（暂停/截图时保留最后帧）
+    // 队列容量来源：参考 ffplay VIDEO_PICTURE_QUEUE_SIZE=3、SAMPLE_QUEUE_SIZE=9，
+    // 网络流双倍以应对抖动；过大会浪费内存且增加 seek 后的解码追赶时间
+    constexpr int kLocalVideoQueueSize = 4;
+    constexpr int kLocalAudioQueueSize = 10;
+    constexpr int kLiveVideoQueueSize  = 8;
+    constexpr int kLiveAudioQueueSize  = 20;
+    int videoQueueSize = isLiveStream_ ? kLiveVideoQueueSize : kLocalVideoQueueSize;
+    int audioQueueSize = isLiveStream_ ? kLiveAudioQueueSize : kLocalAudioQueueSize;
+    videoQueue_ = std::make_unique<FrameQueue>(videoQueueSize, /*keepLast=*/true);
+    audioQueue_ = std::make_unique<FrameQueue>(audioQueueSize, /*keepLast=*/false);
+    LOG_INFO("Frame queues created: video=" + std::to_string(videoQueueSize) +
+             ", audio=" + std::to_string(audioQueueSize));
 
     // 初始化解码器
     if (!initDecoders()) {
@@ -227,6 +239,8 @@ bool Player::play() {
     }
 
     // 启动解码线程
+    videoQueue_->start();
+    audioQueue_->start();
     shouldQuit_.store(false);
     decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
 
@@ -274,6 +288,10 @@ void Player::stop() {
 
     shouldQuit_.store(true);
 
+    // 终止队列等待，唤醒阻塞的解码线程
+    if (videoQueue_) videoQueue_->abort();
+    if (audioQueue_) audioQueue_->abort();
+
     // 停止音频输出
     if (audioOutput_) {
         audioOutput_->stop();
@@ -285,18 +303,8 @@ void Player::stop() {
     }
 
     // 清空队列
-    {
-        std::lock_guard<std::mutex> lock(videoQueueMutex_);
-        while (!videoFrameQueue_.empty()) {
-            videoFrameQueue_.pop();
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(audioQueueMutex_);
-        while (!audioFrameQueue_.empty()) {
-            audioFrameQueue_.pop();
-        }
-    }
+    if (videoQueue_) videoQueue_->flush();
+    if (audioQueue_) audioQueue_->flush();
 
     setState(PlayerState::STOPPED);
 }
@@ -359,18 +367,15 @@ void Player::run() {
 
         while (!window_->shouldClose() && !shouldQuit_.load()) {
             // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
-            if (decodingFinished_.load()) {
-                std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                if (videoFrameQueue_.empty()) {
-                    shouldQuit_.store(true);
-                    break;
-                }
+            if (decodingFinished_.load() && videoQueue_->size() == 0) {
+                shouldQuit_.store(true);
+                break;
             }
             double currentTime = timer.getElapsedSeconds();
 
         // 从队列获取视频帧并渲染
         if (state_ == PlayerState::PLAYING) {
-            std::shared_ptr<Frame> frame;
+            Frame* frame = nullptr;
 
             // ===== 预缓冲期间不取帧，等待队列填充到安全水位 =====
             // 网络流起播时先缓冲一定帧数，避免因网络延迟导致的起播卡顿
@@ -389,29 +394,33 @@ void Player::run() {
             // 在解码到目标位置的过程中，不从队列取帧，保持显示上一帧
             if (!decodingToTarget_.load()) {
                 // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
-                std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                if (!videoFrameQueue_.empty()) {
-                    double nextPTS = videoFrameQueue_.front()->getPTS();
+                Frame* peeked = videoQueue_->peek();
+                if (peeked) {
+                    double nextPTS = peeked->getPTS();
                     double masterClock = avSync_->getMasterClock();
                     // 下一帧的 PTS <= 主时钟，说明该显示了
                     if (nextPTS <= masterClock + 0.005) {
-                        frame = videoFrameQueue_.front();
-                        videoFrameQueue_.pop();
+                        frame = peeked;
+                        videoQueue_->next();  // 推进读索引（keep-last 首次只标记 shown）
                         // 如果落后较多，连续丢帧追赶
-                        while (!videoFrameQueue_.empty()) {
-                            double peekPTS = videoFrameQueue_.front()->getPTS();
-                            if (peekPTS <= masterClock + 0.005) {
-                                frame = videoFrameQueue_.front();
-                                videoFrameQueue_.pop();
-                                droppedFrames_.fetch_add(1);
-                            } else {
-                                break;
+                        while (true) {
+                            Frame* nextFrame = videoQueue_->peek();
+                            if (!nextFrame) break;
+                            // keep-last 机制导致 next() 释放旧帧后 peek() 返回同一帧
+                            // 用指针比较检测重复：标记 shown 后继续，不计为丢帧
+                            if (nextFrame == frame) {
+                                videoQueue_->next();
+                                continue;
                             }
+                            if (nextFrame->getPTS() > masterClock + 0.005) break;
+                            frame = nextFrame;
+                            videoQueue_->next();
+                            droppedFrames_.fetch_add(1);
                         }
                     }
                 }
             }
-            // else: seek状态：不取帧，frame保持为空，后面会渲染lastRenderedFrame_
+            // else: seek状态：不取帧，frame保持为空，后面渲染缓存纹理
 
             if (frame) {
                 double framePTS = frame->getPTS();
@@ -435,46 +444,20 @@ void Player::run() {
                     isNV12
                 );
 
-                // 保存最后渲染的帧（用于暂停时显示）
-                {
-                    std::lock_guard<std::mutex> lock(lastFrameMutex_);
-                    lastRenderedFrame_ = frame;
-                }
-
-                // 更新最后渲染的帧的 PTS
+                // 更新最后渲染的帧的 PTS（帧本身由 keep-last 保留在 videoQueue_ 中）
                 lastRenderedPTS_.store(framePTS);
             } else {
-                // 队列为空或正在seek：渲染上一帧
-                std::lock_guard<std::mutex> lock(lastFrameMutex_);
-                if (lastRenderedFrame_) {
-                    renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-                    AVFrame* avFrame = lastRenderedFrame_->getAVFrame();
-                    bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
-                    renderer_->renderFrame(
-                        avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                        avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
-                        isNV12
-                    );
-                } else {
-                    // 如果还没有渲染过任何帧，则清空屏幕
-                    renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+                // 队列为空或正在 seek：复用 GPU 纹理中的帧数据，避免重复上传
+                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+                if (renderer_->hasValidTexture()) {
+                    renderer_->renderCachedFrame();
                 }
             }
         } else {
-            // 暂停或其他非播放状态：渲染最后一帧
-            std::lock_guard<std::mutex> lock(lastFrameMutex_);
-            if (lastRenderedFrame_) {
-                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-                AVFrame* avFrame = lastRenderedFrame_->getAVFrame();
-                bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
-                renderer_->renderFrame(
-                    avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                    avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
-                    isNV12
-                );
-            } else {
-                // 如果还没有渲染过任何帧，则清空屏幕
-                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+            // 暂停或其他非播放状态：复用 GPU 纹理中的帧数据
+            renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+            if (renderer_->hasValidTexture()) {
+                renderer_->renderCachedFrame();
             }
         }
 
@@ -495,16 +478,8 @@ void Player::run() {
         static double lastPrint = 0.0;
         static size_t lastBytesRead = 0;
         if (currentTime - lastPrint >= 1.0) {
-            size_t videoQueueSize = 0;
-            size_t audioQueueSize = 0;
-            {
-                std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                videoQueueSize = videoFrameQueue_.size();
-            }
-            {
-                std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                audioQueueSize = audioFrameQueue_.size();
-            }
+            size_t videoQueueSize = videoQueue_ ? videoQueue_->size() : 0;
+            size_t audioQueueSize = audioQueue_ ? audioQueue_->size() : 0;
 
             // 计算实时码率（Mbps）
             size_t currentBytes = totalBytesRead_.load();
@@ -547,15 +522,8 @@ void Player::run() {
             }
 
             // 清空帧队列
-            {
-                std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                while (!videoFrameQueue_.empty()) videoFrameQueue_.pop();
-            }
-            {
-                std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                while (!audioFrameQueue_.empty()) audioFrameQueue_.pop();
-            }
-            pendingAudioFrame_.reset();
+            videoQueue_->flush();
+            audioQueue_->flush();
             pendingAudioOffset_ = 0;
 
             // seek demuxer到开头
@@ -572,7 +540,9 @@ void Player::run() {
             currentAudioFramePTS_.store(0.0);
             samplesPlayedInFrame_.store(0);
 
-            // 重启解码线程
+            // 重启队列和解码线程
+            videoQueue_->start();
+            audioQueue_->start();
             shouldQuit_.store(false);
             decodingFinished_.store(false);  // 必须重置，否则渲染循环立即退出
             decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
@@ -611,14 +581,8 @@ PlayerStats Player::getStats() const {
     stats.bitrate = currentBitrate_.load();
 
     // 获取队列大小
-    {
-        std::lock_guard<std::mutex> lock(videoQueueMutex_);
-        stats.videoQueueSize = videoFrameQueue_.size();
-    }
-    {
-        std::lock_guard<std::mutex> lock(audioQueueMutex_);
-        stats.audioQueueSize = audioFrameQueue_.size();
-    }
+    stats.videoQueueSize = videoQueue_ ? videoQueue_->size() : 0;
+    stats.audioQueueSize = audioQueue_ ? audioQueue_->size() : 0;
 
     stats.state = state_.load();
     return stats;
@@ -679,21 +643,10 @@ void Player::decodingThread() {
                 }
 
                 // 清空帧队列
-                {
-                    std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                    while (!videoFrameQueue_.empty()) {
-                        videoFrameQueue_.pop();
-                    }
-                }
-                {
-                    std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                    while (!audioFrameQueue_.empty()) {
-                        audioFrameQueue_.pop();
-                    }
-                }
+                videoQueue_->flush();
+                audioQueue_->flush();
 
-                // 清空残留音频帧
-                pendingAudioFrame_.reset();
+                // 清空残留音频偏移
                 pendingAudioOffset_ = 0;
 
                 // 通知同步器更新时钟
@@ -713,50 +666,14 @@ void Player::decodingThread() {
             seekRequested_.store(false);
         }
 
-        // ===== 优化：快速丢弃模式下跳过队列检查 =====
-        bool isDiscardingMode = decodingToTarget_.load();
-        size_t videoQueueSize = 0;
-        size_t audioQueueSize = 0;
-        bool videoQueueFull = false;
-        bool audioQueueFull = false;
-
         // ===== 网络流预缓冲完成检测 =====
         // 等待视频队列积累到 5 帧后再允许渲染线程取帧
         if (prebuffering_.load()) {
-            std::lock_guard<std::mutex> lock(videoQueueMutex_);
-            size_t buffered = videoFrameQueue_.size();
+            size_t buffered = videoQueue_->size();
             if (buffered >= 5) {
                 prebuffering_.store(false);
                 LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
             }
-        }
-
-        // ===== 动态音频队列扩容 =====
-        // 音频欠载过于频繁时，自动扩大队列深度以应对网络抖动
-        if (isLiveStream_) {
-            int underruns = audioUnderrunCount_.load();
-            if (underruns > 10 && MAX_AUDIO_QUEUE_SIZE < 100) {
-                MAX_AUDIO_QUEUE_SIZE = std::min(MAX_AUDIO_QUEUE_SIZE + 20, (size_t)100);
-                audioUnderrunCount_.store(0);
-                LOG_WARN("Audio underrun frequent, expanded queue to " +
-                         std::to_string(MAX_AUDIO_QUEUE_SIZE));
-            }
-        }
-
-        // 只在非丢弃模式下检查队列状态
-        if (!isDiscardingMode) {
-            {
-                std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                videoQueueSize = videoFrameQueue_.size();
-            }
-
-            if (audioDecoder_) {
-                std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                audioQueueSize = audioFrameQueue_.size();
-            }
-
-            videoQueueFull = videoQueueSize >= MAX_VIDEO_QUEUE_SIZE;
-            audioQueueFull = audioQueueSize >= MAX_AUDIO_QUEUE_SIZE;
         }
 
         bool frameReceived = false;
@@ -871,33 +788,19 @@ void Player::decodingThread() {
                 continue;
             }
 
-            // ===== 不需要丢弃的帧：进行 YUV 转换并加入队列 =====
-            auto framePtr = std::make_shared<Frame>();
-            if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *framePtr)) {
-                // 等待直到队列有空间（带超时保护）
-                int waitCount = 0;
-                const int maxWait = 100;  // 最多等待100次 * 5ms = 500ms
-                while (videoQueueFull && waitCount < maxWait && !shouldQuit_.load()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    // 重新检查队列状态
-                    {
-                        std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                        videoQueueFull = videoFrameQueue_.size() >= MAX_VIDEO_QUEUE_SIZE;
-                    }
-                    waitCount++;
-                }
-
-                // 如果队列仍然满（超时或quit），丢弃此帧
-                if (videoQueueFull || shouldQuit_.load()) {
-                    droppedFrames_.fetch_add(1);
-                    if (waitCount >= maxWait) {
-                        LOG_WARN("Video frame dropped after timeout");
-                    }
-                } else {
-                    // 加入队列
-                    std::lock_guard<std::mutex> lock(videoQueueMutex_);
-                    videoFrameQueue_.push(framePtr);
-                }
+            // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
+            // 队列满时阻塞等待渲染线程消费（对标 ffplay frame_queue_peek_writable）
+            // 阻塞时长 ≤ 1 个 VSync 周期（~16ms），音频队列有 ~200ms 缓冲不会欠载
+            // abort 时返回 nullptr，退出解码循环
+            Frame* writable = videoQueue_->peekWritable();
+            if (!writable) {
+                rawFrame.unreference();
+                break;
+            }
+            if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
+                videoQueue_->push();
+            } else {
+                writable->unreference();
             }
             rawFrame.unreference();
             frameReceived = true;
@@ -1011,26 +914,21 @@ void Player::decodingThread() {
                         continue;
                     }
 
-                    // ===== 不需要丢弃的帧：进行格式转换并加入队列 =====
-                    auto audioFramePtr = std::make_shared<Frame>();
-                    if (audioDecoder_->convertToS16(avFrame, *audioFramePtr)) {
-                        audioFramePtr->setPTS(rawFrame.getPTS());
-                        audioFramePtr->setType(FrameType::AUDIO);
-
-                        // 音频队列满时直接丢弃，不阻塞解码线程
-                        bool canEnqueue = false;
-                        {
-                            std::lock_guard<std::mutex> lock(audioQueueMutex_);
-                            if (audioFrameQueue_.size() < MAX_AUDIO_QUEUE_SIZE) {
-                                audioFrameQueue_.push(audioFramePtr);
-                                canEnqueue = true;
-                            }
-                        }
-                        if (!canEnqueue) {
-                            LOG_DEBUG("Audio frame dropped: queue full");
-                        }
+                    // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
+                    // 音频队列由平台音频线程实时消费，阻塞时间极短
+                    Frame* audioWritable = audioQueue_->peekWritable();
+                    if (!audioWritable) {
+                        rawFrame.unreference();
+                        frameReceived = true;
+                        break;  // abort 信号，退出音频处理
+                    }
+                    if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
+                        audioWritable->setPTS(rawFrame.getPTS());
+                        audioWritable->setType(FrameType::AUDIO);
+                        audioQueue_->push();
                     } else {
                         LOG_WARN("Failed to convert audio frame to S16 format");
+                        audioWritable->unreference();
                     }
                 } else {
                     LOG_WARN("Received invalid audio frame, nb_samples: " +
@@ -1168,18 +1066,8 @@ void Player::cleanup() {
     demuxer_.reset();
 
     // 清空队列
-    {
-        std::lock_guard<std::mutex> lock(videoQueueMutex_);
-        while (!videoFrameQueue_.empty()) {
-            videoFrameQueue_.pop();
-        }
-    }
-    {
-        std::lock_guard<std::mutex> lock(audioQueueMutex_);
-        while (!audioFrameQueue_.empty()) {
-            audioFrameQueue_.pop();
-        }
-    }
+    if (videoQueue_) videoQueue_->flush();
+    if (audioQueue_) audioQueue_->flush();
 
     filePath_.clear();
     duration_ = 0.0;
@@ -1271,14 +1159,11 @@ bool Player::initWindowAndRenderer() {
                     break;
                 case GLFW_KEY_P:
                     {
-                        std::shared_ptr<Frame> frameCopy;
-                        {
-                            std::lock_guard<std::mutex> lock(lastFrameMutex_);
-                            frameCopy = lastRenderedFrame_;
-                        }
-                        if (frameCopy) {
+                        // 从视频队列的 keep-last 槽获取最后渲染的帧（不阻塞渲染线程）
+                        Frame* lastFrame = videoQueue_ ? videoQueue_->peekLast() : nullptr;
+                        if (lastFrame) {
                             auto& cfg = Config::getInstance().get();
-                            Screenshot::saveFrame(frameCopy, cfg.screenshotDir, cfg.screenshotFormat);
+                            Screenshot::saveFrame(lastFrame, cfg.screenshotDir, cfg.screenshotFormat);
                         } else {
                             LOG_WARN("Screenshot: no frame available");
                         }
@@ -1387,26 +1272,9 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
     // 填充缓冲区，尽可能从队列中获取音频数据
     while (bytesWritten < bufferSize) {
-        // 优先使用上次未消费完的帧
-        std::shared_ptr<Frame> audioFrame;
-        size_t frameOffset = 0;
-
-        if (pendingAudioFrame_) {
-            audioFrame = pendingAudioFrame_;
-            frameOffset = pendingAudioOffset_;
-            pendingAudioFrame_.reset();
-            pendingAudioOffset_ = 0;
-        } else {
-            // 从队列取新帧
-            std::lock_guard<std::mutex> lock(audioQueueMutex_);
-            if (!audioFrameQueue_.empty()) {
-                audioFrame = audioFrameQueue_.front();
-                audioFrameQueue_.pop();
-                queueDepth = audioFrameQueue_.size();
-            } else {
-                queueDepth = 0;
-            }
-        }
+        // peek 当前队头帧（不消费），部分消费时通过 pendingAudioOffset_ 追踪
+        Frame* audioFrame = audioQueue_ ? audioQueue_->peek() : nullptr;
+        size_t frameOffset = pendingAudioOffset_;
 
         if (!audioFrame) {
             // 队列为空 - 音频欠载（underrun）
@@ -1418,13 +1286,18 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
             if (underruns % 10 == 1) {  // 每10次记录一次，避免日志过多
                 LOG_WARN("Audio underrun detected, count: " + std::to_string(underruns));
             }
+            queueDepth = 0;
             break;
         }
+
+        queueDepth = audioQueue_->size();
 
         // 验证帧数据完整性
         AVFrame* avFrame = audioFrame->getAVFrame();
         if (!avFrame || !avFrame->data[0] || avFrame->nb_samples <= 0) {
             LOG_WARN("Invalid audio frame received, skipping");
+            audioQueue_->next();  // 丢弃无效帧
+            pendingAudioOffset_ = 0;
             continue;
         }
 
@@ -1458,11 +1331,14 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         size_t samplesCopied = bytesToCopy / (audioChannels_ * sampleSize);
         totalSamplesFilled += samplesCopied;
 
-        // 如果帧没有完全消费，保存残留部分供下次使用
         if (bytesToCopy < remainingFrameData) {
-            pendingAudioFrame_ = audioFrame;
+            // 帧未完全消费：更新偏移，下次回调继续从同一帧消费（不调用 next()）
             pendingAudioOffset_ = frameOffset + bytesToCopy;
             break;
+        } else {
+            // 帧已完全消费：推进读索引，重置偏移
+            audioQueue_->next();
+            pendingAudioOffset_ = 0;
         }
     }
 

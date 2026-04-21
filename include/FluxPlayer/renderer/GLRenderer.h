@@ -59,6 +59,23 @@ public:
     void setNV12Deinterleave(bool enable) { m_nv12Deinterleave = enable; }
 
     /**
+     * @brief 查询 GPU 纹理中是否有可用的视频帧数据
+     *
+     * 渲染后帧数据已上传到 GPU 纹理，CPU 侧可释放像素引用。
+     * 暂停时可直接复用纹理中的数据，无需 CPU 侧帧。
+     *
+     * @return true = 纹理中有有效帧数据可供渲染
+     */
+    bool hasValidTexture() const { return m_hasValidTexture; }
+
+    /**
+     * @brief 使用已有的 GPU 纹理数据重新渲染（不上传新数据）
+     *
+     * 用于暂停、队列为空等场景，避免持有 CPU 侧帧数据。
+     */
+    void renderCachedFrame();
+
+    /**
      * @brief 清除屏幕为指定颜色
      * @param r 红色分量 (0.0~1.0)
      * @param g 绿色分量 (0.0~1.0)
@@ -115,6 +132,12 @@ private:
 
     /// NV12 渲染模式：true = UV 解交错（CUDA 兼容），false = GL_RG8 零拷贝
     bool m_nv12Deinterleave = false;
+
+    /// GPU 纹理中是否有有效帧数据（首次 renderFrame 后置 true，setVideoSize 时重置）
+    bool m_hasValidTexture = false;
+
+    /// 上一次渲染使用的着色器模式（true = NV12 GL_RG8, false = YUV420P/NV12 解交错）
+    bool m_lastIsNV12Shader = false;
 
     /// NV12 UV 解交错缓冲区（预分配，避免每帧动态分配）
     std::vector<uint8_t> m_nv12UBuffer;  ///< 解交错后的 U 平面

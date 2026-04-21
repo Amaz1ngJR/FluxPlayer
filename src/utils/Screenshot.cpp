@@ -43,7 +43,7 @@ std::string Screenshot::generateFilename(const std::string& ext) {
     return oss.str();
 }
 
-std::string Screenshot::saveFrame(const std::shared_ptr<Frame>& frame,
+std::string Screenshot::saveFrame(const Frame* frame,
                                    const std::string& outputDir,
                                    const std::string& format) {
     if (!frame) return "";
