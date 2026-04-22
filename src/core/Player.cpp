@@ -364,6 +364,8 @@ void Player::run() {
         timer.start();
 
         double lastFrameTime = 0.0;
+        double lastPrint = 0.0;       // 上次打印状态的时间（随 timer 重置）
+        size_t lastBytesRead = 0;     // 上次统计码率时的累计字节数
 
         while (!window_->shouldClose() && !shouldQuit_.load()) {
             // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
@@ -403,20 +405,11 @@ void Player::run() {
                     if (nextPTS <= masterClock + 0.005) {
                         frame = peeked;
                         videoQueue_->next();  // 推进读索引（keep-last 首次只标记 shown）
-                        // 如果落后较多，连续丢帧追赶
-                        while (true) {
-                            Frame* nextFrame = videoQueue_->peek();
-                            if (!nextFrame) break;
-                            // keep-last 机制导致 next() 释放旧帧后 peek() 返回同一帧
-                            // 用指针比较检测重复：标记 shown 后继续，不计为丢帧
-                            if (nextFrame == frame) {
-                                videoQueue_->next();
-                                continue;
-                            }
-                            if (nextFrame->getPTS() > masterClock + 0.005) break;
-                            frame = nextFrame;
+                        // keep-last 机制：next() 释放旧帧后 peek() 可能返回同一帧
+                        // 需要再次 next() 标记为 shown，才能在下次迭代中正确获取新帧
+                        Frame* dup = videoQueue_->peek();
+                        if (dup == frame) {
                             videoQueue_->next();
-                            droppedFrames_.fetch_add(1);
                         }
                     }
                 }
@@ -476,8 +469,6 @@ void Player::run() {
         currentFPS_.store(fpsCounter.getFPS());
 
         // 每秒打印一次状态
-        static double lastPrint = 0.0;
-        static size_t lastBytesRead = 0;
         if (currentTime - lastPrint >= 1.0) {
             size_t videoQueueSize = videoQueue_ ? videoQueue_->size() : 0;
             size_t audioQueueSize = audioQueue_ ? audioQueue_->size() : 0;
@@ -790,20 +781,35 @@ void Player::decodingThread() {
             }
 
             // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
-            // 队列满时阻塞等待渲染线程消费（对标 ffplay frame_queue_peek_writable）
-            // 阻塞时长 ≤ 1 个 VSync 周期（~16ms），音频队列有 ~200ms 缓冲不会欠载
-            // abort 时返回 nullptr，退出解码循环
-            Frame* writable = videoQueue_->peekWritable();
-            if (!writable) {
+            // 先将 rawFrame 数据移到队列槽位，立即释放解码器内部 buffer 引用
+            // 避免 peekWritable 阻塞期间解码器 buffer pool 无法回收导致内存膨胀
+            Frame* writable = videoQueue_->tryPeekWritable();
+            if (writable) {
+                // 快速路径：队列有空位，直接写入
+                if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
+                    videoQueue_->push();
+                } else {
+                    writable->unreference();
+                }
                 rawFrame.unreference();
-                break;
-            }
-            if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
-                videoQueue_->push();
             } else {
-                writable->unreference();
+                // 慢速路径：队列满，先移走 rawFrame 数据释放解码器 buffer
+                AVFrame* tempFrame = av_frame_alloc();
+                av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
+                // rawFrame 现在为空，解码器 buffer 引用已转移到 tempFrame
+
+                writable = videoQueue_->peekWritable();  // 阻塞等待，不再持有解码器 buffer
+                if (!writable) {
+                    av_frame_free(&tempFrame);
+                    break;  // abort
+                }
+                if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
+                    videoQueue_->push();
+                } else {
+                    writable->unreference();
+                }
+                av_frame_free(&tempFrame);
             }
-            rawFrame.unreference();
             frameReceived = true;
         }
 
@@ -917,19 +923,38 @@ void Player::decodingThread() {
 
                     // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
                     // 音频队列由平台音频线程实时消费，阻塞时间极短
-                    Frame* audioWritable = audioQueue_->peekWritable();
+                    // 同样先尝试非阻塞，避免持有解码器 buffer 期间阻塞
+                    Frame* audioWritable = audioQueue_->tryPeekWritable();
                     if (!audioWritable) {
-                        rawFrame.unreference();
-                        frameReceived = true;
-                        break;  // abort 信号，退出音频处理
-                    }
-                    if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
-                        audioWritable->setPTS(rawFrame.getPTS());
-                        audioWritable->setType(FrameType::AUDIO);
-                        audioQueue_->push();
+                        // 队列满：先释放 rawFrame，再阻塞等待
+                        double savedPTS = rawFrame.getPTS();
+                        AVFrame* tempAudio = av_frame_alloc();
+                        av_frame_move_ref(tempAudio, rawFrame.getAVFrame());
+
+                        audioWritable = audioQueue_->peekWritable();
+                        if (!audioWritable) {
+                            av_frame_free(&tempAudio);
+                            frameReceived = true;
+                            break;
+                        }
+                        if (audioDecoder_->convertToS16(tempAudio, *audioWritable)) {
+                            audioWritable->setPTS(savedPTS);
+                            audioWritable->setType(FrameType::AUDIO);
+                            audioQueue_->push();
+                        } else {
+                            LOG_WARN("Failed to convert audio frame to S16 format");
+                            audioWritable->unreference();
+                        }
+                        av_frame_free(&tempAudio);
                     } else {
-                        LOG_WARN("Failed to convert audio frame to S16 format");
-                        audioWritable->unreference();
+                        if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
+                            audioWritable->setPTS(rawFrame.getPTS());
+                            audioWritable->setType(FrameType::AUDIO);
+                            audioQueue_->push();
+                        } else {
+                            LOG_WARN("Failed to convert audio frame to S16 format");
+                            audioWritable->unreference();
+                        }
                     }
                 } else {
                     LOG_WARN("Received invalid audio frame, nb_samples: " +
@@ -1043,6 +1068,10 @@ void Player::cleanup() {
 
     // 停止所有线程
     shouldQuit_.store(true);
+
+    // 终止队列等待，唤醒可能阻塞在 peekWritable 的解码线程
+    if (videoQueue_) videoQueue_->abort();
+    if (audioQueue_) audioQueue_->abort();
 
     // 停止录制
     if (videoRecorder_ && videoRecorder_->isRecording()) videoRecorder_->stop();

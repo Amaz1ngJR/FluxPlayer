@@ -343,6 +343,9 @@ bool VideoDecoder::prepareFrame(AVFrame* srcFrame, Frame& dstFrame) {
     const AVPixelFormat processFmt = static_cast<AVPixelFormat>(frameToProcess->format);
     AVFrame* dst = dstFrame.getAVFrame();
 
+    // 环形缓冲复用槽位时，dst 可能残留上一轮的引用，必须先释放
+    av_frame_unref(dst);
+
     if (processFmt == AV_PIX_FMT_YUV420P || processFmt == AV_PIX_FMT_NV12) {
         // 零拷贝：直接引用帧数据（仅增加引用计数）
         av_frame_ref(dst, frameToProcess);

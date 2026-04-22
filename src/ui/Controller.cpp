@@ -791,9 +791,11 @@ void Controller::loadSubtitleFont() {
     // MergeMode 将后续字体的字形合并到同一 ImFont 中，缺失字形自动回退
     for (const auto& path : candidates) {
         if (!fileExists(path)) continue;
+        // 使用常用简体中文字形范围（~2500 字），避免 GetGlyphRangesChineseFull 生成
+        // 巨大的字体纹理图集（Full 约 2 万字符，纹理 100-200MB；Common 约 10-20MB）
         ImFont* f = io.Fonts->AddFontFromFileTTF(
             path.c_str(), 22.0f, nullptr,
-            io.Fonts->GetGlyphRangesChineseFull());
+            io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         if (!f) continue;
         subtitleFont_ = static_cast<void*>(f);
         LOG_INFO("Subtitle font loaded: " + path);

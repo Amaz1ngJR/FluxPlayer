@@ -257,6 +257,10 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
     // 直接在目标 AVFrame 上分配缓冲区，让 swr_convert 直接写入
     // 省去中间临时 buffer 的分配和 memcpy
     AVFrame* dstAVFrame = dstFrame.getAVFrame();
+
+    // 环形缓冲复用槽位时，dst 可能残留上一轮的缓冲区，必须先释放
+    av_frame_unref(dstAVFrame);
+
     dstAVFrame->format = AV_SAMPLE_FMT_S16;
     dstAVFrame->sample_rate = m_sampleRate;
 #if LIBAVUTIL_VERSION_MAJOR >= 57
