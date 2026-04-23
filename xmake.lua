@@ -34,7 +34,7 @@ local ffmpeg_root = ""
 if is_plat("windows") then
     ffmpeg_root = "third_party/ffmpeg"          -- Windows：使用项目内的预编译版本
 elseif is_plat("macosx") then
-    ffmpeg_root = "/opt/homebrew/opt/ffmpeg@4"  -- macOS：Homebrew 安装的 FFmpeg 4.x
+    ffmpeg_root = "third_party/ffmpeg-macos"    -- macOS：使用项目内的预编译版本（与 Windows 对称）
 else
     ffmpeg_root = "/usr/local"                  -- Linux：系统默认安装路径
 end
@@ -199,6 +199,8 @@ target("FluxPlayer")
     if is_plat("macosx") then
         -- add_frameworks：链接 macOS 系统框架（等价于 -framework xxx）
         add_frameworks("OpenGL", "Cocoa", "CoreVideo", "IOKit", "CoreFoundation", "AudioToolbox")
+        -- 设置 rpath，让可执行文件在构建目录和安装后都能找到 dylib
+        add_rpathdirs("@executable_path")
     elseif is_plat("windows") then
         -- add_syslinks：链接系统库（等价于 -l xxx 或 xxx.lib）
         add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32", "d3d11", "dxgi")
@@ -226,11 +228,17 @@ target("FluxPlayer")
     after_build(function (target)
         -- 把着色器文件复制到可执行文件旁边（运行时需要读取）
         os.cp("assets/shaders", path.join(target:targetdir(), "shaders"))
-        -- Windows：把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
         if is_plat("windows") then
+            -- Windows：把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
             local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")
             if os.isdir(ffmpeg_bin) then
                 os.cp(path.join(ffmpeg_bin, "*.dll"), target:targetdir())
+            end
+        elseif is_plat("macosx") then
+            -- macOS：把 FFmpeg 的 dylib 复制到可执行文件旁边（与 Windows 对称）
+            local ffmpeg_lib = path.join(os.projectdir(), "third_party", "ffmpeg-macos", "lib")
+            if os.isdir(ffmpeg_lib) then
+                os.cp(path.join(ffmpeg_lib, "*.dylib"), target:targetdir())
             end
         end
     end)

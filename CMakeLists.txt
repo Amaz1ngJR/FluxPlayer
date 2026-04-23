@@ -19,7 +19,8 @@ if(NOT DEFINED FFMPEG_ROOT)
     if(WIN32)
         set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg")
     elseif(APPLE)
-        set(FFMPEG_ROOT "/opt/homebrew/opt/ffmpeg@4")
+        # macOS：使用项目内的预编译版本（与 Windows 对称）
+        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg-macos")
     else()
         set(FFMPEG_ROOT "/usr/local")
     endif()
@@ -248,6 +249,14 @@ if(ENABLE_TCP_LOG)
     target_compile_definitions(FluxPlayer PRIVATE ENABLE_TCP_LOG)
 endif()
 
+# macOS：设置 rpath，让可执行文件在构建目录和安装后都能找到 dylib
+if(APPLE)
+    set_target_properties(FluxPlayer PROPERTIES
+        BUILD_RPATH "@executable_path"
+        INSTALL_RPATH "@executable_path"
+    )
+endif()
+
 # 构建完成后，自动把 assets/shaders/ 目录复制到可执行文件旁边
 # $<TARGET_FILE_DIR:FluxPlayer> 会自动解析为实际的输出目录
 add_custom_command(TARGET FluxPlayer POST_BUILD
@@ -266,6 +275,19 @@ if(WIN32)
                 ${FFMPEG_DLLS}
                 $<TARGET_FILE_DIR:FluxPlayer>
             COMMENT "Copying FFmpeg DLLs..."
+        )
+    endif()
+endif()
+
+# macOS：构建完成后把 FFmpeg 的 dylib 复制到可执行文件旁边（与 Windows 对称）
+if(APPLE)
+    file(GLOB FFMPEG_DYLIBS "${FFMPEG_ROOT}/lib/*.dylib")
+    if(FFMPEG_DYLIBS)
+        add_custom_command(TARGET FluxPlayer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${FFMPEG_DYLIBS}
+                $<TARGET_FILE_DIR:FluxPlayer>
+            COMMENT "Copying FFmpeg dylibs..."
         )
     endif()
 endif()

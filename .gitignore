@@ -17,6 +17,7 @@ build/
 # Allow FFmpeg prebuilt binaries
 !third_party/ffmpeg/bin/*.dll
 !third_party/ffmpeg/lib/*.lib
+!third_party/ffmpeg-macos/lib/*.dylib
 
 # IDE files
 .vscode/

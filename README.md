@@ -32,7 +32,7 @@
 | 组件 | 技术 |
 |------|------|
 | 语言 | C++17 |
-| 视频解码 | FFmpeg 4.x / 6.x（自动适配），支持硬件加速 |
+| 视频解码 | FFmpeg（macOS 4.x / Windows 7.x，通过版本宏自动适配），支持硬件加速 |
 | 图形渲染 | OpenGL 3.3+ |
 | 窗口管理 | GLFW 3.3.8 |
 | UI | Dear ImGui |
@@ -43,8 +43,8 @@
 
 | 平台 | 窗口系统 | 音频后端 | 状态 |
 |------|---------|---------|------|
-| macOS | Cocoa (GLFW) | AudioToolbox | ✅ 已支持，支持硬件加速 |
-| Windows | Win32 (GLFW) | WinMM | ✅ 已支持 |
+| macOS | Cocoa (GLFW) | AudioToolbox | ✅ 已支持，硬件加速 (VideoToolbox) |
+| Windows | Win32 (GLFW) | WinMM | ✅ 已支持，硬件加速 (CUDA/D3D11VA/DXVA2) |
 | Linux | X11 (GLFW) | ALSA | ✅ 已支持 |
 
 ## 项目结构
@@ -64,7 +64,8 @@ FluxPlayer/
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档
-├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs
+├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs, FFmpeg (Win/Mac)
+├── scripts/              # 构建辅助脚本
 ├── CMakeLists.txt
 └── xmake.lua
 ```
@@ -72,18 +73,25 @@ FluxPlayer/
 ## 环境依赖
 
 - C++17 编译器（GCC 8+ / Clang 10+ / MSVC 2019+）
-- FFmpeg 4.x 或 5.x+（代码通过版本宏自动适配）
 - OpenGL 3.3+
+- FFmpeg 已在 macOS 和 Windows 上自包含，无需系统安装
+
+> **FFmpeg 版本说明**：macOS 使用 FFmpeg 4.x（avcodec-58），Windows 使用 FFmpeg 7.x（avcodec-62），两个平台的头文件和动态库均不共用。源码通过 `LIBAVCODEC_VERSION_MAJOR` 宏自动适配 API 差异（如 `channels` vs `ch_layout`）。
 
 ### macOS
 
+FFmpeg 4.x 已集成在 `third_party/ffmpeg-macos/` 中，无需额外安装。
+
+如需重新生成（开发者）：
+
 ```bash
 brew install ffmpeg@4
+python3 scripts/bundle_ffmpeg_macos.py
 ```
 
 ### Windows
 
-FFmpeg 已集成在 `third_party/ffmpeg/` 中，无需额外安装。
+FFmpeg 7.x 已集成在 `third_party/ffmpeg/` 中，无需额外安装。
 
 使用 xmake 构建时，需要 MinGW-w64 编译器，运行 `setup_env.ps1` 初始化构建环境：
 
