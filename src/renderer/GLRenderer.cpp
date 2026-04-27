@@ -60,6 +60,8 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     m_shader->setInt("texU", 1);  // U 平面绑定到纹理单元 1（NV12 模式下为 UV 纹理）
     m_shader->setInt("texV", 2);  // V 平面绑定到纹理单元 2
     m_shader->setInt("isNV12", 0);  // 默认 YUV420P 模式
+    m_shader->setInt("colorSpace", 0);  // 默认 BT.601
+    m_shader->setInt("fullRange", 0);   // 默认 TV/limited range
     m_shader->unuse();
     LOG_DEBUG("Shader uniforms set successfully");
 
@@ -164,7 +166,8 @@ void GLRenderer::destroy() {
  * @param isNV12 true = NV12 格式（硬件解码输出），false = YUV420P（软件解码输出）
  */
 void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
-                              int yPitch, int uPitch, int vPitch, bool isNV12) {
+                              int yPitch, int uPitch, int vPitch,
+                              bool isNV12, int colorSpace, int fullRange) {
     // 步骤1：根据像素格式选择对应的纹理上传路径
     if (isNV12) {
         updateNV12Textures(yData, uData, yPitch, uPitch);
@@ -188,6 +191,8 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     // 片段着色器对每个像素进行 YUV→RGB (BT.709) 转换
     m_shader->use();
     m_shader->setInt("isNV12", useNV12Shader ? 1 : 0);
+    m_shader->setInt("colorSpace", colorSpace);
+    m_shader->setInt("fullRange", fullRange);
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);  // 绘制 6 个顶点（2 个三角形）
     glBindVertexArray(0);
@@ -196,6 +201,8 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     // 纹理数据已上传，标记 GPU 侧帧有效（暂停时可复用）
     m_hasValidTexture = true;
     m_lastIsNV12Shader = useNV12Shader;
+    m_lastColorSpace = colorSpace;
+    m_lastFullRange = fullRange;
 }
 
 /**
@@ -214,6 +221,8 @@ void GLRenderer::renderCachedFrame() {
 
     m_shader->use();
     m_shader->setInt("isNV12", m_lastIsNV12Shader ? 1 : 0);
+    m_shader->setInt("colorSpace", m_lastColorSpace);
+    m_shader->setInt("fullRange", m_lastFullRange);
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);

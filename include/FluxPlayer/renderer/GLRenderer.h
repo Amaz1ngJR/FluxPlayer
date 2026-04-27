@@ -42,10 +42,13 @@ public:
      * @param uPitch YUV420P: U平面行字节数 / NV12: UV平面行字节数
      * @param vPitch YUV420P: V平面行字节数 / NV12: 不使用
      * @param isNV12 true = NV12 格式（硬件解码输出），false = YUV420P
+     * @param colorSpace 色彩空间：0=BT.601, 1=BT.709, 2=BT.2020
+     * @param fullRange  量化范围：0=TV/limited, 1=PC/full
      */
     void renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                      int yPitch, int uPitch, int vPitch,
-                     bool isNV12 = false);
+                     bool isNV12 = false,
+                     int colorSpace = 0, int fullRange = 0);
 
     /**
      * @brief 设置 NV12 渲染是否使用 UV 解交错模式
@@ -138,6 +141,11 @@ private:
 
     /// 上一次渲染使用的着色器模式（true = NV12 GL_RG8, false = YUV420P/NV12 解交错）
     bool m_lastIsNV12Shader = false;
+
+    /// 上一次渲染的色彩空间（用于 renderCachedFrame 复用）
+    int m_lastColorSpace = 0;
+    /// 上一次渲染的量化范围（用于 renderCachedFrame 复用）
+    int m_lastFullRange = 0;
 
     /// NV12 UV 解交错缓冲区（预分配，避免每帧动态分配）
     std::vector<uint8_t> m_nv12UBuffer;  ///< 解交错后的 U 平面

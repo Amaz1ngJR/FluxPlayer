@@ -376,128 +376,27 @@ void Player::run() {
             }
             double currentTime = timer.getElapsedSeconds();
 
-        // 从队列获取视频帧并渲染
-        if (state_ == PlayerState::PLAYING) {
-            Frame* frame = nullptr;
+            // 从队列获取视频帧并渲染
+            renderVideoFrame(lastFrameTime);
 
-            // ===== 预缓冲期间不取帧，等待队列填充到安全水位 =====
-            // 网络流起播时先缓冲一定帧数，避免因网络延迟导致的起播卡顿
-            if (prebuffering_.load()) {
-                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-                // 渲染 UI（如果有，让用户看到控制面板）
-                if (renderCallback_) {
-                    renderCallback_();
-                }
-                window_->swapBuffers();
-                glfwPollEvents();
-                continue;
+            // 调用渲染回调（用于渲染 UI）
+            if (renderCallback_) {
+                renderCallback_();
             }
 
-            // ===== Seek期间暂停渲染，避免关键帧闪烁 =====
-            // 在解码到目标位置的过程中，不从队列取帧，保持显示上一帧
-            if (!decodingToTarget_.load()) {
-                // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
-                Frame* peeked = videoQueue_->peek();
-                if (peeked) {
-                    double nextPTS = peeked->getPTS();
-                    double masterClock = avSync_->getMasterClock();
-                    // 下一帧的 PTS <= 主时钟，说明该显示了
-                    if (nextPTS <= masterClock + 0.005) {
-                        frame = peeked;
-                        videoQueue_->next();  // 推进读索引（keep-last 首次只标记 shown）
-                        // keep-last 机制：next() 释放旧帧后 peek() 可能返回同一帧
-                        // 需要再次 next() 标记为 shown，才能在下次迭代中正确获取新帧
-                        Frame* dup = videoQueue_->peek();
-                        if (dup == frame) {
-                            videoQueue_->next();
-                        }
-                    }
-                }
-            }
-            // else: seek状态：不取帧，frame保持为空，后面渲染缓存纹理
+            // 交换缓冲区并处理事件
+            window_->swapBuffers();
+            window_->pollEvents();
 
-            if (frame) {
-                double framePTS = frame->getPTS();
+            // 更新 FPS
+            fpsCounter.update();
+            currentFPS_.store(fpsCounter.getFPS());
 
-                // 检查 PTS 有效性，无效时仍渲染帧但不更新时钟
-                bool validPTS = (std::isfinite(framePTS) &&
-                                framePTS > -1e15 && framePTS < 1e15);
-                if (validPTS) {
-                    avSync_->updateVideoClock(framePTS);
-                    lastFrameTime = framePTS;
-                }
-
-                // 渲染帧
-                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-                AVFrame* avFrame = frame->getAVFrame();
-                // 判断帧格式：硬件解码输出 NV12，软件解码输出 YUV420P
-                bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
-                renderer_->renderFrame(
-                    avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                    avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
-                    isNV12
-                );
-
-                // 更新最后渲染的帧的 PTS（帧本身由 keep-last 保留在 videoQueue_ 中）
-                lastRenderedPTS_.store(framePTS);
-            } else {
-                // 队列为空或正在 seek：复用 GPU 纹理中的帧数据，避免重复上传
-                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-                if (renderer_->hasValidTexture()) {
-                    renderer_->renderCachedFrame();
-                }
-            }
-        } else {
-            // 暂停或其他非播放状态：复用 GPU 纹理中的帧数据
-            renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-            if (renderer_->hasValidTexture()) {
-                renderer_->renderCachedFrame();
-            }
+            // 每秒打印一次状态
+            updatePlaybackStats(currentTime, lastPrint, lastBytesRead);
         }
 
-        // 调用渲染回调（用于渲染 UI）
-        if (renderCallback_) {
-            renderCallback_();
-        }
-
-        // 交换缓冲区并处理事件
-        window_->swapBuffers();
-        window_->pollEvents();
-
-        // 更新 FPS
-        fpsCounter.update();
-        currentFPS_.store(fpsCounter.getFPS());
-
-        // 每秒打印一次状态
-        if (currentTime - lastPrint >= 1.0) {
-            size_t videoQueueSize = videoQueue_ ? videoQueue_->size() : 0;
-            size_t audioQueueSize = audioQueue_ ? audioQueue_->size() : 0;
-
-            // 计算实时码率（Mbps）
-            size_t currentBytes = totalBytesRead_.load();
-            double elapsedTime = currentTime - lastPrint;
-            if (elapsedTime > 0.0) {
-                size_t bytesInPeriod = currentBytes - lastBytesRead;
-                double bitrate = (bytesInPeriod * 8.0) / (elapsedTime * 1000000.0);  // 转换为 Mbps
-                currentBitrate_.store(bitrate);
-                lastBytesRead = currentBytes;
-                bitrateUpdateTime_.store(currentTime);
-            }
-
-            int underruns = audioUnderrunCount_.load();
-            LOG_INFO("Status - FPS: " + std::to_string(static_cast<int>(currentFPS_.load())) +
-                    " | VClock: " + std::to_string(avSync_->getVideoClock()) + "s" +
-                    " | AClock: " + std::to_string(avSync_->getAudioClock()) + "s" +
-                    " | Dropped: " + std::to_string(droppedFrames_.load()) +
-                    " | VQueue: " + std::to_string(videoQueueSize) +
-                    " | AQueue: " + std::to_string(audioQueueSize) +
-                    (underruns > 0 ? " | Underruns: " + std::to_string(underruns) : "") +
-                    " | State: " + std::to_string(static_cast<int>(state_.load())));
-            lastPrint = currentTime;
-        }
-    }
-
-    LOG_INFO("Exiting main loop");
+        LOG_INFO("Exiting main loop");
 
         // 触发播放完成回调
         if (playbackFinishedCallback_) {
@@ -505,44 +404,197 @@ void Player::run() {
         }
 
         // 检查是否需要循环播放
-        if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !window_->shouldClose()) {
-            LOG_INFO("Loop playback enabled, restarting...");
-
-            // 等待解码线程结束
-            if (decodingThread_ && decodingThread_->joinable()) {
-                decodingThread_->join();
-            }
-
-            // 清空帧队列
-            videoQueue_->flush();
-            audioQueue_->flush();
-            pendingAudioOffset_ = 0;
-
-            // seek demuxer到开头
-            demuxer_->seek(0);
-            videoDecoder_->flush();
-            if (audioDecoder_) audioDecoder_->flush();
-            // 字幕同步重置
-            if (subtitleDecoder_) subtitleDecoder_->flush();
-            if (subtitleManager_) subtitleManager_->clear();
-
-            // 重置同步时钟
-            avSync_->seekTo(0.0);
-            lastRenderedPTS_.store(0.0);
-            currentAudioFramePTS_.store(0.0);
-            samplesPlayedInFrame_.store(0);
-
-            // 重启队列和解码线程
-            videoQueue_->start();
-            audioQueue_->start();
-            shouldQuit_.store(false);
-            decodingFinished_.store(false);  // 必须重置，否则渲染循环立即退出
-            decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
-            setState(PlayerState::PLAYING);
-        } else {
+        if (!handleLoopRestart()) {
             shouldLoop = false;
         }
     }
+}
+
+/**
+ * run() 辅助函数：从队列获取视频帧并渲染
+ * 处理预缓冲等待、seek 期间暂停渲染、基于主时钟的帧调度、
+ * 硬件/软件解码帧格式判断、暂停状态复用 GPU 纹理等逻辑
+ */
+void Player::renderVideoFrame(double& lastFrameTime) {
+    if (state_ == PlayerState::PLAYING) {
+        Frame* frame = nullptr;
+
+        // ===== 预缓冲期间不取帧，等待队列填充到安全水位 =====
+        // 网络流起播时先缓冲一定帧数，避免因网络延迟导致的起播卡顿
+        if (prebuffering_.load()) {
+            renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+            // 渲染 UI（如果有，让用户看到控制面板）
+            if (renderCallback_) {
+                renderCallback_();
+            }
+            window_->swapBuffers();
+            glfwPollEvents();
+            return;
+        }
+
+        // ===== Seek期间暂停渲染，避免关键帧闪烁 =====
+        // 在解码到目标位置的过程中，不从队列取帧，保持显示上一帧
+        if (!decodingToTarget_.load()) {
+            // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
+            Frame* peeked = videoQueue_->peek();
+            if (peeked) {
+                double nextPTS = peeked->getPTS();
+                double masterClock = avSync_->getMasterClock();
+                // 下一帧的 PTS <= 主时钟，说明该显示了
+                if (nextPTS <= masterClock + 0.005) {
+                    frame = peeked;
+                    videoQueue_->next();  // 推进读索引（keep-last 首次只标记 shown）
+                    // keep-last 机制：next() 释��旧帧后 peek() 可能返回同一帧
+                    // 需要再次 next() 标记为 shown，才能在下次迭代中正确获取新帧
+                    Frame* dup = videoQueue_->peek();
+                    if (dup == frame) {
+                        videoQueue_->next();
+                    }
+                }
+            }
+        }
+        // else: seek状态：不取帧，frame保持为空，后面渲染缓存纹理
+
+        if (frame) {
+            double framePTS = frame->getPTS();
+
+            // 检查 PTS 有效性，无效时仍渲染帧但不更新时钟
+            bool validPTS = (std::isfinite(framePTS) &&
+                            framePTS > -1e15 && framePTS < 1e15);
+            if (validPTS) {
+                avSync_->updateVideoClock(framePTS);
+                lastFrameTime = framePTS;
+            }
+
+            // 渲染帧
+            renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+            AVFrame* avFrame = frame->getAVFrame();
+            // 判断帧格式：硬件解码输出 NV12，软件解码输出 YUV420P
+            bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
+
+            // 提取色彩空间元数据，用于着色器选择正确的 YUV→RGB 转换矩阵
+            // 常量值与 video.frag 中 colorSpace uniform 的约定一致
+            constexpr int kColorSpaceBT601  = 0;
+            constexpr int kColorSpaceBT709  = 1;
+            constexpr int kColorSpaceBT2020 = 2;
+            constexpr int kMinHDWidth = 1280;  // HD 起始宽度，用于启发式判断色彩空间
+
+            int colorSpace = kColorSpaceBT601;
+            if (avFrame->colorspace == AVCOL_SPC_BT709) {
+                colorSpace = kColorSpaceBT709;
+            } else if (avFrame->colorspace == AVCOL_SPC_BT2020_NCL ||
+                       avFrame->colorspace == AVCOL_SPC_BT2020_CL) {
+                colorSpace = kColorSpaceBT2020;
+            } else if (avFrame->colorspace == AVCOL_SPC_UNSPECIFIED ||
+                       avFrame->colorspace == AVCOL_SPC_RESERVED) {
+                // 未指定时按分辨率启发式选择：HD 及以上用 BT.709
+                colorSpace = (avFrame->width >= kMinHDWidth) ? kColorSpaceBT709 : kColorSpaceBT601;
+            }
+            int fullRange = (avFrame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+
+            renderer_->renderFrame(
+                avFrame->data[0], avFrame->data[1], avFrame->data[2],
+                avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
+                isNV12, colorSpace, fullRange
+            );
+
+            // 更新最后渲染的帧的 PTS（帧本身由 keep-last 保留在 videoQueue_ 中）
+            lastRenderedPTS_.store(framePTS);
+        } else {
+            // 队列为空或正在 seek：复用 GPU 纹理中的帧数据，避免重复上传
+            renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+            if (renderer_->hasValidTexture()) {
+                renderer_->renderCachedFrame();
+            }
+        }
+    } else {
+        // 暂停或其他非播放状态：复用 GPU 纹理中的帧数据
+        renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+        if (renderer_->hasValidTexture()) {
+            renderer_->renderCachedFrame();
+        }
+    }
+}
+
+/**
+ * run() 辅助函数：每秒打印一次播放状态
+ * 包括 FPS、音视频时钟、丢帧数、队列深度、实时码率等
+ */
+void Player::updatePlaybackStats(double currentTime, double& lastPrint, size_t& lastBytesRead) {
+    if (currentTime - lastPrint < 1.0) {
+        return;
+    }
+
+    size_t videoQueueSize = videoQueue_ ? videoQueue_->size() : 0;
+    size_t audioQueueSize = audioQueue_ ? audioQueue_->size() : 0;
+
+    // 计算实时码率（Mbps）
+    size_t currentBytes = totalBytesRead_.load();
+    double elapsedTime = currentTime - lastPrint;
+    if (elapsedTime > 0.0) {
+        size_t bytesInPeriod = currentBytes - lastBytesRead;
+        double bitrate = (bytesInPeriod * 8.0) / (elapsedTime * 1000000.0);  // 转换为 Mbps
+        currentBitrate_.store(bitrate);
+        lastBytesRead = currentBytes;
+        bitrateUpdateTime_.store(currentTime);
+    }
+
+    int underruns = audioUnderrunCount_.load();
+    LOG_INFO("Status - FPS: " + std::to_string(static_cast<int>(currentFPS_.load())) +
+            " | VClock: " + std::to_string(avSync_->getVideoClock()) + "s" +
+            " | AClock: " + std::to_string(avSync_->getAudioClock()) + "s" +
+            " | Dropped: " + std::to_string(droppedFrames_.load()) +
+            " | VQueue: " + std::to_string(videoQueueSize) +
+            " | AQueue: " + std::to_string(audioQueueSize) +
+            (underruns > 0 ? " | Underruns: " + std::to_string(underruns) : "") +
+            " | State: " + std::to_string(static_cast<int>(state_.load())));
+    lastPrint = currentTime;
+}
+
+/**
+ * run() 辅助函数：处理循环播放重启
+ * 等待解码线程结束、清空队列和解码器、重置同步时钟、重启解码线程
+ * @return true 表示已重启应继续外层循环，false 表示不循环应退出
+ */
+bool Player::handleLoopRestart() {
+    // 检查是否需要循环播放
+    if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !window_->shouldClose()) {
+        LOG_INFO("Loop playback enabled, restarting...");
+
+        // 等待解码线程结束
+        if (decodingThread_ && decodingThread_->joinable()) {
+            decodingThread_->join();
+        }
+
+        // 清空帧队列
+        videoQueue_->flush();
+        audioQueue_->flush();
+        pendingAudioOffset_ = 0;
+
+        // seek demuxer到开头
+        demuxer_->seek(0);
+        videoDecoder_->flush();
+        if (audioDecoder_) audioDecoder_->flush();
+        // 字幕同步重置
+        if (subtitleDecoder_) subtitleDecoder_->flush();
+        if (subtitleManager_) subtitleManager_->clear();
+
+        // 重置同步时钟
+        avSync_->seekTo(0.0);
+        lastRenderedPTS_.store(0.0);
+        currentAudioFramePTS_.store(0.0);
+        samplesPlayedInFrame_.store(0);
+
+        // 重启队列和解码线程
+        videoQueue_->start();
+        audioQueue_->start();
+        shouldQuit_.store(false);
+        decodingFinished_.store(false);  // 必须重置，否则渲染循环立即退出
+        decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
+        setState(PlayerState::PLAYING);
+        return true;
+    }
+    return false;
 }
 
 void Player::quit() {
@@ -614,201 +666,27 @@ void Player::decodingThread() {
 
     while (!shouldQuit_.load()) {
         // 处理 seek 请求
-        if (seekRequested_.load()) {
-            double seekTime = seekTarget_.load();
-            LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
-
-            // 执行 seek（将秒转换为微秒）
-            int64_t seekTimestamp = static_cast<int64_t>(seekTime * 1000000);
-            if (demuxer_->seek(seekTimestamp)) {
-                // 清空解码器缓冲
-                videoDecoder_->flush();
-                if (audioDecoder_) {
-                    audioDecoder_->flush();
-                }
-                // 字幕解码器与管理器同步清空，避免 seek 后残留旧字幕
-                if (subtitleDecoder_) {
-                    subtitleDecoder_->flush();
-                }
-                if (subtitleManager_) {
-                    subtitleManager_->clear();
-                }
-
-                // 清空帧队列
-                videoQueue_->flush();
-                audioQueue_->flush();
-
-                // 清空残留音频偏移
-                pendingAudioOffset_ = 0;
-
-                // 通知同步器更新时钟
-                avSync_->seekTo(seekTime);
-
-                // 重置音频播放位置
-                currentAudioFramePTS_.store(seekTime);
-                samplesPlayedInFrame_.store(0);
-
-                // ===== 启用精确跳转模式 =====
-                // 快速丢弃所有中间帧，直到到达目标位置
-                decodingToTarget_.store(true);
-                decodeTargetPTS_.store(seekTime);
-                LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
-            }
-
-            seekRequested_.store(false);
-        }
+        processSeekRequest();
 
         // ===== 网络流预缓冲完成检测 =====
         // 等待视频队列积累到 5 帧后再允许渲染线程取帧
-        if (prebuffering_.load()) {
-            size_t buffered = videoQueue_->size();
-            if (buffered >= 5) {
-                prebuffering_.store(false);
-                LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
-            }
-        }
+        checkPrebufferComplete();
 
         bool frameReceived = false;
 
         // **优先接收视频帧**
         // 注意：必须优先调用receiveFrame()清空解码器缓冲区
         if (videoDecoder_->receiveFrame(rawFrame)) {
-            double framePTS = rawFrame.getPTS();
-            bool shouldDiscard = false;
-
             // ===== 实时流PTS归一化 =====
-            if (isLiveStream_) {
-                // 检查PTS是否有效（跳过无效PTS的帧）
-                // AV_NOPTS_VALUE 是 INT64_MIN，转成 double 约为 -9.22e18
-                bool hasValidPTS = (std::isfinite(framePTS) &&
-                                   framePTS > -1e15 &&  // 排除 AV_NOPTS_VALUE 及其附近的异常值
-                                   framePTS < 1e15);    // 排除异常大的正值
-
-                if (!hasValidPTS) {
-                    // 无效PTS帧：使用上一帧归一化PTS + 帧间隔估算
-                    if (liveStreamBaseCalibrated_.load()) {
-                        double estimatedPTS = lastValidVideoPTS_.load() + videoFrameInterval_;
-                        lastValidVideoPTS_.store(estimatedPTS);
-                        framePTS = estimatedPTS;
-                        rawFrame.setPTS(estimatedPTS);
-                        // 跳过后续的归一化逻辑（已经是归一化后的值）
-                    } else {
-                        // 校准期间的无效帧：直接丢弃
-                        rawFrame.unreference();
-                        frameReceived = true;
-                        continue;
-                    }
-                } else {
-                    // 有效PTS帧：进行正常的校准和归一化
-                    int frameCount = videoFrameCount_.fetch_add(1);  // 递增并获取旧值
-
-                    if (!firstVideoFrameReceived_.load()) {
-                        // 记录第一帧的原始PTS
-                        firstVideoPTS_.store(framePTS);
-                        firstVideoFrameReceived_.store(true);
-                        LOG_INFO("Live stream: First video PTS = " + std::to_string(framePTS));
-
-                        // 如果音频也已接收到第一帧，确定统一基准
-                        if (firstAudioFrameReceived_.load() && !liveStreamBaseCalibrated_.load()) {
-                            double audioPTS = firstAudioPTS_.load();
-                            double basePTS = std::min(framePTS, audioPTS);
-                            liveStreamBasePTS_.store(basePTS);
-                            liveStreamBaseCalibrated_.store(true);
-                            LOG_INFO("Live stream: Unified base PTS determined = " + std::to_string(basePTS) +
-                                    " (video: " + std::to_string(framePTS) +
-                                    ", audio: " + std::to_string(audioPTS) + ")");
-                        }
-                    }
-
-                    // 使用统一基准进行归一化（如果已确定）
-                    if (liveStreamBaseCalibrated_.load()) {
-                        double basePTS = liveStreamBasePTS_.load();
-                        double normalizedPTS = framePTS - basePTS;
-
-                        // 检测 PTS 回绕：如果归一化后的 PTS 突然变成大负数，说明发生了回绕
-                        // RTSP 流的 RTP 时间戳是 32 位的，会溢出回绕
-                        if (normalizedPTS < -10.0) {  // 负数超过 10 秒，明显异常
-                            LOG_WARN("Live stream: Video PTS wrap-around detected (normalized PTS: " +
-                                    std::to_string(normalizedPTS) + "), waiting for audio to recalibrate");
-                            // 视频回绕时不立即重置基准，等待音频也回绕后统一处理
-                            // 暂时跳过这一帧，避免负数 PTS 进入队列
-                            rawFrame.unreference();
-                            frameReceived = true;
-                            continue;
-                        }
-
-                        framePTS = normalizedPTS;
-                        LOG_DEBUG("Live stream: Video PTS normalized using unified base: " +
-                                 std::to_string(framePTS + basePTS) + " -> " +
-                                 std::to_string(framePTS));
-                    } else {
-                        // 统一基准未确定时，暂时使用视频自己的基准
-                        double videBase = firstVideoPTS_.load();
-                        framePTS = framePTS - videBase;
-                        LOG_DEBUG("Live stream: Video PTS normalized (temporary): " +
-                                 std::to_string(framePTS + videBase) + " -> " +
-                                 std::to_string(framePTS));
-                    }
-
-                    // 更新帧的PTS为归一化后的值
-                    rawFrame.setPTS(framePTS);
-                    lastValidVideoPTS_.store(framePTS);
-                }
-            }
-
-            // ===== 精确跳转处理：快速丢弃所有中间帧 =====
-            if (decodingToTarget_.load()) {
-                double targetPTS = decodeTargetPTS_.load();
-
-                if (framePTS < targetPTS - 0.001) {  // 允许1ms的误差
-                    // **中间帧快速丢弃**（加速到达目标位置）
-                    // 包括关键帧也丢弃，避免画面闪烁
-                    shouldDiscard = true;
-                    // 不打印日志，减少开销
-                }
-                else {
-                    // **到达目标位置**
-                    decodingToTarget_.store(false);
-                    LOG_INFO("Seek: Reached target PTS=" + std::to_string(framePTS));
-                }
-            }
-
-            // 快速丢弃中间帧
-            if (shouldDiscard) {
-                rawFrame.unreference();
+            if (!normalizeVideoPTS(rawFrame)) {
+                // 帧无效（校准期间的无效PTS帧），已丢弃
                 frameReceived = true;
                 continue;
             }
 
-            // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
-            // 先将 rawFrame 数据移到队列槽位，立即释放解码器内部 buffer 引用
-            // 避免 peekWritable 阻塞期间解码器 buffer pool 无法回收导致内存膨胀
-            Frame* writable = videoQueue_->tryPeekWritable();
-            if (writable) {
-                // 快速路径：队列有空位，直接写入
-                if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
-                    videoQueue_->push();
-                } else {
-                    writable->unreference();
-                }
-                rawFrame.unreference();
-            } else {
-                // 慢速路径：队列满，先移走 rawFrame 数据释放解码器 buffer
-                AVFrame* tempFrame = av_frame_alloc();
-                av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
-                // rawFrame 现在为空，解码器 buffer 引用已转移到 tempFrame
-
-                writable = videoQueue_->peekWritable();  // 阻塞等待，不再持有解码器 buffer
-                if (!writable) {
-                    av_frame_free(&tempFrame);
-                    break;  // abort
-                }
-                if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
-                    videoQueue_->push();
-                } else {
-                    writable->unreference();
-                }
-                av_frame_free(&tempFrame);
+            // ===== 视频帧入队（含精确跳转丢帧、队列满时内存优化） =====
+            if (!enqueueVideoFrame(rawFrame)) {
+                break;  // abort
             }
             frameReceived = true;
         }
@@ -820,141 +698,17 @@ void Player::decodingThread() {
                 // 验证音频帧的有效性
                 AVFrame* avFrame = rawFrame.getAVFrame();
                 if (avFrame && avFrame->nb_samples > 0) {
-                    double audioPTS = rawFrame.getPTS();
-                    bool shouldDiscard = false;
-
                     // ===== 实时流PTS归一化 =====
-                    if (isLiveStream_) {
-                        // 检查PTS是否有效
-                        bool hasValidPTS = (std::isfinite(audioPTS) &&
-                                           audioPTS > -1e15 &&
-                                           audioPTS < 1e15);
-
-                        if (!hasValidPTS) {
-                            // 无效PTS帧：使用上一帧归一化PTS + 帧间隔估算
-                            if (liveStreamBaseCalibrated_.load()) {
-                                // 根据采样率和帧大小计算实际帧间隔
-                                double audioFrameInterval = (audioSampleRate_ > 0 && avFrame->nb_samples > 0)
-                                    ? static_cast<double>(avFrame->nb_samples) / static_cast<double>(audioSampleRate_)
-                                    : 0.02;  // 默认 20ms
-                                double estimatedPTS = lastValidAudioPTS_.load() + audioFrameInterval;
-                                lastValidAudioPTS_.store(estimatedPTS);
-                                audioPTS = estimatedPTS;
-                                rawFrame.setPTS(estimatedPTS);
-                            } else {
-                                // 校准期间的无效帧：直接丢弃
-                                rawFrame.unreference();
-                                frameReceived = true;
-                                continue;
-                            }
-                        } else {
-                            // 有效PTS帧：进行正常的校准和归一化
-                            int frameCount = audioFrameCount_.fetch_add(1);  // 递增并获取旧值
-
-                            if (!firstAudioFrameReceived_.load()) {
-                                // 记录第一帧的原始PTS
-                                firstAudioPTS_.store(audioPTS);
-                                firstAudioFrameReceived_.store(true);
-                                LOG_INFO("Live stream: First audio PTS = " + std::to_string(audioPTS));
-
-                                // 如果视频也已接收到第一帧，确定统一基准
-                                if (firstVideoFrameReceived_.load() && !liveStreamBaseCalibrated_.load()) {
-                                    double videoPTS = firstVideoPTS_.load();
-                                    double basePTS = std::min(audioPTS, videoPTS);
-                                    liveStreamBasePTS_.store(basePTS);
-                                    liveStreamBaseCalibrated_.store(true);
-                                    LOG_INFO("Live stream: Unified base PTS determined = " + std::to_string(basePTS) +
-                                            " (audio: " + std::to_string(audioPTS) +
-                                            ", video: " + std::to_string(videoPTS) + ")");
-                                }
-                            }
-
-                            // 使用统一基准进行归一化（如果已确定）
-                            if (liveStreamBaseCalibrated_.load()) {
-                                double basePTS = liveStreamBasePTS_.load();
-                                double normalizedPTS = audioPTS - basePTS;
-
-                                // 检测 PTS 回绕
-                                if (normalizedPTS < -10.0) {
-                                    LOG_WARN("Live stream: Audio PTS wrap-around detected (normalized PTS: " +
-                                            std::to_string(normalizedPTS) + "), recalibrating base");
-                                    liveStreamBasePTS_.store(audioPTS);
-                                    normalizedPTS = 0.0;
-                                    videoFrameCount_.store(0);
-                                    audioFrameCount_.store(0);
-                                }
-
-                                audioPTS = normalizedPTS;
-                                LOG_DEBUG("Live stream: Audio PTS normalized using unified base: " +
-                                         std::to_string(audioPTS + basePTS) + " -> " +
-                                         std::to_string(audioPTS));
-                            } else {
-                                // 统一基准未确定时，暂时使用音频自己的基准
-                                double audioBase = firstAudioPTS_.load();
-                                audioPTS = audioPTS - audioBase;
-                                LOG_DEBUG("Live stream: Audio PTS normalized (temporary): " +
-                                         std::to_string(audioPTS + audioBase) + " -> " +
-                                         std::to_string(audioPTS));
-                            }
-
-                            // 更新帧的PTS为归一化后的值
-                            rawFrame.setPTS(audioPTS);
-                            lastValidAudioPTS_.store(audioPTS);
-                        }
-                    }
-
-                    // ===== 音频跳转：丢弃目标位置之前的所有音频帧 =====
-                    // 注意：音频不需要显示第一帧，直接快速丢弃到目标位置即可
-                    if (decodingToTarget_.load()) {
-                        double targetPTS = decodeTargetPTS_.load();
-
-                        if (audioPTS < targetPTS - 0.001) {  // 允许1ms的误差
-                            // 音频帧在目标位置之前，直接丢弃（跳过格式转换）
-                            shouldDiscard = true;
-                        }
-                    }
-
-                    // 快速丢弃音频帧
-                    if (shouldDiscard) {
-                        rawFrame.unreference();
+                    if (!normalizeAudioPTS(rawFrame)) {
+                        // 帧无效（校准期间的无效PTS帧），已丢弃
                         frameReceived = true;
                         continue;
                     }
 
-                    // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
-                    // 音频队列由平台音频线程实时消费，阻塞时间极短
-                    // 同样先尝试非阻塞，避免持有解码器 buffer 期间阻塞
-                    Frame* audioWritable = audioQueue_->tryPeekWritable();
-                    if (!audioWritable) {
-                        // 队列满：先释放 rawFrame，再阻塞等待
-                        double savedPTS = rawFrame.getPTS();
-                        AVFrame* tempAudio = av_frame_alloc();
-                        av_frame_move_ref(tempAudio, rawFrame.getAVFrame());
-
-                        audioWritable = audioQueue_->peekWritable();
-                        if (!audioWritable) {
-                            av_frame_free(&tempAudio);
-                            frameReceived = true;
-                            break;
-                        }
-                        if (audioDecoder_->convertToS16(tempAudio, *audioWritable)) {
-                            audioWritable->setPTS(savedPTS);
-                            audioWritable->setType(FrameType::AUDIO);
-                            audioQueue_->push();
-                        } else {
-                            LOG_WARN("Failed to convert audio frame to S16 format");
-                            audioWritable->unreference();
-                        }
-                        av_frame_free(&tempAudio);
-                    } else {
-                        if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
-                            audioWritable->setPTS(rawFrame.getPTS());
-                            audioWritable->setType(FrameType::AUDIO);
-                            audioQueue_->push();
-                        } else {
-                            LOG_WARN("Failed to convert audio frame to S16 format");
-                            audioWritable->unreference();
-                        }
+                    // ===== 音频帧入队（含跳转丢帧、S16转换） =====
+                    if (!enqueueAudioFrame(rawFrame)) {
+                        frameReceived = true;
+                        break;
                     }
                 } else {
                     LOG_WARN("Received invalid audio frame, nb_samples: " +
@@ -1039,6 +793,377 @@ void Player::decodingThread() {
 
     av_packet_free(&packet);
     LOG_INFO("Decoding thread stopped");
+}
+
+/**
+ * 解码线程辅助函数：处理 seek 请求
+ * 清空解码器缓冲、帧队列、同步器，启用精确跳转模式
+ */
+void Player::processSeekRequest() {
+    if (!seekRequested_.load()) {
+        return;
+    }
+
+    double seekTime = seekTarget_.load();
+    LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
+
+    // 执行 seek（将秒转换为微秒）
+    int64_t seekTimestamp = static_cast<int64_t>(seekTime * 1000000);
+    if (demuxer_->seek(seekTimestamp)) {
+        // 清空解码器缓冲
+        videoDecoder_->flush();
+        if (audioDecoder_) {
+            audioDecoder_->flush();
+        }
+        // 字幕解码器与管理器同步清空，避免 seek 后残留旧字幕
+        if (subtitleDecoder_) {
+            subtitleDecoder_->flush();
+        }
+        if (subtitleManager_) {
+            subtitleManager_->clear();
+        }
+
+        // 清空帧队列
+        videoQueue_->flush();
+        audioQueue_->flush();
+
+        // 清空残留音频偏移
+        pendingAudioOffset_ = 0;
+
+        // 通知同步器更新时钟
+        avSync_->seekTo(seekTime);
+
+        // 重置音频播放位置
+        currentAudioFramePTS_.store(seekTime);
+        samplesPlayedInFrame_.store(0);
+
+        // ===== 启用精确跳转模式 =====
+        // 快速丢弃所有中间帧，直到到达目标位置
+        decodingToTarget_.store(true);
+        decodeTargetPTS_.store(seekTime);
+        LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
+    }
+
+    seekRequested_.store(false);
+}
+
+/**
+ * 解码线程辅助函数：检查网络流预缓冲是否完成
+ * 等待视频队列积累到 5 帧后再允许渲染线程取帧
+ */
+void Player::checkPrebufferComplete() {
+    if (!prebuffering_.load()) {
+        return;
+    }
+
+    size_t buffered = videoQueue_->size();
+    if (buffered >= 5) {
+        prebuffering_.store(false);
+        LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
+    }
+}
+
+/**
+ * 解码线程辅助函数：归一化视频帧 PTS
+ * 实时流需要减去基准 PTS，处理无效 PTS 和 PTS 回绕
+ * @param rawFrame 待归一化的视频帧（会就地修改 PTS）
+ * @return true 表示帧有效可继续处理，false 表示帧已丢弃应跳过
+ */
+bool Player::normalizeVideoPTS(Frame& rawFrame) {
+    if (!isLiveStream_) {
+        return true;
+    }
+
+    double framePTS = rawFrame.getPTS();
+
+    // 检查PTS是否有效（跳过无效PTS的帧）
+    // AV_NOPTS_VALUE 是 INT64_MIN，转成 double 约为 -9.22e18
+    bool hasValidPTS = (std::isfinite(framePTS) &&
+                       framePTS > -1e15 &&  // 排除 AV_NOPTS_VALUE 及其附近的异常值
+                       framePTS < 1e15);    // 排除异常大的正值
+
+    if (!hasValidPTS) {
+        // 无效PTS帧：使用上一帧归一化PTS + 帧间隔估算
+        if (liveStreamBaseCalibrated_.load()) {
+            double estimatedPTS = lastValidVideoPTS_.load() + videoFrameInterval_;
+            lastValidVideoPTS_.store(estimatedPTS);
+            framePTS = estimatedPTS;
+            rawFrame.setPTS(estimatedPTS);
+            // 跳过后续的归一化逻辑（已经是归一化后的值）
+            return true;
+        } else {
+            // 校准期间的无效帧：直接丢弃
+            rawFrame.unreference();
+            return false;
+        }
+    }
+
+    // 有效PTS帧：进行正常的校准和归一化
+    int frameCount = videoFrameCount_.fetch_add(1);  // 递增并获取旧值
+
+    if (!firstVideoFrameReceived_.load()) {
+        // 记录第一帧的原始PTS
+        firstVideoPTS_.store(framePTS);
+        firstVideoFrameReceived_.store(true);
+        LOG_INFO("Live stream: First video PTS = " + std::to_string(framePTS));
+
+        // 如果音频也已接收到第一帧，确定统一基准
+        if (firstAudioFrameReceived_.load() && !liveStreamBaseCalibrated_.load()) {
+            double audioPTS = firstAudioPTS_.load();
+            double basePTS = std::min(framePTS, audioPTS);
+            liveStreamBasePTS_.store(basePTS);
+            liveStreamBaseCalibrated_.store(true);
+            LOG_INFO("Live stream: Unified base PTS determined = " + std::to_string(basePTS) +
+                    " (video: " + std::to_string(framePTS) +
+                    ", audio: " + std::to_string(audioPTS) + ")");
+        }
+    }
+
+    // 使用统一基准进行归一化（如果已确定）
+    if (liveStreamBaseCalibrated_.load()) {
+        double basePTS = liveStreamBasePTS_.load();
+        double normalizedPTS = framePTS - basePTS;
+
+        // 检测 PTS 回绕：如果归一化后的 PTS 突然变成大负数，说明发生了回绕
+        // RTSP 流的 RTP 时间戳是 32 位的，会溢出回绕
+        if (normalizedPTS < -10.0) {  // 负数超过 10 秒，明显异常
+            LOG_WARN("Live stream: Video PTS wrap-around detected (normalized PTS: " +
+                    std::to_string(normalizedPTS) + "), waiting for audio to recalibrate");
+            // 视频回绕时不立即重置基准，等待音频也回绕后统一处理
+            // 暂时跳过这一帧，避免负数 PTS 进入队列
+            rawFrame.unreference();
+            return false;
+        }
+
+        framePTS = normalizedPTS;
+        LOG_DEBUG("Live stream: Video PTS normalized using unified base: " +
+                 std::to_string(framePTS + basePTS) + " -> " +
+                 std::to_string(framePTS));
+    } else {
+        // 统一基准未确定时，暂时使用视频自己的基准
+        double videBase = firstVideoPTS_.load();
+        framePTS = framePTS - videBase;
+        LOG_DEBUG("Live stream: Video PTS normalized (temporary): " +
+                 std::to_string(framePTS + videBase) + " -> " +
+                 std::to_string(framePTS));
+    }
+
+    // 更新帧的PTS为归一化后的值
+    rawFrame.setPTS(framePTS);
+    lastValidVideoPTS_.store(framePTS);
+    return true;
+}
+
+/**
+ * 解码线程辅助函数：归一化音频帧 PTS
+ * 实时流需要减去基准 PTS，处理无效 PTS 和 PTS 回绕
+ * @param rawFrame 待归一化的音频帧（会就地修改 PTS）
+ * @return true 表示帧有效可继续处理，false 表示帧已丢弃应跳过
+ */
+bool Player::normalizeAudioPTS(Frame& rawFrame) {
+    if (!isLiveStream_) {
+        return true;
+    }
+
+    double audioPTS = rawFrame.getPTS();
+    AVFrame* avFrame = rawFrame.getAVFrame();
+
+    // 检查PTS是否有效
+    bool hasValidPTS = (std::isfinite(audioPTS) &&
+                       audioPTS > -1e15 &&
+                       audioPTS < 1e15);
+
+    if (!hasValidPTS) {
+        // 无效PTS帧：使用上一帧归一化PTS + 帧间隔估算
+        if (liveStreamBaseCalibrated_.load()) {
+            // 根据采样率和帧大小计算实际帧间隔
+            double audioFrameInterval = (audioSampleRate_ > 0 && avFrame->nb_samples > 0)
+                ? static_cast<double>(avFrame->nb_samples) / static_cast<double>(audioSampleRate_)
+                : 0.02;  // 默认 20ms
+            double estimatedPTS = lastValidAudioPTS_.load() + audioFrameInterval;
+            lastValidAudioPTS_.store(estimatedPTS);
+            audioPTS = estimatedPTS;
+            rawFrame.setPTS(estimatedPTS);
+            return true;
+        } else {
+            // 校准期间的无效帧：直接丢弃
+            rawFrame.unreference();
+            return false;
+        }
+    }
+
+    // 有效PTS帧：进行正常的校准和归一化
+    int frameCount = audioFrameCount_.fetch_add(1);  // 递增并获取旧值
+
+    if (!firstAudioFrameReceived_.load()) {
+        // 记录第一帧的原始PTS
+        firstAudioPTS_.store(audioPTS);
+        firstAudioFrameReceived_.store(true);
+        LOG_INFO("Live stream: First audio PTS = " + std::to_string(audioPTS));
+
+        // 如果视频也已接收到第一帧，确定统一基准
+        if (firstVideoFrameReceived_.load() && !liveStreamBaseCalibrated_.load()) {
+            double videoPTS = firstVideoPTS_.load();
+            double basePTS = std::min(audioPTS, videoPTS);
+            liveStreamBasePTS_.store(basePTS);
+            liveStreamBaseCalibrated_.store(true);
+            LOG_INFO("Live stream: Unified base PTS determined = " + std::to_string(basePTS) +
+                    " (audio: " + std::to_string(audioPTS) +
+                    ", video: " + std::to_string(videoPTS) + ")");
+        }
+    }
+
+    // 使用统一基准进行归一化（如果已确定）
+    if (liveStreamBaseCalibrated_.load()) {
+        double basePTS = liveStreamBasePTS_.load();
+        double normalizedPTS = audioPTS - basePTS;
+
+        // 检测 PTS 回绕
+        if (normalizedPTS < -10.0) {
+            LOG_WARN("Live stream: Audio PTS wrap-around detected (normalized PTS: " +
+                    std::to_string(normalizedPTS) + "), recalibrating base");
+            liveStreamBasePTS_.store(audioPTS);
+            normalizedPTS = 0.0;
+            videoFrameCount_.store(0);
+            audioFrameCount_.store(0);
+        }
+
+        audioPTS = normalizedPTS;
+        LOG_DEBUG("Live stream: Audio PTS normalized using unified base: " +
+                 std::to_string(audioPTS + basePTS) + " -> " +
+                 std::to_string(audioPTS));
+    } else {
+        // 统一基准未确定时，暂时使用音频自己的基准
+        double audioBase = firstAudioPTS_.load();
+        audioPTS = audioPTS - audioBase;
+        LOG_DEBUG("Live stream: Audio PTS normalized (temporary): " +
+                 std::to_string(audioPTS + audioBase) + " -> " +
+                 std::to_string(audioPTS));
+    }
+
+    // 更新帧的PTS为归一化后的值
+    rawFrame.setPTS(audioPTS);
+    lastValidAudioPTS_.store(audioPTS);
+    return true;
+}
+
+/**
+ * 解码线程辅助函数：将视频帧入队
+ * 处理精确跳转丢帧逻辑，以及队列满时先释放解码器 buffer 再阻塞等待的内存优化
+ * @param rawFrame 解码后的原始帧
+ * @return true 表示已处理（入队或丢弃），false 表示应退出解码线程
+ */
+bool Player::enqueueVideoFrame(Frame& rawFrame) {
+    double framePTS = rawFrame.getPTS();
+
+    // ===== 精确跳转处理：快速丢弃所有中间帧 =====
+    if (decodingToTarget_.load()) {
+        double targetPTS = decodeTargetPTS_.load();
+
+        if (framePTS < targetPTS - 0.001) {  // 允许1ms的误差
+            // **中间帧快速丢弃**（加速到达目标位置）
+            // 包括关键帧也丢弃，避免画面闪烁
+            rawFrame.unreference();
+            return true;
+            // 不打印日志，减少开销
+        }
+        else {
+            // **到达目标位置**
+            decodingToTarget_.store(false);
+            LOG_INFO("Seek: Reached target PTS=" + std::to_string(framePTS));
+        }
+    }
+
+    // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
+    // 先将 rawFrame 数据移到队列槽位，立即释放解码器内部 buffer 引用
+    // 避免 peekWritable 阻塞期间解码器 buffer pool 无法回收导致内存膨胀
+    Frame* writable = videoQueue_->tryPeekWritable();
+    if (writable) {
+        // 快速路径：队列有空位，直接写入
+        if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
+            videoQueue_->push();
+        } else {
+            writable->unreference();
+        }
+        rawFrame.unreference();
+    } else {
+        // 慢速路径：队列满，先移走 rawFrame 数据释放解码器 buffer
+        AVFrame* tempFrame = av_frame_alloc();
+        av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
+        // rawFrame 现在为空，解码器 buffer 引用已转移到 tempFrame
+
+        writable = videoQueue_->peekWritable();  // 阻塞等待，不再持有解码器 buffer
+        if (!writable) {
+            av_frame_free(&tempFrame);
+            return false;  // abort
+        }
+        if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
+            videoQueue_->push();
+        } else {
+            writable->unreference();
+        }
+        av_frame_free(&tempFrame);
+    }
+    return true;
+}
+
+/**
+ * 解码线程辅助函数：将音频帧入队
+ * 转换为 S16 格式后入队，处理精确跳转丢帧逻辑
+ * @param rawFrame 解码后的原始帧
+ * @return true 表示已处理（入队或丢弃），false 表示应退出解码线程
+ */
+bool Player::enqueueAudioFrame(Frame& rawFrame) {
+    double audioPTS = rawFrame.getPTS();
+    AVFrame* avFrame = rawFrame.getAVFrame();
+
+    // ===== 音频跳转：丢弃目标位置之前的所有音频帧 =====
+    // 注意：音频不需要显示第一帧，直接快速丢弃到目标位置即可
+    if (decodingToTarget_.load()) {
+        double targetPTS = decodeTargetPTS_.load();
+
+        if (audioPTS < targetPTS - 0.001) {  // 允许1ms的误差
+            // 音频帧在目标位置之前，直接丢弃（跳过格式转换）
+            rawFrame.unreference();
+            return true;
+        }
+    }
+
+    // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
+    // 音频队列由平台音频线程实时消费，阻塞时间极短
+    // 同样先尝试非阻塞，避免持有解码器 buffer 期间阻塞
+    Frame* audioWritable = audioQueue_->tryPeekWritable();
+    if (!audioWritable) {
+        // 队列满：先释放 rawFrame，再阻塞等待
+        double savedPTS = rawFrame.getPTS();
+        AVFrame* tempAudio = av_frame_alloc();
+        av_frame_move_ref(tempAudio, rawFrame.getAVFrame());
+
+        audioWritable = audioQueue_->peekWritable();
+        if (!audioWritable) {
+            av_frame_free(&tempAudio);
+            return false;
+        }
+        if (audioDecoder_->convertToS16(tempAudio, *audioWritable)) {
+            audioWritable->setPTS(savedPTS);
+            audioWritable->setType(FrameType::AUDIO);
+            audioQueue_->push();
+        } else {
+            LOG_WARN("Failed to convert audio frame to S16 format");
+            audioWritable->unreference();
+        }
+        av_frame_free(&tempAudio);
+    } else {
+        if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
+            audioWritable->setPTS(rawFrame.getPTS());
+            audioWritable->setType(FrameType::AUDIO);
+            audioQueue_->push();
+        } else {
+            LOG_WARN("Failed to convert audio frame to S16 format");
+            audioWritable->unreference();
+        }
+    }
+    return true;
 }
 
 void Player::setState(PlayerState newState) {

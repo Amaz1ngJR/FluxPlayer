@@ -152,6 +152,30 @@ public:
     AVFormatContext* getFormatContext() { return m_formatCtx; }
 
 private:
+    /**
+     * @brief 为网络流 URL 配置 FFmpeg 打开选项
+     *
+     * 按协议类型（HTTP/HLS、RTSP、RTMP）分别设置重连、超时、缓冲区等参数。
+     * 本地文件直接返回空字典。
+     * @param filename URL 或文件路径
+     * @return AVDictionary 指针（由调用方负责 av_dict_free）
+     */
+    AVDictionary* configureNetworkOptions(const std::string& filename) const;
+
+    /**
+     * @brief 遍历 m_formatCtx->streams，填充视频/音频/字幕流索引
+     *
+     * 每类只选第一条。须在 avformat_find_stream_info 成功后调用。
+     * @return 至少找到一条音频或视频流时返回 true
+     */
+    bool findStreams();
+
+    /**
+     * @brief 打印打开的媒体文件概要（格式、时长、码率、分辨率、采样率等）
+     * @param filename 打开的文件或 URL，用于日志
+     */
+    void logMediaInfo(const std::string& filename) const;
+
     AVFormatContext* m_formatCtx;    ///< FFmpeg 格式上下文，管理容器级别的信息
     int m_videoStreamIndex;          ///< 视频流索引，-1 表示未找到
     int m_audioStreamIndex;          ///< 音频流索引，-1 表示未找到

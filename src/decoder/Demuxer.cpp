@@ -25,74 +25,29 @@ Demuxer::~Demuxer() {
 
 /**
  * 打开媒体文件并解析流信息
- * @param filename 媒体文件路径
+ * @param filename 媒体文件路径或网络流 URL
  * @return 成功返回 true，失败返回 false
  */
 bool Demuxer::open(const std::string& filename) {
     LOG_INFO("Opening media file: " + filename);
 
-    // 检测是否为网络流（RTSP、RTMP、HTTP等）
-    bool isNetworkStream = (filename.find("rtsp://") == 0 ||
-                           filename.find("rtmp://") == 0 ||
-                           filename.find("http://") == 0 ||
-                           filename.find("https://") == 0);
+    // 步骤1：为网络流准备协议专用选项（本地文件返回 nullptr）
+    AVDictionary* options = configureNetworkOptions(filename);
 
-    // 步骤1：配置网络流选项（如果是网络流）
-    // 不同协议需要不同的选项，按协议类型分别设置
-    AVDictionary* options = nullptr;
-    if (isNetworkStream) {
-        LOG_INFO("Detected network stream, setting options");
-
-        // 通用选项：减少缓冲延迟
-        av_dict_set(&options, "max_delay", "500000", 0);
-
-        // === HTTP/HLS 专用选项 ===
-        // HLS 通过 HTTP 分片传输，断流重连至关重要
-        if (filename.find("http://") == 0 || filename.find("https://") == 0) {
-            av_dict_set(&options, "reconnect", "1", 0);                  // 连接断开后重连
-            av_dict_set(&options, "reconnect_streamed", "1", 0);         // 流传输中也重连
-            av_dict_set(&options, "reconnect_on_network_error", "1", 0); // 网络错误时重连
-            av_dict_set(&options, "reconnect_delay_max", "5", 0);        // 最大重连延迟 5 秒
-            // HTTP/HLS 流头部清晰，可缩小探测降低初始内存
-            av_dict_set(&options, "probesize", "524288", 0);              // 512 KB（默认 5 MB）
-            av_dict_set(&options, "analyzeduration", "2000000", 0);       // 2 秒（默认 5 秒）
-            LOG_DEBUG("HTTP/HLS options: reconnect_streamed, reconnect_on_network_error, probesize=512KB");
-        }
-
-        // === RTSP 专用选项 ===
-        if (filename.find("rtsp://") == 0) {
-            av_dict_set(&options, "rtsp_transport", "tcp", 0);    // TCP 更稳定，UDP 延迟更低
-            av_dict_set(&options, "stimeout", "5000000", 0);      // 连接超时 5 秒
-            av_dict_set(&options, "buffer_size", "1048576", 0);   // 1MB 接收缓冲区，减少丢包
-            LOG_DEBUG("RTSP options: tcp, stimeout=5s, buffer_size=1MB");
-        }
-
-        // === RTMP 专用选项 ===
-        if (filename.find("rtmp://") == 0) {
-            av_dict_set(&options, "rtmp_live", "live", 0);  // 直播模式，禁用 seek
-            LOG_DEBUG("RTMP options: rtmp_live=live");
-        }
-    }
-
-    // 步骤2：打开输入文件或流
-    // avformat_open_input 会自动检测格式（MP4/MKV/AVI/RTSP等）
+    // 步骤2：打开输入文件或流（avformat_open_input 内部自动识别容器格式）
     int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
-
-    // 释放未使用的选项
     if (options) {
         av_dict_free(&options);
     }
-
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
         LOG_ERROR("Failed to open file: " + filename + " - " + std::string(errBuf));
         return false;
     }
-    LOG_DEBUG(isNetworkStream ? "Network stream opened successfully" : "File opened successfully");
+    LOG_DEBUG("Input opened successfully");
 
-    // 步骤2：读取流信息
-    // 这一步会读取文件开头的数据包，分析流的编解码器信息
+    // 步骤3：探测流信息（读取文件头若干包，解析每条流的编解码器参数）
     ret = avformat_find_stream_info(m_formatCtx, nullptr);
     if (ret < 0) {
         LOG_ERROR("Failed to find stream information");
@@ -101,9 +56,73 @@ bool Demuxer::open(const std::string& filename) {
     }
     LOG_DEBUG("Stream information found, total streams: " + std::to_string(m_formatCtx->nb_streams));
 
-    // 步骤3：查找视频流和音频流
-    // 遍历所有流，找到第一个视频流和音频流
+    // 步骤4：挑选首条视频/音频/字幕流；无音视频流则视为打开失败
+    if (!findStreams()) {
+        close();
+        return false;
+    }
+
+    // 步骤5：打印媒体概要信息
+    logMediaInfo(filename);
+    return true;
+}
+
+/**
+ * 为网络流配置 FFmpeg 打开选项
+ * 本地文件返回 nullptr，网络流按协议差异化设置重连、超时、缓冲等参数
+ */
+AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) const {
+    const bool isNetwork = (filename.find("rtsp://") == 0 ||
+                            filename.find("rtmp://") == 0 ||
+                            filename.find("http://") == 0 ||
+                            filename.find("https://") == 0);
+    if (!isNetwork) {
+        return nullptr;
+    }
+
+    LOG_INFO("Detected network stream, setting options");
+    AVDictionary* options = nullptr;
+
+    // 通用选项：减少缓冲延迟
+    av_dict_set(&options, "max_delay", "500000", 0);
+
+    // === HTTP/HLS 专用选项 ===
+    // HLS 通过 HTTP 分片传输，断流重连至关重要
+    if (filename.find("http://") == 0 || filename.find("https://") == 0) {
+        av_dict_set(&options, "reconnect", "1", 0);                  // 连接断开后重连
+        av_dict_set(&options, "reconnect_streamed", "1", 0);         // 流传输中也重连
+        av_dict_set(&options, "reconnect_on_network_error", "1", 0); // 网络错误时重连
+        av_dict_set(&options, "reconnect_delay_max", "5", 0);        // 最大重连延迟 5 秒
+        // HTTP/HLS 流头部清晰，可缩小探测降低初始内存
+        av_dict_set(&options, "probesize", "524288", 0);         // 512 KB（默认 5 MB）
+        av_dict_set(&options, "analyzeduration", "2000000", 0);  // 2 秒（默认 5 秒）
+        LOG_DEBUG("HTTP/HLS options: reconnect, probesize=512KB, analyzeduration=2s");
+    }
+
+    // === RTSP 专用选项 ===
+    if (filename.find("rtsp://") == 0) {
+        av_dict_set(&options, "rtsp_transport", "tcp", 0);    // TCP 更稳定，UDP 延迟更低
+        av_dict_set(&options, "stimeout", "5000000", 0);      // 连接超时 5 秒
+        av_dict_set(&options, "buffer_size", "1048576", 0);   // 1MB 接收缓冲区，减少丢包
+        LOG_DEBUG("RTSP options: tcp, stimeout=5s, buffer_size=1MB");
+    }
+
+    // === RTMP 专用选项 ===
+    if (filename.find("rtmp://") == 0) {
+        av_dict_set(&options, "rtmp_live", "live", 0);  // 直播模式，禁用 seek
+        LOG_DEBUG("RTMP options: rtmp_live=live");
+    }
+
+    return options;
+}
+
+/**
+ * 遍历所有流，挑选首条视频/音频/字幕流并填充索引
+ * @return 至少找到一条音频或视频流时返回 true
+ */
+bool Demuxer::findStreams() {
     LOG_DEBUG("Searching for video and audio streams...");
+
     for (unsigned int i = 0; i < m_formatCtx->nb_streams; i++) {
         AVStream* stream = m_formatCtx->streams[i];
 
@@ -112,13 +131,12 @@ bool Demuxer::open(const std::string& filename) {
             LOG_ERROR("Stream " + std::to_string(i) + " is nullptr");
             continue;
         }
-
         if (!stream->codecpar) {
             LOG_ERROR("Stream " + std::to_string(i) + " codecpar is nullptr");
             continue;
         }
 
-        AVMediaType codecType = stream->codecpar->codec_type;
+        const AVMediaType codecType = stream->codecpar->codec_type;
 
         // 调试信息：打印每个流的类型
         LOG_DEBUG("Stream " + std::to_string(i) +
@@ -144,14 +162,17 @@ bool Demuxer::open(const std::string& filename) {
         }
     }
 
-    // 检查是否至少找到一个音视频流（字幕流不是必需的）
     if (m_videoStreamIndex == -1 && m_audioStreamIndex == -1) {
         LOG_ERROR("No video or audio stream found in file");
-        close();
         return false;
     }
+    return true;
+}
 
-    // 打印媒体文件信息
+/**
+ * 打印已打开媒体的概要信息（格式、时长、码率、分辨率、采样率等）
+ */
+void Demuxer::logMediaInfo(const std::string& filename) const {
     LOG_INFO("========== Media File Information ==========");
     LOG_INFO("File: " + filename);
     LOG_INFO("Format: " + std::string(m_formatCtx->iformat->long_name));
@@ -163,8 +184,6 @@ bool Demuxer::open(const std::string& filename) {
     }
     if (m_audioStreamIndex != -1) {
         AVCodecParameters* audioParams = getAudioCodecParams();
-        // FFmpeg 5.0+ (LIBAVCODEC_VERSION_MAJOR >= 59) 使用 ch_layout.nb_channels
-        // FFmpeg 4.x 使用 channels
 #if LIBAVCODEC_VERSION_MAJOR >= 59
         int channels = audioParams->ch_layout.nb_channels;
 #else
@@ -174,8 +193,6 @@ bool Demuxer::open(const std::string& filename) {
                 std::to_string(channels) + " channels");
     }
     LOG_INFO("============================================");
-
-    return true;
 }
 
 /**
@@ -325,7 +342,7 @@ int Demuxer::getBitrate() const {
 
 /**
  * 跳转到指定时间戳位置
- * @param timestamp 目标时间戳（以流的 time_base 为单位）
+ * @param timestamp 目标时间戳（微秒）
  * @return 成功返回 true，失败返回 false
  *
  * 注意：跳转后需要刷新解码器缓冲区（调用 decoder.flush()）

@@ -278,6 +278,31 @@ void Controller::renderBottomOverlay() {
     std::string timeText = formatTime(currentTime) + " / " + formatTime(duration);
     float timeTextW = ImGui::CalcTextSize(timeText.c_str()).x;
     float progressBarWidth = ds.x - timeTextW - pad * 4;
+
+    // ── 第一行：进度条 + 时间 ──
+    renderProgressBar(progressBarWidth, progress, duration);
+
+    // 时间文本（同行右侧）
+    ImGui::SameLine();
+    ImGui::Text("%s", timeText.c_str());
+
+    // ── 第二行：控制按钮（居中） + 设置/音量（右） ──
+    const float btnH = 22.0f;
+    renderPlaybackButtons(btnH);
+    renderVolumeAndSettings(btnH);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+}
+
+/**
+ * 绘制自定义进度条：支持精确点击、拖动、量化跳转、悬停时间预览
+ * @param progressBarWidth 进度条宽度（像素）
+ * @param progress 当前进度（0.0 - 1.0）
+ * @param duration 总时长（秒）
+ */
+void Controller::renderProgressBar(float progressBarWidth, float progress, double duration) {
     const float progressBarHeight = 16.0f;
 
     // ===== 自定义进度条：支持精确点击和拖动 =====
@@ -375,13 +400,15 @@ void Controller::renderBottomOverlay() {
     }
 
     ImGui::PopStyleColor(3);
+}
 
-    // 时间文本（同行右侧）
-    ImGui::SameLine();
-    ImGui::Text("%s", timeText.c_str());
-
-    // ── 第二行：控制按钮（居中） + 音量（右） ──
-    const float btnH = 22.0f;
+/**
+ * 绘制播放控制按钮（播放/暂停/停止）和录制按钮（录像/录音）
+ * 按钮组居中排列，录制中的按钮变红并显示时长和文件大小
+ * @param btnH 按钮高度
+ */
+void Controller::renderPlaybackButtons(float btnH) {
+    const ImVec2& ds = ImGui::GetIO().DisplaySize;
 
     // 获取播放器状态
     PlayerState state = player_.getState();
@@ -486,6 +513,16 @@ void Controller::renderBottomOverlay() {
         ImGui::Text("%s", recInfo.c_str());
         ImGui::PopStyleColor();
     }
+}
+
+/**
+ * 绘制设置齿轮图标和音量控制（图标 + 可展开滑块）
+ * 齿轮在音量图标左侧，点击切换设置菜单
+ * 音量滑块延迟关闭：鼠标离开后等 0.4 秒才收起
+ * @param btnH 按钮高度
+ */
+void Controller::renderVolumeAndSettings(float btnH) {
+    const ImVec2& ds = ImGui::GetIO().DisplaySize;
 
     // 音量区域（图标固定，滑块向右展开，延迟关闭）
     bool isMuted = player_.isMuted();
@@ -635,10 +672,6 @@ void Controller::renderBottomOverlay() {
             }
         }
     }
-
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
 }
 
 void Controller::renderMediaInfo() {

@@ -9,7 +9,7 @@
 
 - 🎬 支持主流视频格式（MP4、MKV、AVI、FLV、MOV 等）
 - 🌐 支持网络流播放（RTSP、RTMP、HTTP、HLS）
-- 🖥️ OpenGL YUV→RGB GPU 渲染，GLSL 着色器实现色彩空间转换
+- 🖥️ OpenGL YUV→RGB GPU 渲染，自适应 BT.601/BT.709/BT.2020 色彩空间 + TV/PC 量化范围
 - 🔊 跨平台音频输出（macOS AudioToolbox / Windows WinMM / Linux ALSA）
 - 🎛️ ImGui 控制界面（播放控制、进度条、音量、媒体信息、统计面板）
 - 📂 支持文件拖放打开
@@ -313,6 +313,7 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 
 - 双格式纹理支持：YUV420P（Y/U/V 三纹理）和 NV12（Y + UV 双纹理）
 - GLSL 片段着色器通过 `isNV12` uniform 切换 YUV420P/NV12 采样路径
+- 色彩空间自适应：从 AVFrame 元数据提取 `colorspace`/`color_range`，自动选择 BT.601/BT.709/BT.2020 转换矩阵和 TV/PC 量化范围；元数据缺失时按分辨率启发式选择（≥720p → BT.709）
 - NV12 UV 交错平面直接映射为 GL_RG8 纹理，零拷贝跳过 sws_scale
 - 处理 FFmpeg linesize 与视频宽度不一致的内存对齐问题
 

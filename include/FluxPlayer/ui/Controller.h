@@ -62,6 +62,22 @@ public:
 
 private:
     void renderBottomOverlay();
+
+    /** @brief 绘制进度条（支持精确点击、拖动、量化跳转、悬停预览） */
+    void renderProgressBar(float progressBarWidth, float progress, double duration);
+
+    /**
+     * @brief 绘制播放控制按钮（播放/暂停/停止）和录制按钮
+     * @param btnH 按钮高度
+     */
+    void renderPlaybackButtons(float btnH);
+
+    /**
+     * @brief 绘制设置齿轮图标 + 音量图标/滑块
+     * @param btnH 按钮高度
+     */
+    void renderVolumeAndSettings(float btnH);
+
     void renderMediaInfo();
     void renderStats();
     std::string formatTime(double seconds);

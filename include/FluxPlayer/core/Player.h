@@ -265,10 +265,77 @@ private:
     void decodingThread();
 
     /**
+     * 解码线程辅助函数：处理 seek 请求
+     * 清空解码器、帧队列、同步器，启动精确跳转模式
+     */
+    void processSeekRequest();
+
+    /**
+     * 解码线程辅助函数：检查预缓冲是否完成
+     * 网络流启动时等待视频队列积累到 5 帧后再允许渲染
+     */
+    void checkPrebufferComplete();
+
+    /**
+     * 解码线程辅助函数：归一化视频帧 PTS
+     * 实时流需要减去基准 PTS，处理无效 PTS 和回绕
+     * @param rawFrame 待归一化的视频帧
+     * @return true 表示帧有效，false 表示应丢弃
+     */
+    bool normalizeVideoPTS(Frame& rawFrame);
+
+    /**
+     * 解码线程辅助函数：归一化音频帧 PTS
+     * 实时流需要减去基准 PTS，处理无效 PTS 和回绕
+     * @param rawFrame 待归一化的音频帧
+     * @return true 表示帧有效，false 表示应丢弃
+     */
+    bool normalizeAudioPTS(Frame& rawFrame);
+
+    /**
+     * 解码线程辅助函数：将视频帧入队
+     * 处理精确跳转丢帧、队列满时的内存优化
+     * @param rawFrame 解码后的原始帧
+     * @return true 表示已处理（入队或丢弃），false 表示应退出线程
+     */
+    bool enqueueVideoFrame(Frame& rawFrame);
+
+    /**
+     * 解码线程辅助函数：将音频帧入队
+     * 转换为 S16 格式后入队，处理精确跳转丢帧
+     * @param rawFrame 解码后的原始帧
+     * @return true 表示已处理（入队或丢弃），false 表示应退出线程
+     */
+    bool enqueueAudioFrame(Frame& rawFrame);
+
+    /**
      * 渲染线程函数
      * 负责从帧队列取帧并渲染
      */
     void renderingThread();
+
+    /**
+     * run() 辅助函数：从队列取帧并渲染一帧视频
+     * 处理预缓冲等待、seek 期间暂停渲染、PTS 同步、帧格式判断等
+     * @param lastFrameTime 上一帧的 PTS，用于时钟更新
+     */
+    void renderVideoFrame(double& lastFrameTime);
+
+    /**
+     * run() 辅助函数：每秒打印一次播放状态
+     * 包括 FPS、时钟、丢帧数、队列深度、码率等
+     * @param currentTime 当前计时器时间
+     * @param lastPrint 上次打印时间（会被更新）
+     * @param lastBytesRead 上次统计码率时的累计字节数（会被更新）
+     */
+    void updatePlaybackStats(double currentTime, double& lastPrint, size_t& lastBytesRead);
+
+    /**
+     * run() 辅助函数：处理循环播放重启
+     * 等待解码线程结束、清空队列、seek 到开头、重启解码线程
+     * @return true 表示已重启应继续外层循环，false 表示应退出
+     */
+    bool handleLoopRestart();
 
     /**
      * 更新播放状态
