@@ -14,6 +14,20 @@
 
 namespace FluxPlayer {
 
+namespace {
+inline bool checkGLError(const char* label) {
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_ERROR(std::string(label) + " GL error: 0x" +
+                  ([](GLenum e) {
+                      char buf[16]; snprintf(buf, sizeof(buf), "%04X", e); return std::string(buf);
+                  })(err));
+        return false;
+    }
+    return true;
+}
+} // anonymous namespace
+
 GLRenderer::GLRenderer()
     : m_VAO(0)
     , m_VBO(0)
@@ -84,6 +98,7 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);  // 垂直方向边缘夹紧
     // 分配纹理内存（单通道红色，8位无符号整数）
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth, m_videoHeight, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    if (!checkGLError("Y texture glTexImage2D")) return false;
     LOG_DEBUG("Y texture initialized: " + std::to_string(m_videoWidth) + "x" + std::to_string(m_videoHeight));
 
     // 步骤6：配置 U 纹理（色度U平面，1/4 分辨率）
@@ -94,6 +109,7 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     // YUV420P 的 U/V 平面宽高各为 Y 平面的一半
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    if (!checkGLError("U texture glTexImage2D")) return false;
     LOG_DEBUG("U texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
 
     // 步骤7：配置 V 纹理（色度V平面，1/4 分辨率）
@@ -103,6 +119,7 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    if (!checkGLError("V texture glTexImage2D")) return false;
     LOG_DEBUG("V texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
 
     // 步骤8：配置 NV12 UV 纹理（硬件解码零拷贝用，GL_RG8 双通道）
@@ -113,6 +130,7 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
+    if (!checkGLError("NV12 UV texture glTexImage2D")) return false;
     LOG_DEBUG("NV12 UV texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -246,16 +264,20 @@ void GLRenderer::setVideoSize(int width, int height) {
     // 重新创建纹理
     glBindTexture(GL_TEXTURE_2D, m_textureY);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth, m_videoHeight, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    checkGLError("setVideoSize Y texture glTexImage2D");
 
     glBindTexture(GL_TEXTURE_2D, m_textureU);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    checkGLError("setVideoSize U texture glTexImage2D");
 
     glBindTexture(GL_TEXTURE_2D, m_textureV);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    checkGLError("setVideoSize V texture glTexImage2D");
 
     // NV12 UV 纹理也需要随分辨率变化重建
     glBindTexture(GL_TEXTURE_2D, m_textureUV);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
+    checkGLError("setVideoSize NV12 UV texture glTexImage2D");
 
     glBindTexture(GL_TEXTURE_2D, 0);
 }

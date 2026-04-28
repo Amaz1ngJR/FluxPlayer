@@ -5,6 +5,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 namespace FluxPlayer {
 
@@ -373,8 +374,13 @@ private:
     std::atomic<PlayerState> state_;
     std::atomic<bool> shouldQuit_;
     std::atomic<bool> decodingFinished_;  ///< 解码线程已读完所有数据（队列可能仍有剩余帧）
-    std::atomic<bool> seekRequested_;
-    std::atomic<double> seekTarget_;
+    // Seek 请求（mutex 保护，避免 seekRequested_/seekTarget_ 两个 atomic 的 TOCTOU 竞态）
+    struct SeekRequest {
+        bool pending = false;   ///< 是否有待处理的 seek 请求
+        double target = 0.0;    ///< seek 目标时间（秒）
+    };
+    SeekRequest seekRequest_;           ///< 当前 seek 请求（受 seekMutex_ 保护）
+    mutable std::mutex seekMutex_;      ///< 保护 seekRequest_ 的互斥锁
     std::atomic<double> lastRenderedPTS_;  // 最后实际渲染的帧的 PTS
 
     // 精确跳转控制（用于从关键帧解码到目标位置）

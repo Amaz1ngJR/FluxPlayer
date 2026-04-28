@@ -33,8 +33,7 @@ Player::Player()
     : state_(PlayerState::IDLE)
     , shouldQuit_(false)
     , decodingFinished_(false)
-    , seekRequested_(false)
-    , seekTarget_(0.0)
+    , seekRequest_{false, 0.0}
     , lastRenderedPTS_(0.0)
     , decodingToTarget_(false)
     , decodeTargetPTS_(0.0)
@@ -324,9 +323,12 @@ bool Player::seek(double seconds) {
     LOG_INFO("Player::seek() - seconds=" + std::to_string(seconds));
     LOG_INFO("  lastRenderedPTS before=" + std::to_string(lastRenderedPTS_.load()));
 
-    // 设置 seek 目标和标志
-    seekTarget_.store(seconds);
-    seekRequested_.store(true);
+    // 原子地设置 seek 目标和标志（mutex 保护，消除 TOCTOU 竞态）
+    {
+        std::lock_guard<std::mutex> lock(seekMutex_);
+        seekRequest_.target = seconds;
+        seekRequest_.pending = true;
+    }
 
     // 立即更新播放位置为目标位置
     // 这样连续 seek 时，getCurrentTime() 会返回最新的 seek 目标，而不是旧位置
@@ -335,7 +337,7 @@ bool Player::seek(double seconds) {
     samplesPlayedInFrame_.store(0);
 
     LOG_INFO("  lastRenderedPTS after=" + std::to_string(lastRenderedPTS_.load()));
-    LOG_INFO("  seekTarget=" + std::to_string(seekTarget_.load()));
+    LOG_INFO("  seekTarget=" + std::to_string(seconds));
 
     return true;
 }
@@ -800,11 +802,17 @@ void Player::decodingThread() {
  * 清空解码器缓冲、帧队列、同步器，启用精确跳转模式
  */
 void Player::processSeekRequest() {
-    if (!seekRequested_.load()) {
-        return;
+    // 原子地读取并清除 seek 请求（mutex 保护，消除 TOCTOU 竞态）
+    double seekTime;
+    {
+        std::lock_guard<std::mutex> lock(seekMutex_);
+        if (!seekRequest_.pending) {
+            return;
+        }
+        seekTime = seekRequest_.target;
+        seekRequest_.pending = false;
     }
 
-    double seekTime = seekTarget_.load();
     LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
 
     // 执行 seek（将秒转换为微秒）
@@ -843,8 +851,6 @@ void Player::processSeekRequest() {
         decodeTargetPTS_.store(seekTime);
         LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
     }
-
-    seekRequested_.store(false);
 }
 
 /**

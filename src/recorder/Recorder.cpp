@@ -88,7 +88,9 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
 
     int ret = avformat_alloc_output_context2(&outputFmtCtx_, nullptr, format, outputPath_.c_str());
     if (ret < 0 || !outputFmtCtx_) {
-        LOG_ERROR("Failed to allocate output context");
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to allocate output context: " + std::string(errBuf));
         return false;
     }
 
@@ -143,8 +145,11 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
 
             av_opt_set(videoEncCtx_->priv_data, "preset", "medium", 0);
 
-            if (avcodec_open2(videoEncCtx_, codec, nullptr) < 0) {
-                LOG_ERROR("Failed to open H.264 encoder");
+            int encRet = avcodec_open2(videoEncCtx_, codec, nullptr);
+            if (encRet < 0) {
+                char errBuf[AV_ERROR_MAX_STRING_SIZE];
+                av_strerror(encRet, errBuf, sizeof(errBuf));
+                LOG_ERROR("Failed to open H.264 encoder: " + std::string(errBuf));
                 avcodec_free_context(&videoEncCtx_);
                 avformat_free_context(outputFmtCtx_);
                 outputFmtCtx_ = nullptr;
@@ -179,7 +184,9 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
     if (!(outputFmtCtx_->oformat->flags & AVFMT_NOFILE)) {
         ret = avio_open(&outputFmtCtx_->pb, outputPath_.c_str(), AVIO_FLAG_WRITE);
         if (ret < 0) {
-            LOG_ERROR("Failed to open output file: " + outputPath_);
+            char errBuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, errBuf, sizeof(errBuf));
+            LOG_ERROR("Failed to open output file: " + outputPath_ + " (" + errBuf + ")");
             if (videoEncCtx_) avcodec_free_context(&videoEncCtx_);
             avformat_free_context(outputFmtCtx_);
             outputFmtCtx_ = nullptr;
@@ -190,7 +197,9 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
     // 写入文件头
     ret = avformat_write_header(outputFmtCtx_, nullptr);
     if (ret < 0) {
-        LOG_ERROR("Failed to write output header");
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to write output header: " + std::string(errBuf));
         if (videoEncCtx_) avcodec_free_context(&videoEncCtx_);
         avio_closep(&outputFmtCtx_->pb);
         avformat_free_context(outputFmtCtx_);
@@ -260,7 +269,9 @@ bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
     av_packet_free(&pkt);
 
     if (ret < 0) {
-        LOG_ERROR("Failed to write packet");
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to write packet: " + std::string(errBuf));
         return false;
     }
     return true;
@@ -273,7 +284,9 @@ bool Recorder::writeVideoFrame(AVFrame* frame) {
 
     int ret = avcodec_send_frame(videoEncCtx_, frame);
     if (ret < 0) {
-        LOG_ERROR("Failed to send frame to encoder");
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to send frame to encoder: " + std::string(errBuf));
         return false;
     }
 
@@ -284,7 +297,9 @@ bool Recorder::writeVideoFrame(AVFrame* frame) {
             av_packet_free(&pkt);
             break;
         } else if (ret < 0) {
-            LOG_ERROR("Failed to receive packet from encoder");
+            char errBuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, errBuf, sizeof(errBuf));
+            LOG_ERROR("Failed to receive packet from encoder: " + std::string(errBuf));
             av_packet_free(&pkt);
             return false;
         }
@@ -296,7 +311,9 @@ bool Recorder::writeVideoFrame(AVFrame* frame) {
         av_packet_free(&pkt);
 
         if (ret < 0) {
-            LOG_ERROR("Failed to write encoded packet");
+            char errBuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, errBuf, sizeof(errBuf));
+            LOG_ERROR("Failed to write encoded packet: " + std::string(errBuf));
             return false;
         }
     }
