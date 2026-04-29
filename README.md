@@ -160,31 +160,63 @@ mingw32-make -j
 ./FluxPlayer /path/to/video.mp4
 ```
 
+## 打包环境搭建
+
+### macOS
+
+所有工具均为系统自带，无需额外安装：
+
+| 工具 | 用途 |
+|------|------|
+| `cmake` | 构建系统（Xcode Command Line Tools 自带） |
+| `sips` | PNG 缩放生成各尺寸图标 |
+| `iconutil` | `.iconset` 目录转 `.icns` |
+| `hdiutil` | 打包 `.dmg` 磁盘镜像 |
+
+如未安装 Xcode Command Line Tools：
+
+```bash
+xcode-select --install
+```
+
+### Windows
+
+| 工具 | 下载地址 | 说明 |
+|------|---------|------|
+| CMake 3.16+ | https://cmake.org/download | 构建系统 |
+| MinGW-w64 | https://www.mingw-w64.org | C++ 编译器（或用 MSVC） |
+| Inno Setup 6 | https://jrsoftware.org/isdl.php | 安装包制作，必须 |
+| ImageMagick | https://imagemagick.org/script/download.php#windows | PNG→ICO 转换，可选 |
+
+> ImageMagick 安装时勾选 **"Add application directory to your system path"**，否则脚本找不到 `magick` 命令。
+>
+> 如果不安装 ImageMagick，可用在线工具 [convertio.co](https://convertio.co/png-ico/) 将 `source\pic.png` 转为 `source\pic.ico`，脚本检测到 ico 存在后会跳过转换。
+
+首次运行需开启脚本执行权限：
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
 ## 打包安装包
 
 ### macOS（生成 .dmg）
-
-前置依赖：系统自带 `sips` / `iconutil` / `hdiutil`，无需额外安装。
 
 ```bash
 ./scripts/package_macos.sh
 # 输出：build/FluxPlayer.dmg
 ```
 
-脚本流程：cmake Release 构建 → 生成 `.app` bundle（含 FFmpeg dylib、shaders、fonts）→ 将 `source/pic.png` 转为 `.icns` 图标 → 打包为 `.dmg`。
+脚本流程：cmake Release 构建 → 生成 `.app` bundle（含 FFmpeg dylib、shaders、fonts）→ 图标处理（优先用 `source/pic.icns`，否则从 `source/pic.png` 转换）→ 打包为 `.dmg`。
 
 ### Windows（生成安装程序 .exe）
-
-前置依赖：
-- [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-- [ImageMagick](https://imagemagick.org/)（用于 PNG → ICO 转换）
 
 ```powershell
 .\scripts\package_windows.ps1
 # 输出：dist\FluxPlayer-0.1.0-Setup.exe
 ```
 
-脚本流程：`source/pic.png` → `source/pic.ico` → cmake Release 构建 → Inno Setup 打包（含桌面快捷方式选项）。
+脚本流程：图标处理（优先用 `source\pic.ico`，否则用 ImageMagick 从 `source\pic.png` 转换）→ cmake Release 构建 → Inno Setup 打包（含桌面快捷方式选项）。
 
 如需指定 Inno Setup 路径：
 
