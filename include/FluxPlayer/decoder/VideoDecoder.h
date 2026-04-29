@@ -106,11 +106,23 @@ private:
     AVFrame*      m_hwTransferFrame;///< 可复用的 GPU→CPU 传输帧，避免每帧 alloc/free
     AVPixelFormat m_lastSwsFormat;  ///< 上次 sws_scale 的源格式，用于检测格式变化
 
+    // ==================== 硬件降级 ====================
+    /// 保存原始参数供降级重建使用，由 init() 填充，close() 释放
+    AVCodecParameters* m_savedCodecParams;
+    /// 连续 sendPacket 失败计数，超过阈值触发软件降级
+    int m_hwFailCount;
+
     /** @brief 按平台优先级尝试初始化硬件解码设备 */
     bool initHWAccel(AVCodecContext* codecCtx);
 
     /** @brief 将硬件帧从 GPU 传输到 CPU（复用 outFrame 缓冲） */
     bool transferHWFrame(AVFrame* hwFrame, AVFrame* outFrame);
+
+    /**
+     * @brief 硬件解码不可恢复时，降级为纯软件解码并重建解码器上下文
+     * VideoToolbox 参考帧丢失后整个线程池损坏，flush 无效，必须完全重建
+     */
+    bool reinitAsSoftware();
 };
 
 } // namespace FluxPlayer

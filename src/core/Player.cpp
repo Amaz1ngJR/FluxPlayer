@@ -526,6 +526,16 @@ void Player::renderVideoFrame(double& lastFrameTime) {
             if (renderer_->hasValidTexture()) {
                 renderer_->renderCachedFrame();
             }
+            // 解码器遇到损坏帧 flush 后等待下一个 I 帧期间，视频队列为空
+            // 此时让 VClock 跟随 AClock，避免进度条冻结
+            if (!decodingToTarget_.load() && !decodingFinished_.load()) {
+                double audioClock = avSync_->getAudioClock();
+                double videoClock = avSync_->getVideoClock();
+                if (audioClock - videoClock > 0.5) {
+                    avSync_->updateVideoClock(audioClock);
+                    lastRenderedPTS_.store(audioClock);
+                }
+            }
         }
     } else {
         // 暂停或其他非播放状态：复用 GPU 纹理中的帧数据
@@ -1680,7 +1690,12 @@ bool Player::shouldDropFrameForSpeed(const AVFrame* avFrame, double rate) {
     if (rate <= 1.0 || !avFrame) return false;
 
     // 永不丢弃 I 帧（关键帧是解码基准，丢弃会导致后续帧无法正确解码）
+    // FFmpeg 6.0+ 移除了 key_frame 字段，改用 AV_FRAME_FLAG_KEY 标志位
+#if LIBAVUTIL_VERSION_INT >= AV_VERSION_INT(58, 7, 100)
+    if (avFrame->flags & AV_FRAME_FLAG_KEY) return false;
+#else
     if (avFrame->key_frame) return false;
+#endif
 
     // B 帧按概率丢弃（双向预测帧不被其他帧依赖，丢弃无副作用）
     // 丢弃概率 = (rate - 1.0) / rate：1.25x→20%, 1.5x→33%, 2.0x→50%

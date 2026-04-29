@@ -42,7 +42,9 @@ VideoDecoder::VideoDecoder()
     , m_width(0)
     , m_height(0)
     , m_pixelFormat(AV_PIX_FMT_NONE)
-    , m_lastSwsFormat(AV_PIX_FMT_NONE) {
+    , m_lastSwsFormat(AV_PIX_FMT_NONE)
+    , m_savedCodecParams(nullptr)
+    , m_hwFailCount(0) {
     m_timeBase = {0, 1};
     LOG_DEBUG("VideoDecoder constructor called");
 }
@@ -122,6 +124,13 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
     m_pixelFormat = m_codecCtx->pix_fmt;
     m_timeBase = timeBase;
 
+    // 保存原始参数，供硬件解码失败时降级重建使用
+    if (m_savedCodecParams) {
+        avcodec_parameters_free(&m_savedCodecParams);
+    }
+    m_savedCodecParams = avcodec_parameters_alloc();
+    avcodec_parameters_copy(m_savedCodecParams, codecParams);
+
     LOG_INFO("Video decoder initialized successfully" +
              std::string(isHWAccelActive() ? " [HW]" : " [SW]"));
     LOG_INFO("Resolution: " + std::to_string(m_width) + "x" + std::to_string(m_height));
@@ -156,6 +165,11 @@ void VideoDecoder::close() {
         avcodec_free_context(&m_codecCtx);
         m_codecCtx = nullptr;
     }
+
+    if (m_savedCodecParams) {
+        avcodec_parameters_free(&m_savedCodecParams);
+        m_savedCodecParams = nullptr;
+    }
 }
 
 /**
@@ -186,10 +200,26 @@ bool VideoDecoder::sendPacket(AVPacket* packet) {
             char errBuf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, errBuf, sizeof(errBuf));
             LOG_ERROR("Failed to send packet to decoder: " + std::string(errBuf));
+
+            // 硬件解码器遇到损坏帧后可能持续失败，连续失败超过阈值则降级到软件解码
+            // 阈值设为 3：单次偶发错误不触发，持续性损坏才降级
+            if (isHWAccelActive()) {
+                m_hwFailCount++;
+                if (m_hwFailCount >= 3) {
+                    LOG_WARN("HW decoder failed " + std::to_string(m_hwFailCount) +
+                             " times, falling back to software decoding");
+                    reinitAsSoftware();
+                    // 降级后重新发送当前包
+                    if (m_codecCtx) {
+                        avcodec_send_packet(m_codecCtx, packet);
+                    }
+                }
+            }
             return false;
         }
     }
 
+    m_hwFailCount = 0;  // 发送成功，重置失败计数
     LOG_DEBUG("Packet sent to decoder successfully");
     return true;
 }
@@ -258,6 +288,48 @@ AVHWDeviceType VideoDecoder::getHWDeviceType() const {
     return ctx->type;
 }
 #endif
+
+/**
+ * 硬件解码持续失败时，完全重建为软件解码器
+ * VideoToolbox 参考帧丢失后线程池损坏，flush 无效，必须重建 codecCtx
+ * 软件解码器对损坏帧会尽力输出花屏而非拒绝 packet
+ */
+bool VideoDecoder::reinitAsSoftware() {
+    if (!m_savedCodecParams) {
+        LOG_ERROR("Cannot reinit: no saved codec params");
+        return false;
+    }
+
+    // 释放旧的硬件解码器上下文（保留 m_savedCodecParams）
+    if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
+    if (m_hwTransferFrame) { av_frame_free(&m_hwTransferFrame); m_hwTransferFrame = nullptr; }
+    if (m_hwDeviceCtx) { av_buffer_unref(&m_hwDeviceCtx); m_hwDeviceCtx = nullptr; }
+    if (m_codecCtx) { avcodec_free_context(&m_codecCtx); m_codecCtx = nullptr; }
+
+    const AVCodec* codec = avcodec_find_decoder(m_savedCodecParams->codec_id);
+    if (!codec) return false;
+
+    m_codecCtx = avcodec_alloc_context3(codec);
+    if (!m_codecCtx) return false;
+
+    if (avcodec_parameters_to_context(m_codecCtx, m_savedCodecParams) < 0) {
+        avcodec_free_context(&m_codecCtx);
+        return false;
+    }
+
+    // 软件解码：单线程避免多线程状态残留问题
+    m_codecCtx->thread_count = 1;
+
+    if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
+        avcodec_free_context(&m_codecCtx);
+        return false;
+    }
+
+    m_pixelFormat = m_codecCtx->pix_fmt;
+    m_hwFailCount = 0;
+    LOG_INFO("Switched to software decoding [SW]");
+    return true;
+}
 
 bool VideoDecoder::initHWAccel(AVCodecContext* codecCtx) {
 #if defined(__APPLE__)
