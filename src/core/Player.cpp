@@ -14,6 +14,7 @@
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/subtitle/SubtitleDecoder.h"
 #include "FluxPlayer/subtitle/SubtitleManager.h"
+#include "FluxPlayer/video/FrameInterpolator.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
@@ -22,9 +23,12 @@
 #include <thread>
 #include <chrono>
 #include <cstring>
+#include <cmath>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libswresample/swresample.h>
+#include <libavutil/channel_layout.h>
 }
 
 namespace FluxPlayer {
@@ -71,6 +75,7 @@ Player::Player()
     , bitrateUpdateTime_(0.0)
     , currentBitrate_(0.0)
 {
+    frameInterpolator_ = std::make_unique<FrameInterpolator>();
     LOG_INFO("Player created");
 }
 
@@ -459,6 +464,18 @@ void Player::renderVideoFrame(double& lastFrameTime) {
 
         if (frame) {
             double framePTS = frame->getPTS();
+            double rate = playbackRate_.load();
+
+            // 快放（>1.0x）：智能丢帧，保留 I 帧，优先丢 B 帧
+            if (rate > 1.0 && shouldDropFrameForSpeed(frame->getAVFrame(), rate)) {
+                droppedFrames_.fetch_add(1);
+                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+                if (renderer_->hasValidTexture()) renderer_->renderCachedFrame();
+                if (renderCallback_) renderCallback_();
+                window_->swapBuffers();
+                glfwPollEvents();
+                return;
+            }
 
             // 检查 PTS 有效性，无效时仍渲染帧但不更新时钟
             bool validPTS = (std::isfinite(framePTS) &&
@@ -655,6 +672,21 @@ void Player::setMute(bool mute) {
 void Player::setLoopPlayback(bool loop) {
     loopPlayback_.store(loop);
     LOG_INFO("Loop playback " + std::string(loop ? "enabled" : "disabled"));
+}
+
+void Player::setPlaybackSpeed(double speed) {
+    playbackRate_.store(speed);
+    if (avSync_) {
+        avSync_->setPlaybackRate(speed);
+    }
+
+    // 释放旧的重采样器（如有）
+    if (speedSwrContext_) {
+        swr_free(reinterpret_cast<SwrContext**>(&speedSwrContext_));
+        speedSwrContext_ = nullptr;
+    }
+
+    LOG_INFO("Playback speed set to " + std::to_string(speed) + "x");
 }
 
 void Player::decodingThread() {
@@ -1224,6 +1256,13 @@ void Player::cleanup() {
     // 但 subtitleManager_ 的 Entry 被 Controller 引用，顺序释放保险起见）
     subtitleDecoder_.reset();
     subtitleManager_.reset();
+    frameInterpolator_.reset();
+
+    // 释放音频变速重采样器
+    if (speedSwrContext_) {
+        swr_free(reinterpret_cast<SwrContext**>(&speedSwrContext_));
+        speedSwrContext_ = nullptr;
+    }
     demuxer_.reset();
 
     // 清空队列
@@ -1424,27 +1463,30 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         return bufferSize;
     }
 
-    size_t bytesWritten = 0;
+    const int sampleSize = 2;
+    const int frameBytes = audioChannels_ * sampleSize;
+    double rate = playbackRate_.load();
+
+    // 需要从队列消耗的字节数 = 输出字节数 × 速率
+    // 快放消耗更多内容（压缩播放），慢放消耗更少（拉伸播放）
+    size_t inputNeeded = static_cast<size_t>(bufferSize * rate);
+    if (inputNeeded == 0) inputNeeded = bufferSize;
+
+    // 临时缓冲区存储原始音频内容
+    std::vector<uint8_t> inputBuf(inputNeeded, 0);
+    size_t inputFilled = 0;
     double firstFramePTS = 0.0;
     bool hasValidFrame = false;
     size_t queueDepth = 0;
-    const int sampleSize = 2;  // 16-bit PCM = 2 bytes per sample
-    size_t totalSamplesFilled = 0;
 
-    // 填充缓冲区，尽可能从队列中获取音频数据
-    while (bytesWritten < bufferSize) {
-        // peek 当前队头帧（不消费），部分消费时通过 pendingAudioOffset_ 追踪
+    // 从队列读取 inputNeeded 字节
+    while (inputFilled < inputNeeded) {
         Frame* audioFrame = audioQueue_ ? audioQueue_->peek() : nullptr;
         size_t frameOffset = pendingAudioOffset_;
 
         if (!audioFrame) {
-            // 队列为空 - 音频欠载（underrun）
-            size_t silenceBytes = bufferSize - bytesWritten;
-            std::memset(buffer + bytesWritten, 0, silenceBytes);
-            bytesWritten += silenceBytes;
-
             int underruns = audioUnderrunCount_.fetch_add(1) + 1;
-            if (underruns % 10 == 1) {  // 每10次记录一次，避免日志过多
+            if (underruns % 10 == 1) {
                 LOG_WARN("Audio underrun detected, count: " + std::to_string(underruns));
             }
             queueDepth = 0;
@@ -1452,73 +1494,64 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         }
 
         queueDepth = audioQueue_->size();
-
-        // 验证帧数据完整性
         AVFrame* avFrame = audioFrame->getAVFrame();
         if (!avFrame || !avFrame->data[0] || avFrame->nb_samples <= 0) {
-            LOG_WARN("Invalid audio frame received, skipping");
-            audioQueue_->next();  // 丢弃无效帧
+            audioQueue_->next();
             pendingAudioOffset_ = 0;
             continue;
         }
 
-        // 记录第一帧的PTS
         if (!hasValidFrame) {
             double framePTS = audioFrame->getPTS();
-            // 如果从帧中间开始，补偿 PTS
             if (frameOffset > 0) {
-                size_t samplesSkipped = frameOffset / (audioChannels_ * sampleSize);
-                framePTS += static_cast<double>(samplesSkipped) / static_cast<double>(audioSampleRate_);
+                framePTS += static_cast<double>(frameOffset) / frameBytes / audioSampleRate_;
             }
             firstFramePTS = framePTS;
             hasValidFrame = true;
         }
 
-        // 计算本帧剩余的数据大小
-        size_t frameDataSize = static_cast<size_t>(avFrame->nb_samples) *
-                              static_cast<size_t>(audioChannels_) *
-                              static_cast<size_t>(sampleSize);
+        size_t frameDataSize = static_cast<size_t>(avFrame->nb_samples) * frameBytes;
         size_t remainingFrameData = frameDataSize - frameOffset;
+        size_t bytesToCopy = std::min(remainingFrameData, inputNeeded - inputFilled);
 
-        // 计算可拷贝的字节数
-        size_t remainingSpace = bufferSize - bytesWritten;
-        size_t bytesToCopy = std::min(remainingFrameData, remainingSpace);
-
-        // 复制音频数据
-        std::memcpy(buffer + bytesWritten, avFrame->data[0] + frameOffset, bytesToCopy);
-        bytesWritten += bytesToCopy;
-
-        // 累计填充的样本数
-        size_t samplesCopied = bytesToCopy / (audioChannels_ * sampleSize);
-        totalSamplesFilled += samplesCopied;
+        std::memcpy(inputBuf.data() + inputFilled, avFrame->data[0] + frameOffset, bytesToCopy);
+        inputFilled += bytesToCopy;
 
         if (bytesToCopy < remainingFrameData) {
-            // 帧未完全消费：更新偏移，下次回调继续从同一帧消费（不调用 next()）
             pendingAudioOffset_ = frameOffset + bytesToCopy;
             break;
         } else {
-            // 帧已完全消费：推进读索引，重置偏移
             audioQueue_->next();
             pendingAudioOffset_ = 0;
         }
     }
 
-    // 更新队列深度统计
-    audioQueueDepth_.store(queueDepth);
+    // 最近邻重采样：从 inputFilled 字节映射到 bufferSize 字节
+    int outSamples = bufferSize / frameBytes;
+    int inSamples = inputFilled / frameBytes;
 
-    // 更新音频时钟
-    if (hasValidFrame && avSync_ && audioSampleRate_ > 0) {
-        double filledDuration = static_cast<double>(totalSamplesFilled) / static_cast<double>(audioSampleRate_);
-        double currentAudioPTS = firstFramePTS + filledDuration;
-
-        avSync_->updateAudioClock(currentAudioPTS);
-        LOG_DEBUG("Audio clock updated: " + std::to_string(currentAudioPTS) +
-                 " (first PTS: " + std::to_string(firstFramePTS) +
-                 ", samples: " + std::to_string(totalSamplesFilled) +
-                 ", queue depth: " + std::to_string(queueDepth) + ")");
+    if (inSamples > 0) {
+        for (int i = 0; i < outSamples; i++) {
+            int srcIdx = static_cast<int>((double)i * inSamples / outSamples);
+            srcIdx = std::min(srcIdx, inSamples - 1);
+            std::memcpy(buffer + i * frameBytes,
+                        inputBuf.data() + srcIdx * frameBytes, frameBytes);
+        }
+    } else {
+        std::memset(buffer, 0, bufferSize);
     }
 
-    return bytesWritten;
+    audioQueueDepth_.store(queueDepth);
+
+    if (hasValidFrame && avSync_ && audioSampleRate_ > 0) {
+        double deviceDuration = static_cast<double>(outSamples) / audioSampleRate_;
+        double currentAudioPTS = std::abs(rate - 1.0) < 0.01
+            ? firstFramePTS + deviceDuration
+            : avSync_->getAudioClock() + deviceDuration * rate;
+        avSync_->updateAudioClock(currentAudioPTS);
+    }
+
+    return bufferSize;
 }
 
 // ===== 录制控制 =====
@@ -1640,6 +1673,27 @@ int64_t Player::getVideoRecordingSize() const {
 
 int64_t Player::getAudioRecordingSize() const {
     return audioRecorder_ ? audioRecorder_->getFileSize() : 0;
+}
+
+bool Player::shouldDropFrameForSpeed(const AVFrame* avFrame, double rate) {
+    if (rate <= 1.0 || !avFrame) return false;
+
+    // 永不丢弃 I 帧（关键帧是解码基准，丢弃会导致后续帧无法正确解码）
+    if (avFrame->key_frame) return false;
+
+    // B 帧按概率丢弃（双向预测帧不被其他帧依赖，丢弃无副作用）
+    // 丢弃概率 = (rate - 1.0) / rate：1.25x→20%, 1.5x→33%, 2.0x→50%
+    if (avFrame->pict_type == AV_PICTURE_TYPE_B) {
+        uint64_t threshold = static_cast<uint64_t>((rate - 1.0) / rate * 100);
+        return (frameDropCounter_++ % 100) < threshold;
+    }
+
+    // P 帧仅在 2.0x 时以 25% 概率丢弃
+    if (avFrame->pict_type == AV_PICTURE_TYPE_P && rate >= kPFrameDropMinRate) {
+        return (frameDropCounter_++ % kPFrameDropInterval) == 0;
+    }
+
+    return false;
 }
 
 } // namespace FluxPlayer

@@ -55,7 +55,8 @@ double AVSync::getExternalClock() const {
 
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration<double>(now - externalClockBase_).count();
-    return externalClockOffset_.load() + elapsed;
+    // 变速时外部时钟按速率推进，驱动视频帧以正确速率显示
+    return externalClockOffset_.load() + elapsed * playbackRate_.load();
 }
 
 double AVSync::getMasterClock() const {
@@ -92,9 +93,18 @@ double AVSync::computeFrameDelay(double framePTS, double lastFramePTS) {
     // 计算视频时钟与主时钟的差值
     double diff = framePTS - masterClock;
 
-    // 计算同步阈值（根据帧延迟动态调整）
+    // 快放时帧延迟按速率缩短
+    double rate = playbackRate_.load();
+    if (rate > 0.01) {
+        delay /= rate;
+    }
+
+    // 快放时放宽同步阈值，避免因阈值过紧导致额外丢帧
     double syncThreshold = std::max(AV_SYNC_THRESHOLD_MIN,
                                     std::min(AV_SYNC_THRESHOLD_MAX, delay));
+    if (rate > 1.0) {
+        syncThreshold *= rate;  // 2.0x 时阈值翻倍（40ms → 80ms）
+    }
 
     // 只有在差异不太大的情况下才进行同步调整
     if (std::abs(diff) < AV_NOSYNC_THRESHOLD) {
@@ -194,6 +204,16 @@ void AVSync::resume() {
         externalClockOffset_.store(pauseStartTime_);
         paused_.store(false);
     }
+}
+
+void AVSync::setPlaybackRate(double rate) {
+    if (!paused_) {
+        // 速率切换前先锁定当前时钟值，避免 elapsed * newRate 导致时钟跳变
+        double current = getExternalClock();
+        externalClockBase_ = std::chrono::steady_clock::now();
+        externalClockOffset_.store(current);
+    }
+    playbackRate_.store(rate);
 }
 
 void AVSync::seekTo(double seekTime) {

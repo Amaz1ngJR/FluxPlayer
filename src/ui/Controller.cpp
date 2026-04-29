@@ -45,6 +45,9 @@ Controller::Controller(Player& player, Window& window)
     , showSettingsMenu_(false)
     , settingsMenuPosX_(0.0f)
     , settingsMenuPosY_(0.0f)
+    , showSpeedMenu_(false)
+    , speedMenuPosX_(0.0f)
+    , speedMenuPosY_(0.0f)
     , subtitleEnabled_(Config::getInstance().get().subtitleEnabled)
     , subtitleFontScale_(Config::getInstance().get().subtitleFontScale)
     , subtitleFont_(nullptr)
@@ -530,9 +533,16 @@ void Controller::renderVolumeAndSettings(float btnH) {
     const float volSliderW = 100.0f;
     const float volBtnW = btnH + 4.0f;
     const float settingsBtnW = volBtnW;
-    const float settingsIconX = ds.x - volBtnW - volSliderW - settingsBtnW - 20.0f;
+    const float speedBtnW = volBtnW;
+    // 音量图标留出滑块展开空间（滑块向右展开）
     const float volIconX = ds.x - volBtnW - volSliderW - 12.0f;
-    constexpr double VOL_CLOSE_DELAY = 0.4;  // 延迟关闭时间（秒）
+    // 设置按钮紧贴音量图标左侧
+    const float settingsIconX = volIconX - settingsBtnW - 4.0f;
+    constexpr double VOL_CLOSE_DELAY = 0.4;
+
+    // 速度按钮紧贴设置图标左侧
+    ImGui::SameLine(settingsIconX - speedBtnW - 4.0f);
+    renderSpeedButton(btnH);
 
     // 设置图标按钮（在音量图标左侧）
     ImGui::SameLine(settingsIconX);
@@ -929,6 +939,60 @@ void Controller::renderSubtitles() {
     if (subtitleFont_) {
         ImGui::PopFont();
     }
+}
+
+void Controller::renderSpeedButton(float btnH) {
+    const float speedBtnW = btnH + 4.0f;
+    double currentSpeed = player_.getPlaybackSpeed();
+    bool isNonDefault = (std::abs(currentSpeed - 1.0) > 0.01);
+
+    if (isNonDefault) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+    }
+
+    bool clicked = ImGui::Button("Spd##speedbtn", ImVec2(speedBtnW, btnH));
+    ImVec2 btnMin = ImGui::GetItemRectMin();
+    ImVec2 btnMax = ImGui::GetItemRectMax();
+
+    if (isNonDefault) {
+        ImGui::PopStyleColor(2);
+        char speedText[16];
+        snprintf(speedText, sizeof(speedText), "%.2gx", currentSpeed);
+        ImVec2 textSize = ImGui::CalcTextSize(speedText);
+        float textX = (btnMin.x + btnMax.x - textSize.x) * 0.5f;
+        ImGui::GetForegroundDrawList()->AddText(
+            ImVec2(textX, btnMax.y + 2), IM_COL32(100, 180, 255, 255), speedText);
+    }
+
+    if (clicked) {
+        ImGui::OpenPopup("##SpeedPopup");
+    }
+
+    // 菜单在按钮上方弹出
+    ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - 172.0f), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.12f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.12f, 0.12f, 0.12f, 0.95f));
+
+    if (ImGui::BeginPopup("##SpeedPopup")) {
+        constexpr float kSpeeds[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
+        const char* kLabels[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"};
+
+        for (int i = 0; i < 6; i++) {
+            bool isSelected = (std::abs(currentSpeed - kSpeeds[i]) < 0.01);
+            if (isSelected) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
+            if (ImGui::Selectable(kLabels[i], isSelected, 0, ImVec2(80, 0))) {
+                player_.setPlaybackSpeed(kSpeeds[i]);
+                ImGui::CloseCurrentPopup();
+            }
+            if (isSelected) ImGui::PopStyleColor();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar();
 }
 
 } // namespace FluxPlayer

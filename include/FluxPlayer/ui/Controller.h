@@ -78,6 +78,12 @@ private:
      */
     void renderVolumeAndSettings(float btnH);
 
+    /**
+     * @brief 绘制速度选择按钮和弹出菜单
+     * @param btnH 按钮高度
+     */
+    void renderSpeedButton(float btnH);
+
     void renderMediaInfo();
     void renderStats();
     std::string formatTime(double seconds);
@@ -123,6 +129,11 @@ private:
     bool showSettingsMenu_;     // 设置菜单显示状态
     float settingsMenuPosX_;    // 设置菜单X坐标
     float settingsMenuPosY_;    // 设置菜单Y坐标
+
+    // 速度选择器状态
+    bool showSpeedMenu_;        // 速度菜单显示状态
+    float speedMenuPosX_;       // 速度菜单X坐标
+    float speedMenuPosY_;       // 速度菜单Y坐标
 
     // 鼠标活动追踪（自动显示/隐藏）
     double lastMouseMoveTime_;

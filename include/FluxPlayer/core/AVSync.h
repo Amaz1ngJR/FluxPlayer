@@ -134,6 +134,18 @@ public:
     void seekTo(double seekTime);
 
     /**
+     * 设置播放速率
+     * @param rate 速率倍数（0.5 ~ 2.0），影响帧延迟计算和同步阈值
+     * 注意：会同步更新外部时钟基准，避免速率切换时时钟跳变
+     */
+    void setPlaybackRate(double rate);
+
+    /**
+     * 获取当前播放速率
+     */
+    double getPlaybackRate() const { return playbackRate_.load(); }
+
+    /**
      * 是否已暂停
      */
     bool isPaused() const { return paused_; }
@@ -185,6 +197,9 @@ private:
     // 统计信息
     std::atomic<double> averageFrameDelay_;
     static constexpr double FRAME_DELAY_ALPHA = 0.1;  // 平均延迟的平滑系数
+
+    // 播放速率（1.0 = 正常，>1.0 快放，<1.0 慢放）
+    std::atomic<double> playbackRate_{1.0};
 
     // 同步阈值
     static constexpr double AV_SYNC_THRESHOLD_MIN = 0.04;   // 最小同步阈值（40ms）

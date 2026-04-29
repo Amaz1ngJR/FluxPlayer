@@ -7,6 +7,9 @@
 #include <atomic>
 #include <mutex>
 
+// 前向声明 FFmpeg 类型，避免头文件引入平台 SDK
+struct AVFrame;
+
 namespace FluxPlayer {
 
 // 前向声明
@@ -23,6 +26,7 @@ class Controller;
 class Recorder;
 class SubtitleDecoder;
 class SubtitleManager;
+class FrameInterpolator;
 
 /**
  * 播放器状态枚举
@@ -178,6 +182,17 @@ public:
      * 是否静音
      */
     bool isMuted() const { return muted_; }
+
+    /**
+     * 设置播放速度
+     * @param speed 速率倍数（0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0）
+     */
+    void setPlaybackSpeed(double speed);
+
+    /**
+     * 获取当前播放速度
+     */
+    double getPlaybackSpeed() const { return playbackRate_.load(); }
 
     /**
      * 设置循环播放
@@ -407,6 +422,26 @@ private:
     std::atomic<double> liveStreamStartTime_;     // 实时流开始播放的系统时间
     std::atomic<double> lastValidVideoPTS_;         // 最后一个有效的归一化视频 PTS
     std::atomic<double> lastValidAudioPTS_;         // 最后一个有效的归一化音频 PTS
+
+    // 播放速率控制
+    std::atomic<double> playbackRate_{1.0};     // 当前播放速率（0.5 ~ 2.0）
+    void* speedSwrContext_{nullptr};            // 音频变速重采样器（SwrContext*，pImpl 隔离）
+    uint64_t frameDropCounter_{0};              // 丢帧计数器（用于均匀分布丢帧）
+
+    // 帧插值器（慢放时生成中间帧）
+    std::unique_ptr<FrameInterpolator> frameInterpolator_;
+    Frame* prevVideoFrame_{nullptr};            // 上一帧（慢放插值用，不拥有，指向 keep-last 帧）
+
+    // 变速丢帧策略常量
+    static constexpr double kPFrameDropMinRate = 2.0;  // P 帧丢弃的最低速率阈值
+    static constexpr int kPFrameDropInterval = 4;      // P 帧丢弃间隔（每 4 帧丢 1 帧）
+
+    /**
+     * 快放时判断是否应丢弃该帧
+     * @param avFrame FFmpeg 帧（用于读取帧类型）
+     * @param rate 当前播放速率
+     */
+    bool shouldDropFrameForSpeed(const AVFrame* avFrame, double rate);
 
     // 音量控制
     std::atomic<float> volume_;

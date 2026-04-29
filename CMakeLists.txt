@@ -178,6 +178,7 @@ set(FLUXPLAYER_SOURCES
     src/utils/Screenshot.cpp
     src/utils/Timer.cpp
     src/recorder/Recorder.cpp
+    src/video/FrameInterpolator.cpp
 )
 
 # add_executable：将源文件编译并链接为可执行程序

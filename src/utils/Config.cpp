@@ -76,6 +76,13 @@ bool Config::load() {
                     }
                 }
                 else if (key == "subtitleFontPath") settings_.subtitleFontPath = value;
+                else if (key == "playbackSpeed") {
+                    try {
+                        double speed = std::stod(value);
+                        if (speed >= 0.5 && speed <= 2.0) settings_.playbackSpeed = speed;
+                    } catch (...) {}
+                }
+                else if (key == "frameInterpolation") settings_.frameInterpolation = (value == "true" || value == "1");
             }
 
             lastModTime_ = getFileModTime();
@@ -141,7 +148,17 @@ bool Config::save() {
     file << "# subtitleFontScale: 字幕字体缩放比例 (0.5 ~ 4.0)\n";
     file << "subtitleFontScale=" << settings_.subtitleFontScale << "\n";
     file << "# subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)\n";
-    file << "subtitleFontPath=" << settings_.subtitleFontPath << "\n";
+    file << "subtitleFontPath=" << settings_.subtitleFontPath << "\n\n";
+
+    file << "[Speed]\n";
+    file << "# 说明：默认播放速度倍率\n";
+    file << "# 取值：0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0\n";
+    file << "# 默认：1.0\n";
+    file << "playbackSpeed=" << settings_.playbackSpeed << "\n";
+    file << "# 说明：慢放时是否启用帧插值（关闭则使用简单重复帧）\n";
+    file << "# 取值：true / false\n";
+    file << "# 默认：true\n";
+    file << "frameInterpolation=" << (settings_.frameInterpolation ? "true" : "false") << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
     return true;

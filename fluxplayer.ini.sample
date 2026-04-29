@@ -30,6 +30,16 @@ showStats=true
 # loopPlayback: 是否循环播放 (true / false)
 loopPlayback=false
 
+[Speed]
+# 说明：默认播放速度倍率
+# 取值：0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0
+# 默认：1.0
+playbackSpeed=1.0
+# 说明：慢放时是否启用帧插值（当前版本预留，暂未集成到渲染路径）
+# 取值：true / false
+# 默认：true
+frameInterpolation=true
+
 [Screenshot]
 # screenshotDir: 截图保存目录 (相对于 ini 文件所在目录)
 screenshotDir=Screenshot
