@@ -160,6 +160,38 @@ mingw32-make -j
 ./FluxPlayer /path/to/video.mp4
 ```
 
+## 打包安装包
+
+### macOS（生成 .dmg）
+
+前置依赖：系统自带 `sips` / `iconutil` / `hdiutil`，无需额外安装。
+
+```bash
+./scripts/package_macos.sh
+# 输出：build/FluxPlayer.dmg
+```
+
+脚本流程：cmake Release 构建 → 生成 `.app` bundle（含 FFmpeg dylib、shaders、fonts）→ 将 `source/pic.png` 转为 `.icns` 图标 → 打包为 `.dmg`。
+
+### Windows（生成安装程序 .exe）
+
+前置依赖：
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+- [ImageMagick](https://imagemagick.org/)（用于 PNG → ICO 转换）
+
+```powershell
+.\scripts\package_windows.ps1
+# 输出：dist\FluxPlayer-0.1.0-Setup.exe
+```
+
+脚本流程：`source/pic.png` → `source/pic.ico` → cmake Release 构建 → Inno Setup 打包（含桌面快捷方式选项）。
+
+如需指定 Inno Setup 路径：
+
+```powershell
+.\scripts\package_windows.ps1 -InnoSetup "D:\InnoSetup6\ISCC.exe"
+```
+
 ## 使用方法
 
 ### 启动方式

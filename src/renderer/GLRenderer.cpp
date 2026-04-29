@@ -11,10 +11,38 @@
 #include "FluxPlayer/renderer/GLRenderer.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <glad/glad.h>
+#ifdef _WIN32
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <climits>
+#endif
 
 namespace FluxPlayer {
 
 namespace {
+
+static std::string getExeDir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string p(buf);
+    return p.substr(0, p.find_last_of("\\/"));
+#elif defined(__APPLE__)
+    char buf[PATH_MAX];
+    uint32_t size = PATH_MAX;
+    if (_NSGetExecutablePath(buf, &size) != 0) return ".";
+    std::string p(buf);
+    return p.substr(0, p.find_last_of('/'));
+#else
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, PATH_MAX);
+    if (n <= 0) return ".";
+    std::string p(buf, n);
+    return p.substr(0, p.find_last_of('/'));
+#endif
+}
+
 inline bool checkGLError(const char* label) {
     GLenum err = glGetError();
     if (err != GL_NO_ERROR) {
@@ -62,7 +90,8 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     // 顶点着色器：处理顶点位置
     // 片段着色器：进行 YUV→RGB 转换
     m_shader = std::make_unique<Shader>();
-    if (!m_shader->loadFromFile("shaders/video.vert", "shaders/video.frag")) {
+    std::string exeDir = getExeDir();
+    if (!m_shader->loadFromFile(exeDir + "/shaders/video.vert", exeDir + "/shaders/video.frag")) {
         LOG_ERROR("Failed to load video shaders");
         return false;
     }
