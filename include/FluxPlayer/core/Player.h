@@ -388,6 +388,7 @@ private:
     // 播放器状态
     std::atomic<PlayerState> state_;
     std::atomic<bool> shouldQuit_;
+    std::atomic<bool> userStopped_{false}; ///< 用户主动 Stop，循环播放不重启
     std::atomic<bool> decodingFinished_;  ///< 解码线程已读完所有数据（队列可能仍有剩余帧）
     // Seek 请求（mutex 保护，避免 seekRequested_/seekTarget_ 两个 atomic 的 TOCTOU 竞态）
     struct SeekRequest {

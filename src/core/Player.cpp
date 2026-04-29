@@ -290,6 +290,7 @@ void Player::stop() {
 
     LOG_INFO("Stopping playback");
 
+    userStopped_.store(true);
     shouldQuit_.store(true);
 
     // 终止队列等待，唤醒阻塞的解码线程
@@ -577,7 +578,7 @@ void Player::updatePlaybackStats(double currentTime, double& lastPrint, size_t& 
  */
 bool Player::handleLoopRestart() {
     // 检查是否需要循环播放
-    if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !window_->shouldClose()) {
+    if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !userStopped_.load() && !window_->shouldClose()) {
         LOG_INFO("Loop playback enabled, restarting...");
 
         // 等待解码线程结束

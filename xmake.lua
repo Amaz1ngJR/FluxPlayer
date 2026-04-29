@@ -228,6 +228,8 @@ target("FluxPlayer")
     after_build(function (target)
         -- 把着色器文件复制到可执行文件旁边（运行时需要读取）
         os.cp("assets/shaders", path.join(target:targetdir(), "shaders"))
+        -- 把字体文件复制到可执行文件旁边（主界面 TTF 字体运行时加载）
+        os.cp("assets/fonts", path.join(target:targetdir(), "fonts"))
         if is_plat("windows") then
             -- Windows：把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
             local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")

@@ -15,8 +15,8 @@ public:
         int windowWidth = 960;
         int windowHeight = 600;
         bool uiVisible = true;
-        bool showMediaInfo = true;
-        bool showStats = true;
+        bool showMediaInfo = false;
+        bool showStats = false;
         bool loopPlayback = false;
         std::string screenshotDir = "Screenshot";
         std::string screenshotFormat = "png";  // png 或 jpg

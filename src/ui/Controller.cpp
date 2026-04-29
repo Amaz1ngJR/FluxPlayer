@@ -177,13 +177,17 @@ void Controller::render() {
 
     // 渲染设置菜单（独立窗口，不受底部浮层裁剪）
     if (showSettingsMenu_) {
-        ImGui::SetNextWindowPos(ImVec2(settingsMenuPosX_, settingsMenuPosY_));
-        ImGui::SetNextWindowSize(ImVec2(150, 0), ImGuiCond_Always);
-        ImGui::SetNextWindowFocus();  // 确保窗口获得焦点
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 6));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 5.0f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.15f, 0.15f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.4f, 0.8f));
+        // pivot (0, 1) = 左下角对齐到锚点，菜单向上弹出
+        ImGui::SetNextWindowPos(ImVec2(settingsMenuPosX_, settingsMenuPosY_), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+        ImGui::SetNextWindowSize(ImVec2(160, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowFocus();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 8));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.02f, 0.03f, 0.10f, 0.96f));
+        ImGui::PushStyleColor(ImGuiCol_Border,   ImVec4(0.00f, 0.80f, 1.00f, 0.50f));
+        ImGui::PushStyleColor(ImGuiCol_Text,     ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_CheckMark,ImVec4(0.00f, 1.00f, 1.00f, 1.00f));
 
         ImGui::Begin("SettingsMenu", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -213,8 +217,8 @@ void Controller::render() {
 
         ImGui::End();
 
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(3);
     }
 
     // 渲染独立面板
@@ -253,13 +257,28 @@ void Controller::renderBottomOverlay() {
     const float overlayH = 64.0f;
     const float pad = 8.0f;
 
-    // 半透明无边框浮层
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, 4.0f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.75f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.02f, 0.02f, 0.08f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.00f, 1.00f, 1.00f, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.00f, 1.00f, 1.00f, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.00f, 0.80f, 1.00f, 0.50f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
 
     ImGui::SetNextWindowPos(ImVec2(0, ds.y - overlayH), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(ds.x, overlayH), ImGuiCond_Always);
+
+    // 顶部青色光带（手绘在窗口外）
+    {
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        dl->AddRectFilledMultiColor(
+            ImVec2(0, ds.y - overlayH), ImVec2(ds.x, ds.y - overlayH + 2.0f),
+            IM_COL32(0,255,255,0), IM_COL32(0,255,255,180),
+            IM_COL32(0,255,255,180), IM_COL32(0,255,255,0));
+    }
 
     ImGui::Begin("##BottomOverlay", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -295,8 +314,8 @@ void Controller::renderBottomOverlay() {
     renderVolumeAndSettings(btnH);
 
     ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(6);
+    ImGui::PopStyleVar(4);
 }
 
 /**
@@ -355,14 +374,24 @@ void Controller::renderProgressBar(float progressBarWidth, float progress, doubl
         player_.seek(targetTime);
     }
 
-    // 绘制进度条背景
+    // 进度条背景
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddRectFilled(barMin, barMax, IM_COL32(60, 60, 60, 255), 3.0f);
+    drawList->AddRectFilled(barMin, barMax, IM_COL32(10, 15, 35, 255), 2.0f);
+    // 背景轨道边框（青色描边）
+    drawList->AddRect(barMin, barMax, IM_COL32(0, 150, 200, 80), 2.0f);
 
-    // 绘制已播放部分
+    // 已播放部分：青→紫渐变
     if (progress > 0.0f) {
         ImVec2 filledMax = ImVec2(barMin.x + (barMax.x - barMin.x) * progress, barMax.y);
-        drawList->AddRectFilled(barMin, filledMax, IM_COL32(0, 120, 215, 255), 3.0f);
+        drawList->AddRectFilledMultiColor(barMin, filledMax,
+            IM_COL32(0, 220, 255, 255), IM_COL32(180, 0, 255, 255),
+            IM_COL32(180, 0, 255, 255), IM_COL32(0, 220, 255, 255));
+        // 进度头部发光点
+        float headX = filledMax.x;
+        float midY = (barMin.y + barMax.y) * 0.5f;
+        drawList->AddCircleFilled(ImVec2(headX, midY), 5.0f, IM_COL32(0, 255, 255, 255), 12);
+        drawList->AddCircleFilled(ImVec2(headX, midY), 8.0f, IM_COL32(0, 255, 255, 60), 12);
+        drawList->AddCircleFilled(ImVec2(headX, midY), 12.0f, IM_COL32(0, 255, 255, 20), 12);
     }
 
     // 绘制拖动指示器或悬停预览
@@ -405,65 +434,125 @@ void Controller::renderProgressBar(float progressBarWidth, float progress, doubl
     ImGui::PopStyleColor(3);
 }
 
-/**
- * 绘制播放控制按钮（播放/暂停/停止）和录制按钮（录像/录音）
- * 按钮组居中排列，录制中的按钮变红并显示时长和文件大小
- * @param btnH 按钮高度
- */
+// 在指定中心位置绘制播放三角形图标（向右的实心三角）
+static void DrawPlayIcon(ImDrawList* dl, ImVec2 center, float size, ImU32 col) {
+    float h = size * 0.5f;
+    ImVec2 p1(center.x - h*0.4f, center.y - h*0.6f);
+    ImVec2 p2(center.x - h*0.4f, center.y + h*0.6f);
+    ImVec2 p3(center.x + h*0.6f, center.y);
+    dl->AddTriangleFilled(p1, p2, p3, col);
+}
+
+// 在指定中心位置绘制暂停图标（两条竖线）
+static void DrawPauseIcon(ImDrawList* dl, ImVec2 center, float size, ImU32 col) {
+    float h = size * 0.5f;
+    float w = h * 0.25f;
+    dl->AddRectFilled(ImVec2(center.x - h*0.35f, center.y - h*0.6f),
+                      ImVec2(center.x - h*0.35f + w, center.y + h*0.6f), col);
+    dl->AddRectFilled(ImVec2(center.x + h*0.35f - w, center.y - h*0.6f),
+                      ImVec2(center.x + h*0.35f, center.y + h*0.6f), col);
+}
+
+// 在指定中心位置绘制停止图标（实心方块）
+static void DrawStopIcon(ImDrawList* dl, ImVec2 center, float size, ImU32 col) {
+    float h = size * 0.45f;
+    dl->AddRectFilled(ImVec2(center.x - h, center.y - h),
+                      ImVec2(center.x + h, center.y + h), col);
+}
+
 void Controller::renderPlaybackButtons(float btnH) {
     const ImVec2& ds = ImGui::GetIO().DisplaySize;
 
-    // 获取播放器状态
     PlayerState state = player_.getState();
     bool isPlaying = (state == PlayerState::PLAYING);
-    bool isPaused = (state == PlayerState::PAUSED);
-    bool canStop = isPlaying || isPaused;
+    bool isPaused  = (state == PlayerState::PAUSED);
+    bool canStop   = isPlaying || isPaused;
 
-    // 计算按钮组总宽度，居中定位
     const float btnSpacing = ImGui::GetStyle().ItemSpacing.x;
     bool isRecV = player_.isVideoRecording();
     bool isRecA = player_.isAudioRecording();
-    float recVBtnW = isRecV ? 60.0f : 50.0f;
-    float recABtnW = isRecA ? 60.0f : 50.0f;
-    float buttonsW = 60.0f + btnSpacing + 50.0f + btnSpacing + recVBtnW + btnSpacing + recABtnW;
+    float recVBtnW = isRecV ? 70.0f : 60.0f;
+    float recABtnW = isRecA ? 70.0f : 60.0f;
+    float buttonsW = 80.0f + btnSpacing + 60.0f + btnSpacing + recVBtnW + btnSpacing + recABtnW;
     float centerX = (ds.x - buttonsW) * 0.5f;
     ImGui::SetCursorPosX(centerX);
 
-    // 播放/暂停按钮
+    // 青色描边按钮样式
+    auto pushCyan = [&]() {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0,1,1,0.12f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0,1,1,0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0,1,1,1));
+        ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0,0.8f,1,0.7f));
+    };
+    auto popCyan = [&]() { ImGui::PopStyleColor(5); };
+
+    // 播放/暂停（图标按钮）
+    pushCyan();
+    ImU32 cyanCol = IM_COL32(0, 220, 255, 255);
     if (isPlaying) {
-        if (ImGui::Button("Pause", ImVec2(60, btnH))) player_.pause();
+        ImGui::Button("##pause", ImVec2(80, btnH));
+        bool hov = ImGui::IsItemHovered();
+        ImVec2 c = ImGui::GetItemRectMin();
+        c.x += 40; c.y += btnH * 0.5f;
+        DrawPauseIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? IM_COL32(0,255,255,255) : cyanCol);
+        if (ImGui::IsItemClicked()) player_.pause();
     } else if (isPaused) {
-        if (ImGui::Button("Play", ImVec2(60, btnH))) player_.resume();
+        ImGui::Button("##play", ImVec2(80, btnH));
+        bool hov = ImGui::IsItemHovered();
+        ImVec2 c = ImGui::GetItemRectMin();
+        c.x += 40; c.y += btnH * 0.5f;
+        DrawPlayIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? IM_COL32(0,255,255,255) : cyanCol);
+        if (ImGui::IsItemClicked()) player_.resume();
     } else {
         ImGui::BeginDisabled();
-        ImGui::Button("Play", ImVec2(60, btnH));
+        ImGui::Button("##play", ImVec2(80, btnH));
+        ImVec2 c = ImGui::GetItemRectMin(); c.x += 40; c.y += btnH * 0.5f;
+        DrawPlayIcon(ImGui::GetWindowDrawList(), c, btnH, IM_COL32(0,150,180,100));
         ImGui::EndDisabled();
     }
+    popCyan();
 
     ImGui::SameLine();
 
-    // 停止按钮
+    // 停止（图标按钮，紫色）
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.7f,0,1,0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.7f,0,1,0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.7f,0,1,0.7f));
+    ImU32 purpleCol = IM_COL32(180, 0, 255, 255);
     if (canStop) {
-        if (ImGui::Button("Stop", ImVec2(50, btnH))) player_.stop();
+        ImGui::Button("##stop", ImVec2(60, btnH));
+        bool hov = ImGui::IsItemHovered();
+        ImVec2 c = ImGui::GetItemRectMin(); c.x += 30; c.y += btnH * 0.5f;
+        DrawStopIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? IM_COL32(200,0,255,255) : purpleCol);
+        if (ImGui::IsItemClicked()) player_.stop();
     } else {
         ImGui::BeginDisabled();
-        ImGui::Button("Stop", ImVec2(50, btnH));
+        ImGui::Button("##stop", ImVec2(60, btnH));
+        ImVec2 c = ImGui::GetItemRectMin(); c.x += 30; c.y += btnH * 0.5f;
+        DrawStopIcon(ImGui::GetWindowDrawList(), c, btnH, IM_COL32(100,0,150,80));
         ImGui::EndDisabled();
     }
+    ImGui::PopStyleColor(4);
 
     ImGui::SameLine();
 
     // 录像按钮
     if (isRecV) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
-        if (ImGui::Button("Stop V", ImVec2(recVBtnW, btnH))) player_.stopVideoRecording();
-        ImGui::PopStyleColor(2);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f,0,0,0.3f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.8f,0,0,0.4f));
+        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1,0.3f,0.3f,1));
+        ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(1,0.2f,0.2f,0.8f));
+        if (ImGui::Button("* REC V", ImVec2(recVBtnW, btnH))) player_.stopVideoRecording();
+        ImGui::PopStyleColor(4);
     } else if (canStop) {
-        if (ImGui::Button("Rec V", ImVec2(recVBtnW, btnH))) player_.startVideoRecording();
+        pushCyan();
+        if (ImGui::Button("REC V", ImVec2(recVBtnW, btnH))) player_.startVideoRecording();
+        popCyan();
     } else {
         ImGui::BeginDisabled();
-        ImGui::Button("Rec V", ImVec2(recVBtnW, btnH));
+        ImGui::Button("REC V", ImVec2(recVBtnW, btnH));
         ImGui::EndDisabled();
     }
 
@@ -471,45 +560,42 @@ void Controller::renderPlaybackButtons(float btnH) {
 
     // 录音按钮
     if (isRecA) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.1f, 0.1f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
-        if (ImGui::Button("Stop A", ImVec2(recABtnW, btnH))) player_.stopAudioRecording();
-        ImGui::PopStyleColor(2);
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f,0,0,0.3f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.8f,0,0,0.4f));
+        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1,0.3f,0.3f,1));
+        ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(1,0.2f,0.2f,0.8f));
+        if (ImGui::Button("* REC A", ImVec2(recABtnW, btnH))) player_.stopAudioRecording();
+        ImGui::PopStyleColor(4);
     } else if (canStop) {
-        if (ImGui::Button("Rec A", ImVec2(recABtnW, btnH))) player_.startAudioRecording();
+        pushCyan();
+        if (ImGui::Button("REC A", ImVec2(recABtnW, btnH))) player_.startAudioRecording();
+        popCyan();
     } else {
         ImGui::BeginDisabled();
-        ImGui::Button("Rec A", ImVec2(recABtnW, btnH));
+        ImGui::Button("REC A", ImVec2(recABtnW, btnH));
         ImGui::EndDisabled();
     }
 
-    // 录制信息显示（时长 + 文件大小）
     if (isRecV || isRecA) {
         ImGui::SameLine();
         std::string recInfo;
         if (isRecV) {
             double t = player_.getVideoRecordingTime();
             int64_t sz = player_.getVideoRecordingSize();
-            int min = (int)t / 60, sec = (int)t % 60;
+            int min = (int)t/60, sec = (int)t%60;
             char buf[64];
-            if (sz < 1024 * 1024) {
-                snprintf(buf, sizeof(buf), "V %02d:%02d %.0fKB", min, sec, sz / 1024.0);
-            } else {
-                snprintf(buf, sizeof(buf), "V %02d:%02d %.1fMB", min, sec, sz / (1024.0 * 1024.0));
-            }
+            if (sz < 1024*1024) snprintf(buf, sizeof(buf), "V %02d:%02d %.0fKB", min, sec, sz/1024.0);
+            else                 snprintf(buf, sizeof(buf), "V %02d:%02d %.1fMB", min, sec, sz/(1024.0*1024.0));
             recInfo += buf;
         }
         if (isRecA) {
             if (!recInfo.empty()) recInfo += " | ";
             double t = player_.getAudioRecordingTime();
             int64_t sz = player_.getAudioRecordingSize();
-            int min = (int)t / 60, sec = (int)t % 60;
+            int min = (int)t/60, sec = (int)t%60;
             char buf[64];
-            if (sz < 1024 * 1024) {
-                snprintf(buf, sizeof(buf), "A %02d:%02d %.0fKB", min, sec, sz / 1024.0);
-            } else {
-                snprintf(buf, sizeof(buf), "A %02d:%02d %.1fMB", min, sec, sz / (1024.0 * 1024.0));
-            }
+            if (sz < 1024*1024) snprintf(buf, sizeof(buf), "A %02d:%02d %.0fKB", min, sec, sz/1024.0);
+            else                 snprintf(buf, sizeof(buf), "A %02d:%02d %.1fMB", min, sec, sz/(1024.0*1024.0));
             recInfo += buf;
         }
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
@@ -533,7 +619,7 @@ void Controller::renderVolumeAndSettings(float btnH) {
     const float volSliderW = 100.0f;
     const float volBtnW = btnH + 4.0f;
     const float settingsBtnW = volBtnW;
-    const float speedBtnW = volBtnW;
+    const float speedBtnW = 50.0f;
     // 音量图标留出滑块展开空间（滑块向右展开）
     const float volIconX = ds.x - volBtnW - volSliderW - 12.0f;
     // 设置按钮紧贴音量图标左侧
@@ -565,7 +651,7 @@ void Controller::renderVolumeAndSettings(float btnH) {
         float cy = (settingsBtnMin.y + settingsBtnMax.y) * 0.5f;
         float radius = (settingsBtnMax.y - settingsBtnMin.y) * 0.25f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 col = IM_COL32(220, 220, 220, 255);
+        ImU32 col = IM_COL32(0, 220, 255, 220);
 
         // 绘制齿轮齿（8个矩形）
         const int numTeeth = 8;
@@ -646,7 +732,7 @@ void Controller::renderVolumeAndSettings(float btnH) {
         float cy = (volBtnMin.y + volBtnMax.y) * 0.5f;
         float sz = (volBtnMax.y - volBtnMin.y) * 0.35f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 col = IM_COL32(220, 220, 220, 255);
+        ImU32 col = IM_COL32(0, 220, 255, 220);
 
         // 喇叭主体（梯形：左窄右宽）
         dl->AddRectFilled(ImVec2(cx - sz * 0.8f, cy - sz * 0.3f),
@@ -685,45 +771,67 @@ void Controller::renderVolumeAndSettings(float btnH) {
 }
 
 void Controller::renderMediaInfo() {
+    // 推入赛博朋克配色：深黑底 + 青色边框 + 青色文字
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,    ImVec4(0.02f, 0.03f, 0.08f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_Border,      ImVec4(0.00f, 0.80f, 1.00f, 0.60f));
+    ImGui::PushStyleColor(ImGuiCol_Text,        ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,     ImVec4(0.00f, 0.10f, 0.20f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ImVec4(0.00f, 0.15f, 0.30f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_Separator,   ImVec4(0.00f, 0.60f, 1.00f, 0.40f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(450, 250), ImGuiCond_Always);
     ImGui::Begin("Media Info", &showMediaInfo_,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
-    ImGui::Text("File: %s", filename_.c_str());
+    // 文件名用暗青色显示，避免过长时视觉干扰
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 0.80f, 1.00f));
+    ImGui::TextUnformatted("FILE:");
+    ImGui::SameLine();
+    ImGui::TextUnformatted(filename_.c_str());
+    ImGui::PopStyleColor();
     ImGui::Separator();
 
-    // 视频信息
-    ImGui::Text("Video:");
+    ImGui::TextUnformatted("VIDEO:");
     ImGui::Indent();
-    ImGui::Text("Resolution: %dx%d", videoWidth_, videoHeight_);
-    ImGui::Text("Codec: %s", videoCodec_.empty() ? "Unknown" : videoCodec_.c_str());
-    if (videoFps_ > 0) ImGui::Text("FPS: %.2f", videoFps_);
+    ImGui::Text("Resolution : %dx%d", videoWidth_, videoHeight_);
+    ImGui::Text("Codec      : %s", videoCodec_.empty() ? "Unknown" : videoCodec_.c_str());
+    if (videoFps_ > 0) ImGui::Text("FPS        : %.2f", videoFps_);
     ImGui::Unindent();
-
     ImGui::Separator();
 
-    // 音频信息
-    ImGui::Text("Audio:");
+    ImGui::TextUnformatted("AUDIO:");
     ImGui::Indent();
-    ImGui::Text("Codec: %s", audioCodec_.empty() ? "Unknown" : audioCodec_.c_str());
+    ImGui::Text("Codec      : %s", audioCodec_.empty() ? "Unknown" : audioCodec_.c_str());
     if (audioSampleRate_ > 0) ImGui::Text("Sample Rate: %d Hz", audioSampleRate_);
-    else ImGui::Text("Sample Rate: Unknown");
+    else ImGui::TextUnformatted("Sample Rate: Unknown");
     if (audioChannels_ > 0) {
-        std::string ch = audioChannels_ == 1 ? "Mono" :
-                         audioChannels_ == 2 ? "Stereo" :
-                         std::to_string(audioChannels_) + " Channels";
-        ImGui::Text("Channels: %s", ch.c_str());
+        const char* ch = audioChannels_ == 1 ? "Mono" : audioChannels_ == 2 ? "Stereo" : "Multi";
+        ImGui::Text("Channels   : %s", ch);
     } else {
-        ImGui::Text("Channels: Unknown");
+        ImGui::TextUnformatted("Channels   : Unknown");
     }
     ImGui::Unindent();
     ImGui::Separator();
-    ImGui::Text("Duration: %s", formatTime(duration_).c_str());
+    ImGui::Text("Duration   : %s", formatTime(duration_).c_str());
+
     ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(6);
 }
 
 void Controller::renderStats() {
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,     ImVec4(0.02f, 0.03f, 0.08f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_Border,       ImVec4(0.75f, 0.00f, 1.00f, 0.60f));
+    ImGui::PushStyleColor(ImGuiCol_Text,         ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,      ImVec4(0.10f, 0.00f, 0.20f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ImVec4(0.15f, 0.00f, 0.30f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_Separator,    ImVec4(0.75f, 0.00f, 1.00f, 0.40f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+
     float windowWidth = ImGui::GetIO().DisplaySize.x;
     ImGui::SetNextWindowPos(ImVec2(windowWidth - 250, 10), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(240, 180), ImGuiCond_Always);
@@ -732,38 +840,40 @@ void Controller::renderStats() {
 
     PlayerStats stats = player_.getStats();
 
-    // 性能统计
-    ImGui::Text("Performance:");
+    ImGui::TextUnformatted("PERFORMANCE:");
     ImGui::Indent();
-    ImGui::Text("FPS: %.1f", stats.fps);
-    ImGui::Text("Bitrate: %.2f Mbps", stats.bitrate);
-    ImGui::Text("Dropped Frames: %d", stats.droppedFrames);
+    // FPS 超过目标帧率时用亮青色，掉帧时用红色提示
+    ImU32 fpsCol = stats.fps >= 24.0f ? IM_COL32(0,255,200,255) : IM_COL32(255,80,80,255);
+    ImGui::GetWindowDrawList()->AddText(ImGui::GetCursorScreenPos(), fpsCol,
+        (std::string("FPS        : ") + std::to_string((int)stats.fps)).c_str());
+    ImGui::Dummy(ImVec2(0, ImGui::GetTextLineHeight()));
+    ImGui::Text("Bitrate    : %.2f Mbps", stats.bitrate);
+    ImGui::Text("Dropped    : %d", stats.droppedFrames);
     ImGui::Unindent();
-
     ImGui::Separator();
 
-    // 缓冲队列信息
-    ImGui::Text("Buffer Queues:");
+    ImGui::TextUnformatted("BUFFER:");
     ImGui::Indent();
-    ImGui::Text("Video: %zu frames", stats.videoQueueSize);
-    ImGui::Text("Audio: %zu frames", stats.audioQueueSize);
+    ImGui::Text("Video : %zu frames", stats.videoQueueSize);
+    ImGui::Text("Audio : %zu frames", stats.audioQueueSize);
     ImGui::Unindent();
-
     ImGui::Separator();
 
-    // 状态显示
-    std::string stateText;
+    const char* stateText = "UNKNOWN";
     switch (stats.state) {
-        case PlayerState::IDLE:    stateText = "IDLE"; break;
+        case PlayerState::IDLE:    stateText = "IDLE";    break;
         case PlayerState::OPENING: stateText = "OPENING"; break;
         case PlayerState::PLAYING: stateText = "PLAYING"; break;
-        case PlayerState::PAUSED:  stateText = "PAUSED"; break;
+        case PlayerState::PAUSED:  stateText = "PAUSED";  break;
         case PlayerState::STOPPED: stateText = "STOPPED"; break;
-        case PlayerState::ERRORED: stateText = "ERROR"; break;
-        default:                   stateText = "UNKNOWN"; break;
+        case PlayerState::ERRORED: stateText = "ERROR";   break;
+        default: break;
     }
-    ImGui::Text("State: %s", stateText.c_str());
+    ImGui::Text("STATE : %s", stateText);
+
     ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(6);
 }
 
 /**
@@ -942,7 +1052,7 @@ void Controller::renderSubtitles() {
 }
 
 void Controller::renderSpeedButton(float btnH) {
-    const float speedBtnW = btnH + 4.0f;
+    const float speedBtnW = 50.0f;
     double currentSpeed = player_.getPlaybackSpeed();
     bool isNonDefault = (std::abs(currentSpeed - 1.0) > 0.01);
 

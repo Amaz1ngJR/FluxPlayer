@@ -61,67 +61,56 @@ HomeScreen::~HomeScreen() {
 void HomeScreen::setupStyle() {
     ImGuiStyle& s = ImGui::GetStyle();
 
-    // ── 圆角设置 ──
-    // 所有组件统一使用较大的圆角，营造现代感
-    s.WindowRounding    = 12.0f;   // 窗口圆角
-    s.ChildRounding     = 8.0f;    // 子窗口圆角
-    s.FrameRounding     = 6.0f;    // 输入框、按钮等控件圆角
-    s.PopupRounding     = 6.0f;    // 弹出窗口圆角
-    s.GrabRounding      = 6.0f;    // 滑块抓取手柄圆角
-    s.TabRounding       = 6.0f;    // 标签页圆角
+    s.WindowRounding    = 2.0f;
+    s.ChildRounding     = 2.0f;
+    s.FrameRounding     = 2.0f;
+    s.PopupRounding     = 2.0f;
+    s.GrabRounding      = 2.0f;
+    s.TabRounding       = 2.0f;
 
-    // ── 间距设置 ──
-    s.WindowPadding     = ImVec2(24.0f, 24.0f);  // 窗口内边距
-    s.FramePadding      = ImVec2(12.0f, 8.0f);   // 控件内边距（影响按钮/输入框高度）
-    s.ItemSpacing       = ImVec2(10.0f, 10.0f);   // 控件之间的间距
-    s.ItemInnerSpacing  = ImVec2(8.0f, 6.0f);     // 控件内部元素间距
+    s.WindowPadding     = ImVec2(24.0f, 24.0f);
+    s.FramePadding      = ImVec2(12.0f, 8.0f);
+    s.ItemSpacing       = ImVec2(10.0f, 10.0f);
+    s.ItemInnerSpacing  = ImVec2(8.0f, 6.0f);
 
-    // ── 边框设置 ──
-    // 去掉所有边框，依靠颜色和阴影区分层次
-    s.WindowBorderSize  = 0.0f;
-    s.FrameBorderSize   = 0.0f;
-    s.PopupBorderSize   = 0.0f;
+    s.WindowBorderSize  = 1.0f;
+    s.FrameBorderSize   = 1.0f;
+    s.PopupBorderSize   = 1.0f;
 
-    // ── 颜色配置 ──
-    // 整体色调：深灰蓝底色 + 青蓝色强调
     ImVec4* c = s.Colors;
 
-    // 背景色 — 深灰蓝，略带冷色调
-    c[ImGuiCol_WindowBg]            = ImVec4(0.11f, 0.12f, 0.14f, 1.00f);
-    c[ImGuiCol_ChildBg]             = ImVec4(0.14f, 0.15f, 0.18f, 1.00f);
-    c[ImGuiCol_PopupBg]             = ImVec4(0.14f, 0.15f, 0.18f, 0.96f);
+    c[ImGuiCol_WindowBg]            = ImVec4(0.04f, 0.04f, 0.08f, 0.95f);
+    c[ImGuiCol_ChildBg]             = ImVec4(0.05f, 0.05f, 0.10f, 1.00f);
+    c[ImGuiCol_PopupBg]             = ImVec4(0.05f, 0.05f, 0.10f, 0.96f);
 
-    // 按钮 — 蓝色系，三态颜色递进（常态 → 悬停 → 按下）
-    c[ImGuiCol_Button]              = ImVec4(0.20f, 0.45f, 0.75f, 1.00f);  // 常态：中蓝
-    c[ImGuiCol_ButtonHovered]       = ImVec4(0.28f, 0.56f, 0.90f, 1.00f);  // 悬停：亮蓝
-    c[ImGuiCol_ButtonActive]        = ImVec4(0.15f, 0.38f, 0.65f, 1.00f);  // 按下：深蓝
+    // 赛博朋克蓝紫主色
+    c[ImGuiCol_Button]              = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);  // 透明底，靠边框发光
+    c[ImGuiCol_ButtonHovered]       = ImVec4(0.00f, 0.75f, 1.00f, 0.12f);
+    c[ImGuiCol_ButtonActive]        = ImVec4(0.00f, 0.75f, 1.00f, 0.25f);
 
-    // 输入框背景 — 比窗口背景更深，突出输入区域
-    c[ImGuiCol_FrameBg]             = ImVec4(0.16f, 0.17f, 0.20f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]      = ImVec4(0.20f, 0.22f, 0.26f, 1.00f);
-    c[ImGuiCol_FrameBgActive]       = ImVec4(0.22f, 0.24f, 0.30f, 1.00f);
+    c[ImGuiCol_FrameBg]             = ImVec4(0.04f, 0.04f, 0.10f, 1.00f);
+    c[ImGuiCol_FrameBgHovered]      = ImVec4(0.00f, 0.75f, 1.00f, 0.10f);
+    c[ImGuiCol_FrameBgActive]       = ImVec4(0.00f, 0.75f, 1.00f, 0.18f);
 
-    // 标题栏（本界面不使用标题栏，但保持一致以防万一）
-    c[ImGuiCol_TitleBg]             = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
-    c[ImGuiCol_TitleBgActive]       = ImVec4(0.12f, 0.13f, 0.16f, 1.00f);
+    c[ImGuiCol_Border]              = ImVec4(0.00f, 0.75f, 1.00f, 0.30f);
+    c[ImGuiCol_BorderShadow]        = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
-    // 分隔线 — 半透明灰蓝
-    c[ImGuiCol_Separator]           = ImVec4(0.25f, 0.28f, 0.34f, 0.60f);
+    c[ImGuiCol_TitleBg]             = ImVec4(0.04f, 0.04f, 0.08f, 1.00f);
+    c[ImGuiCol_TitleBgActive]       = ImVec4(0.04f, 0.04f, 0.08f, 1.00f);
 
-    // 文本颜色
-    c[ImGuiCol_Text]                = ImVec4(0.90f, 0.92f, 0.95f, 1.00f);  // 主文本：近白
-    c[ImGuiCol_TextDisabled]        = ImVec4(0.45f, 0.48f, 0.52f, 1.00f);  // 禁用文本：灰色
+    c[ImGuiCol_Separator]           = ImVec4(0.00f, 0.75f, 1.00f, 0.20f);
 
-    // Header 组件（列表选中行等）
-    c[ImGuiCol_Header]              = ImVec4(0.20f, 0.45f, 0.75f, 0.50f);
-    c[ImGuiCol_HeaderHovered]       = ImVec4(0.28f, 0.56f, 0.90f, 0.60f);
-    c[ImGuiCol_HeaderActive]        = ImVec4(0.15f, 0.38f, 0.65f, 0.70f);
+    c[ImGuiCol_Text]                = ImVec4(0.88f, 0.95f, 1.00f, 1.00f);
+    c[ImGuiCol_TextDisabled]        = ImVec4(0.30f, 0.40f, 0.55f, 1.00f);
 
-    // 滚动条
-    c[ImGuiCol_ScrollbarBg]         = ImVec4(0.10f, 0.10f, 0.12f, 0.50f);
-    c[ImGuiCol_ScrollbarGrab]       = ImVec4(0.30f, 0.32f, 0.36f, 0.80f);
-    c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.40f, 0.42f, 0.48f, 0.80f);
-    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.50f, 0.52f, 0.58f, 0.80f);
+    c[ImGuiCol_Header]              = ImVec4(0.00f, 0.75f, 1.00f, 0.20f);
+    c[ImGuiCol_HeaderHovered]       = ImVec4(0.00f, 0.75f, 1.00f, 0.30f);
+    c[ImGuiCol_HeaderActive]        = ImVec4(0.00f, 0.75f, 1.00f, 0.40f);
+
+    c[ImGuiCol_ScrollbarBg]         = ImVec4(0.02f, 0.02f, 0.05f, 0.50f);
+    c[ImGuiCol_ScrollbarGrab]       = ImVec4(0.00f, 0.75f, 1.00f, 0.40f);
+    c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.00f, 0.75f, 1.00f, 0.60f);
+    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.75f, 0.00f, 1.00f, 0.80f);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -163,9 +152,12 @@ bool HomeScreen::init() {
     // - defaultFont_: ImGui 内置默认字体（13px），用于正文、按钮等
     // - titleFont_:   同样基于内置字体但放大到 36px，用于 "FluxPlayer" 大标题
     defaultFont_ = io.Fonts->AddFontDefault();
-    ImFontConfig fontCfg;
-    fontCfg.SizePixels = 36.0f;
-    titleFont_ = io.Fonts->AddFontDefault(&fontCfg);
+    titleFont_ = io.Fonts->AddFontFromFileTTF("fonts/ShareTechMono-Regular.ttf", 36.0f);
+    if (!titleFont_) {
+        ImFontConfig fontCfg;
+        fontCfg.SizePixels = 36.0f;
+        titleFont_ = io.Fonts->AddFontDefault(&fontCfg);
+    }
 
     // 应用自定义样式和配色
     setupStyle();
@@ -196,37 +188,98 @@ bool HomeScreen::init() {
 // ═══════════════════════════════════════════════════════
 
 void HomeScreen::renderBackground() {
-    // BackgroundDrawList 在所有 ImGui 窗口之下绘制，覆盖整个显示区域
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImGuiIO& io = ImGui::GetIO();
     float w = io.DisplaySize.x;
     float h = io.DisplaySize.y;
+    float t = (float)ImGui::GetTime();
 
-    // ── 全屏渐变背景 ──
-    // 从顶部的深蓝灰 (22,25,35) 渐变到底部的近黑 (12,13,18)
-    ImU32 topColor    = IM_COL32(22, 25, 35, 255);
-    ImU32 bottomColor = IM_COL32(12, 13, 18, 255);
-    dl->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, h),
-                                topColor, topColor, bottomColor, bottomColor);
+    // 深黑底
+    dl->AddRectFilled(ImVec2(0,0), ImVec2(w,h), IM_COL32(4, 4, 12, 255));
 
-    // ── 装饰性呼吸光晕（左上方） ──
-    // 利用 sin 函数使半径随时间缓慢变化，产生"呼吸"动画效果
-    float t = (float)ImGui::GetTime();     // ImGui 内部计时器（秒）
-    float cx1 = w * 0.15f;                 // 光晕中心 X（窗口左侧 15%）
-    float cy1 = h * 0.2f;                  // 光晕中心 Y（窗口上方 20%）
-    float r1  = 180.0f + 20.0f * sinf(t * 0.5f);  // 半径在 160~200 之间呼吸
-    // 使用极低透明度 (alpha=18)，叠加两层营造柔和光晕
-    ImU32 glow1 = IM_COL32(30, 80, 160, 18);       // 外层：深蓝，极淡
-    dl->AddCircleFilled(ImVec2(cx1, cy1), r1, glow1, 64);
-    dl->AddCircleFilled(ImVec2(cx1, cy1), r1 * 0.6f, IM_COL32(40, 100, 200, 12), 64);  // 内层：亮蓝
+    // 顶部→底部深蓝渐变
+    dl->AddRectFilledMultiColor(ImVec2(0,0), ImVec2(w, h*0.5f),
+        IM_COL32(0,20,60,80), IM_COL32(0,20,60,80),
+        IM_COL32(0,0,0,0),    IM_COL32(0,0,0,0));
 
-    // ── 装饰性呼吸光晕（右下方） ──
-    float cx2 = w * 0.85f;                 // 窗口右侧 85%
-    float cy2 = h * 0.8f;                  // 窗口下方 80%
-    float r2  = 150.0f + 15.0f * cosf(t * 0.4f);  // 与左上方相位不同，避免同步
-    ImU32 glow2 = IM_COL32(100, 40, 160, 15);      // 紫色调，与蓝色形成对比
-    dl->AddCircleFilled(ImVec2(cx2, cy2), r2, glow2, 64);
-    dl->AddCircleFilled(ImVec2(cx2, cy2), r2 * 0.5f, IM_COL32(120, 60, 180, 10), 64);
+    // 透视地板网格（消失点在画面中上方）
+    {
+        const float vx = w * 0.5f, vy = h * 0.42f;
+        ImU32 gc = IM_COL32(0, 160, 255, 22);
+        ImU32 gc2 = IM_COL32(180, 0, 255, 14);
+        // 横线
+        for (int i = 1; i <= 16; i++) {
+            float frac = (float)i / 16.0f;
+            float y = vy + (h - vy) * frac;
+            float spread = w * 0.75f * frac;
+            ImU32 c = (i % 4 == 0) ? IM_COL32(0, 200, 255, 35) : gc;
+            dl->AddLine(ImVec2(vx - spread, y), ImVec2(vx + spread, y), c, (i%4==0)?1.5f:0.8f);
+        }
+        // 放射竖线
+        for (int i = 0; i <= 18; i++) {
+            float frac = (float)i / 18.0f;
+            float xb = w * frac;
+            ImU32 c = (i % 3 == 0) ? IM_COL32(180, 0, 255, 28) : gc2;
+            dl->AddLine(ImVec2(vx, vy), ImVec2(xb, h), c, (i%3==0)?1.2f:0.7f);
+        }
+    }
+
+    // 扫描线（慢速滚动）
+    {
+        float off = fmodf(t * 30.0f, 3.0f);
+        for (float y = off; y < h; y += 3.0f)
+            dl->AddLine(ImVec2(0,y), ImVec2(w,y), IM_COL32(0,180,255,6));
+    }
+
+    // 左上大蓝晕（多层叠加增强）
+    {
+        float cx = w * 0.10f, cy = h * 0.15f;
+        float r = 280.0f + 25.0f * sinf(t * 0.45f);
+        dl->AddCircleFilled(ImVec2(cx,cy), r,       IM_COL32(0, 100, 255, 18), 64);
+        dl->AddCircleFilled(ImVec2(cx,cy), r*0.55f, IM_COL32(0, 180, 255, 22), 64);
+        dl->AddCircleFilled(ImVec2(cx,cy), r*0.25f, IM_COL32(0, 230, 255, 30), 64);
+    }
+
+    // 右下紫晕（多层）
+    {
+        float cx = w * 0.90f, cy = h * 0.85f;
+        float r = 260.0f + 20.0f * cosf(t * 0.38f);
+        dl->AddCircleFilled(ImVec2(cx,cy), r,       IM_COL32(140, 0, 255, 20), 64);
+        dl->AddCircleFilled(ImVec2(cx,cy), r*0.55f, IM_COL32(180, 0, 255, 26), 64);
+        dl->AddCircleFilled(ImVec2(cx,cy), r*0.25f, IM_COL32(220, 60, 255, 35), 64);
+    }
+
+    // 右上小蓝晕
+    {
+        float r = 120.0f + 10.0f * sinf(t * 0.7f + 1.0f);
+        dl->AddCircleFilled(ImVec2(w*0.85f, h*0.12f), r, IM_COL32(0, 150, 255, 16), 48);
+    }
+
+    // 顶部青色光带
+    dl->AddRectFilledMultiColor(ImVec2(0,0), ImVec2(w, 3.0f),
+        IM_COL32(0,255,255,0),   IM_COL32(0,255,255,200),
+        IM_COL32(0,255,255,200), IM_COL32(0,255,255,0));
+
+    // 底部紫色光带
+    dl->AddRectFilledMultiColor(ImVec2(0,h-2.0f), ImVec2(w,h),
+        IM_COL32(180,0,255,0),   IM_COL32(180,0,255,160),
+        IM_COL32(180,0,255,160), IM_COL32(180,0,255,0));
+
+    // 随机噪点粒子（用时间驱动伪随机，营造数字雨感）
+    {
+        // 固定种子粒子，用 sin/cos 扰动位置
+        for (int i = 0; i < 60; i++) {
+            float px = fmodf(sinf(i * 127.1f) * 43758.5f + t * (0.3f + sinf(i*0.7f)*0.2f), 1.0f);
+            float py = fmodf(cosf(i * 311.7f) * 43758.5f + t * (0.5f + cosf(i*0.5f)*0.3f), 1.0f);
+            if (px < 0) px += 1.0f;
+            if (py < 0) py += 1.0f;
+            float bright = 0.4f + 0.6f * sinf(t * 2.0f + i);
+            ImU32 col = (i % 3 == 0)
+                ? IM_COL32(180, 0, 255, (int)(40*bright))
+                : IM_COL32(0, 200, 255, (int)(35*bright));
+            dl->AddCircleFilled(ImVec2(px*w, py*h), 1.2f, col, 4);
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -341,34 +394,96 @@ static void DrawGradientSeparator(float width, float yOffset = 0.0f) {
 // renderUI — 渲染主界面卡片式 UI
 // ═══════════════════════════════════════════════════════
 
+// 在矩形四角绘制 L 形赛博朋克装饰角，营造科技感边框效果
+// len: 每段 L 形线的长度；thick: 线宽
+static void DrawCyberCorners(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 col, float len = 14.0f, float thick = 1.5f) {
+    // 左上
+    dl->AddLine(ImVec2(min.x, min.y), ImVec2(min.x + len, min.y), col, thick);
+    dl->AddLine(ImVec2(min.x, min.y), ImVec2(min.x, min.y + len), col, thick);
+    // 右上
+    dl->AddLine(ImVec2(max.x, min.y), ImVec2(max.x - len, min.y), col, thick);
+    dl->AddLine(ImVec2(max.x, min.y), ImVec2(max.x, min.y + len), col, thick);
+    // 左下
+    dl->AddLine(ImVec2(min.x, max.y), ImVec2(min.x + len, max.y), col, thick);
+    dl->AddLine(ImVec2(min.x, max.y), ImVec2(min.x, max.y - len), col, thick);
+    // 右下
+    dl->AddLine(ImVec2(max.x, max.y), ImVec2(max.x - len, max.y), col, thick);
+    dl->AddLine(ImVec2(max.x, max.y), ImVec2(max.x, max.y - len), col, thick);
+}
+
+// 绘制多层向外扩散的发光边框，模拟霓虹灯光晕效果
+// baseCol: 边框主色（含 alpha）；layers 层透明度从外到内递增
+static void DrawGlowRect(ImDrawList* dl, ImVec2 min, ImVec2 max, ImU32 baseCol, float rounding = 2.0f) {
+    // 外发光 6 层，从外到内透明度递增
+    const int layers = 6;
+    for (int i = layers; i >= 1; i--) {
+        float e = i * 2.5f;
+        uint8_t a = (uint8_t)(8 + 22 * (layers - i + 1) / layers);
+        ImU32 c = (baseCol & 0x00FFFFFF) | ((uint32_t)a << 24);
+        dl->AddRect(ImVec2(min.x-e, min.y-e), ImVec2(max.x+e, max.y+e), c, rounding+e, 0, 1.5f);
+    }
+    dl->AddRect(min, max, baseCol, rounding, 0, 1.5f);
+}
+
 void HomeScreen::renderUI() {
     ImGuiIO& io = ImGui::GetIO();
 
-    // ── 卡片尺寸和位置（居中） ──
     float cardW = 520.0f;
     float cardH = 400.0f;
     ImVec2 cardPos((io.DisplaySize.x - cardW) * 0.5f,
                    (io.DisplaySize.y - cardH) * 0.5f);
+    ImVec2 cardMax(cardPos.x + cardW, cardPos.y + cardH);
 
-    // ── 卡片投影阴影 ──
-    // 在卡片位置右下方偏移处绘制一个同尺寸的深色矩形，模拟阴影效果
+    // 卡片背景：多层发光边框 + 角落装饰 + 顶部标题栏
     {
         ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        float shadowOff = 6.0f;   // 阴影偏移量（右下方向）
-        ImU32 shadowCol = IM_COL32(0, 0, 0, 80);  // 半透明黑色
-        dl->AddRectFilled(
-            ImVec2(cardPos.x + shadowOff, cardPos.y + shadowOff),
-            ImVec2(cardPos.x + cardW + shadowOff, cardPos.y + cardH + shadowOff),
-            shadowCol, 14.0f);    // 圆角与卡片一致
+        float t = (float)ImGui::GetTime();
+
+        // 卡片内部半透明填充（比 ImGui 窗口背景更深的蓝黑）
+        dl->AddRectFilled(cardPos, cardMax, IM_COL32(4, 6, 18, 210), 2.0f);
+
+        // 顶部标题装饰条（青色渐变）
+        ImVec2 headerMax(cardMax.x, cardPos.y + 4.0f);
+        dl->AddRectFilledMultiColor(cardPos, headerMax,
+            IM_COL32(0,255,255,0),   IM_COL32(0,255,255,220),
+            IM_COL32(0,255,255,220), IM_COL32(0,255,255,0));
+
+        // 底部紫色装饰条
+        dl->AddRectFilledMultiColor(
+            ImVec2(cardPos.x, cardMax.y - 3.0f), cardMax,
+            IM_COL32(180,0,255,0),   IM_COL32(180,0,255,180),
+            IM_COL32(180,0,255,180), IM_COL32(180,0,255,0));
+
+        // 左侧竖向扫描光（缓慢从上到下）
+        float scanY = cardPos.y + fmodf(t * 60.0f, cardH);
+        dl->AddRectFilledMultiColor(
+            ImVec2(cardPos.x, scanY - 30.0f), ImVec2(cardPos.x + 2.0f, scanY + 30.0f),
+            IM_COL32(0,255,255,0),  IM_COL32(0,255,255,0),
+            IM_COL32(0,255,255,180),IM_COL32(0,255,255,180));
+        dl->AddRectFilledMultiColor(
+            ImVec2(cardPos.x, scanY), ImVec2(cardPos.x + 2.0f, scanY + 60.0f),
+            IM_COL32(0,255,255,180),IM_COL32(0,255,255,180),
+            IM_COL32(0,255,255,0),  IM_COL32(0,255,255,0));
+
+        // 主发光边框（青色）
+        DrawGlowRect(dl, cardPos, cardMax, IM_COL32(0, 220, 255, 200), 2.0f);
+
+        // 角落装饰（更长更亮）
+        DrawCyberCorners(dl, cardPos, cardMax, IM_COL32(0, 255, 255, 255), 24.0f, 2.5f);
+
+        // 内侧第二层细边框（紫色，营造双层感）
+        ImVec2 inner1(cardPos.x + 6.0f, cardPos.y + 6.0f);
+        ImVec2 inner2(cardMax.x - 6.0f, cardMax.y - 6.0f);
+        dl->AddRect(inner1, inner2, IM_COL32(160, 0, 255, 40), 1.0f);
+        DrawCyberCorners(dl, inner1, inner2, IM_COL32(180, 0, 255, 120), 12.0f, 1.0f);
     }
 
-    // ── 创建 ImGui 窗口作为卡片容器 ──
     ImGui::SetNextWindowPos(cardPos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(cardW, cardH), ImGuiCond_Always);
 
-    // 临时覆盖样式：卡片背景半透明 + 大圆角 + 大内边距
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.13f, 0.16f, 0.92f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.02f, 0.03f, 0.08f, 0.88f));
+    ImGui::PushStyleColor(ImGuiCol_Border,   ImVec4(0.00f, 0.78f, 1.00f, 0.00f));  // 隐藏 ImGui 自带边框，用手绘替代
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(32.0f, 28.0f));
 
     // 窗口标志：去掉标题栏、调整大小、移动、折叠、滚动条，固定在背景层
@@ -383,58 +498,79 @@ void HomeScreen::renderUI() {
     // 可用内容区域宽度（卡片宽度减去左右内边距）
     float contentW = ImGui::GetContentRegionAvail().x;
 
-    // ── 标题文字 "FluxPlayer"（大号字体，青蓝色，居中） ──
+    // 标题：多层发光 + 装饰线
     {
-        ImGui::PushFont(titleFont_);  // 切换到 36px 大号字体
-        const char* title = "FluxPlayer";
+        ImGui::PushFont(titleFont_);
+        const char* title = "FLUX PLAYER";
         float tw = ImGui::CalcTextSize(title).x;
-        // 手动计算居中 X 坐标（需加上窗口内边距偏移）
-        ImGui::SetCursorPosX((contentW - tw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.72f, 1.0f, 1.0f));  // 青蓝色
+        float tx = (contentW - tw) * 0.5f + ImGui::GetStyle().WindowPadding.x;
+        ImGui::SetCursorPosX(tx);
+        ImVec2 tpos = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // 3层发光阴影（偏移叠加）
+        dl->AddText(titleFont_, 36.0f, ImVec2(tpos.x+2, tpos.y+2), IM_COL32(0,255,255,15), title);
+        dl->AddText(titleFont_, 36.0f, ImVec2(tpos.x+1, tpos.y+1), IM_COL32(0,255,255,40), title);
+        dl->AddText(titleFont_, 36.0f, ImVec2(tpos.x-1, tpos.y),   IM_COL32(0,255,255,25), title);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f, 1.00f, 1.00f, 1.0f));
         ImGui::TextUnformatted(title);
         ImGui::PopStyleColor();
-        ImGui::PopFont();  // 恢复默认字体
+        ImGui::PopFont();
+
+        // 标题下方左右装饰线
+        ImVec2 afterPos = ImGui::GetCursorScreenPos();
+        float lineY = afterPos.y - 4.0f;
+        float midX = tpos.x + tw * 0.5f;
+        float lineLen = contentW * 0.3f;
+        dl->AddLine(ImVec2(midX - tw*0.5f - lineLen, lineY), ImVec2(midX - tw*0.5f - 8.0f, lineY), IM_COL32(0,200,255,80), 1.0f);
+        dl->AddLine(ImVec2(midX + tw*0.5f + 8.0f, lineY), ImVec2(midX + tw*0.5f + lineLen, lineY), IM_COL32(0,200,255,80), 1.0f);
     }
 
-    // ── 副标题（灰色小字，居中） ──
+    // 副标题
     {
-        const char* sub = "Open a file or paste a URL to start";
+        const char* sub = "// MEDIA PLAYER SYSTEM //";
         float sw = ImGui::CalcTextSize(sub).x;
         ImGui::SetCursorPosX((contentW - sw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.50f, 0.53f, 0.58f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.30f, 0.55f, 0.70f, 1.0f));
         ImGui::TextUnformatted(sub);
         ImGui::PopStyleColor();
     }
 
-    ImGui::Dummy(ImVec2(0, 18.0f));  // 垂直间距
+    ImGui::Dummy(ImVec2(0, 18.0f));
 
-    // ── "Open Local File" 按钮（蓝色，大圆角，居中） ──
+    // 主按钮：描边发光风格
     {
         float btnW = 320.0f;
         float btnH = 48.0f;
         ImGui::SetCursorPosX((contentW - btnW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
 
-        // 覆盖按钮颜色为更鲜明的蓝色（比全局样式更亮）
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.20f, 0.50f, 0.85f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.30f, 0.60f, 0.95f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.15f, 0.40f, 0.70f, 1.0f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);  // 按钮专用大圆角
+        ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.00f, 1.00f, 1.00f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.00f, 1.00f, 1.00f, 0.18f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.00f, 1.00f, 1.00f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.00f, 1.00f, 1.00f, 0.80f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
 
-        if (ImGui::Button("Open Local File", ImVec2(btnW, btnH))) {
-            // 点击后弹出系统原生文件选择对话框
-            // tinyfd_openFileDialog 参数：标题、默认路径、过滤器数量、过滤器、描述、多选
+        bool clicked = ImGui::Button(">  OPEN LOCAL FILE", ImVec2(btnW, btnH));
+
+        // 悬停时加强发光边框
+        if (ImGui::IsItemHovered()) {
+            ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
+            DrawGlowRect(ImGui::GetWindowDrawList(), bmin, bmax, IM_COL32(0, 255, 255, 120), 2.0f);
+        }
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(5);
+
+        if (clicked) {
             const char* filterPatterns[] = {
                 "*.mp4", "*.mkv", "*.avi", "*.mov", "*.flv",
                 "*.wmv", "*.webm", "*.ts", "*.m4v", "*.3gp",
                 "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg"
             };
-            const char* res = tinyfd_openFileDialog(
-                "Select Media File",    // 对话框标题
-                "",                     // 默认路径（空=当前目录）
-                15,                     // 过滤器数量
-                filterPatterns,         // 文件扩展名过滤器数组
-                "Media Files",          // 过滤器显示名称
-                0);                     // 0=单选，1=多选
+            const char* res = tinyfd_openFileDialog("Select Media File", "", 15, filterPatterns, "Media Files", 0);
             if (res) {
                 selectedFile_ = res;
                 fileSelected_ = true;
@@ -442,87 +578,79 @@ void HomeScreen::renderUI() {
                 LOG_INFO("File selected: " + selectedFile_);
             }
         }
-
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor(3);
     }
 
-    // ── 拖放提示文字（淡灰色，居中） ──
+    // 拖放提示
     {
         const char* drop = "or drag & drop a file here";
         float dw = ImGui::CalcTextSize(drop).x;
         ImGui::SetCursorPosX((contentW - dw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.43f, 0.48f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.25f, 0.40f, 0.50f, 1.0f));
         ImGui::TextUnformatted(drop);
         ImGui::PopStyleColor();
     }
 
     ImGui::Dummy(ImVec2(0, 12.0f));
-
-    // ── 渐变分隔线（替代 ImGui::Separator()，更美观） ──
     DrawGradientSeparator(contentW * 0.6f, 4.0f);
-
     ImGui::Dummy(ImVec2(0, 12.0f));
 
-    // ── URL 输入区域 ──
+    // URL 输入区域
     {
-        // 标签文字（居中）
-        const char* label = "Network URL";
+        const char* label = "[ NETWORK URL ]";
         float lw = ImGui::CalcTextSize(label).x;
         ImGui::SetCursorPosX((contentW - lw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.68f, 0.72f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f, 0.75f, 1.00f, 0.70f));
         ImGui::TextUnformatted(label);
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 4.0f));
 
-        // 计算输入框和 Play 按钮的宽度分配
-        float playBtnW = 70.0f;    // Play 按钮宽度
-        float spacing = 8.0f;      // 输入框与按钮之间的间距
-        float inputW = contentW - playBtnW - spacing;  // 输入框占满剩余宽度
+        float playBtnW = 70.0f;
+        float spacing = 8.0f;
+        float inputW = contentW - playBtnW - spacing;
 
-        // 输入框样式覆盖：深色背景 + 大圆角 + 大内边距
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 10.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0.08f, 0.09f, 0.11f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,  ImVec4(0.12f, 0.13f, 0.16f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive,   ImVec4(0.14f, 0.16f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0.02f, 0.04f, 0.08f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,  ImVec4(0.00f, 0.75f, 1.00f, 0.08f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive,   ImVec4(0.00f, 0.75f, 1.00f, 0.14f));
+        ImGui::PushStyleColor(ImGuiCol_Border,          ImVec4(0.00f, 0.75f, 1.00f, 0.50f));
 
         ImGui::SetNextItemWidth(inputW);
-        // EnterReturnsTrue 标志：按回车键时返回 true，实现回车即播放
-        bool enterPressed = ImGui::InputText(
-            "##url_input", urlBuffer_, sizeof(urlBuffer_),
+        bool enterPressed = ImGui::InputText("##url_input", urlBuffer_, sizeof(urlBuffer_),
             ImGuiInputTextFlags_EnterReturnsTrue);
 
-        // ── Placeholder 效果 ──
-        // ImGui 原生不支持 placeholder，手动实现：
-        // 当输入框为空且未获得焦点时，在输入框位置叠加绘制灰色提示文字
         if (urlBuffer_[0] == '\0' && !ImGui::IsItemActive()) {
-            ImVec2 inputPos = ImGui::GetItemRectMin();  // 输入框左上角屏幕坐标
+            ImVec2 inputPos = ImGui::GetItemRectMin();
             ImGui::GetWindowDrawList()->AddText(
-                ImVec2(inputPos.x + 14.0f, inputPos.y + 10.0f),  // 与 FramePadding 对齐
-                IM_COL32(100, 105, 115, 160),                      // 半透明灰色
-                "rtsp://... or http://...");
+                ImVec2(inputPos.x + 14.0f, inputPos.y + 10.0f),
+                IM_COL32(60, 120, 160, 160), "rtsp://... or http://...");
         }
 
-        ImGui::PopStyleColor(3);
+        ImGui::PopStyleColor(4);
         ImGui::PopStyleVar(2);
 
-        // 将 Play 按钮放在输入框右侧同一行
         ImGui::SameLine(0, spacing);
 
-        // Play 按钮 — 绿色系，与蓝色主按钮形成视觉区分
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.18f, 0.62f, 0.42f, 1.0f));  // 常态：翠绿
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.24f, 0.72f, 0.50f, 1.0f));  // 悬停：亮绿
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.14f, 0.52f, 0.35f, 1.0f));  // 按下：深绿
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+        // Play 按钮：紫色描边
+        ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.00f, 1.00f, 0.12f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.75f, 0.00f, 1.00f, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.75f, 0.00f, 1.00f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border,        ImVec4(0.75f, 0.00f, 1.00f, 0.80f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
 
-        bool playClicked = ImGui::Button("Play", ImVec2(playBtnW, 0));
+        bool playClicked = ImGui::Button(">GO", ImVec2(playBtnW, 0));
 
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) {
+            ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
+            DrawGlowRect(ImGui::GetWindowDrawList(), bmin, bmax, IM_COL32(180, 0, 255, 120), 2.0f);
+        }
 
-        // 回车或点击 Play 按钮时，将 URL 作为选择结果
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(5);
+
         if ((enterPressed || playClicked) && urlBuffer_[0] != '\0') {
             selectedFile_ = urlBuffer_;
             fileSelected_ = true;
@@ -553,16 +681,15 @@ void HomeScreen::renderUI() {
         float bottomY = cardH - ImGui::GetStyle().WindowPadding.y - ImGui::GetTextLineHeight() - 4.0f;
         ImGui::SetCursorPosY(bottomY);
         ImGui::SetCursorPosX((contentW - hw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.38f, 0.42f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.15f, 0.35f, 0.50f, 1.0f));
         ImGui::TextUnformatted(hint);
         ImGui::PopStyleColor();
     }
 
     ImGui::End();
 
-    // 恢复之前 Push 的样式（WindowPadding、WindowRounding、WindowBg）
-    ImGui::PopStyleVar(2);     // WindowRounding + WindowPadding
-    ImGui::PopStyleColor(1);   // WindowBg
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);  // WindowBg + Border
 }
 
 // ═══════════════════════════════════════════════════════
