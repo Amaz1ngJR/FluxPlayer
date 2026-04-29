@@ -26,7 +26,7 @@ APP_NAME="FluxPlayer"
 # 从 CMakeLists.txt 读取版本号，发版只需改那一处
 VERSION=$(grep -m1 'project(FluxPlayer VERSION' "$ROOT/CMakeLists.txt" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
-DMG_OUT="$BUILD_DIR/$APP_NAME-$VERSION.dmg"
+DMG_OUT="$ROOT/dist/$APP_NAME-$VERSION.dmg"
 
 # ── 1. CMake 构建（Release 模式）──────────────────────────────────────────────
 cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
@@ -88,6 +88,7 @@ EOF
 
 # ── 5. 打包为 .dmg 磁盘镜像 ──────────────────────────────────────────────────
 # UDZO = zlib 压缩格式，体积小，兼容性好
+mkdir -p "$ROOT/dist"
 rm -f "$DMG_OUT"
 hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" \
     -ov -format UDZO "$DMG_OUT"

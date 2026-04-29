@@ -39,3 +39,7 @@ build/
 
 # Binary output
 *.out
+
+# Packaging output
+dist/
+*.dmg
