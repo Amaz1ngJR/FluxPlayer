@@ -4,6 +4,9 @@
 #include "FluxPlayer/subtitle/SubtitleManager.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/Downloader.h"
+
+#include <tinyfiledialogs.h>
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -168,6 +171,9 @@ void Controller::render() {
 
     // 字幕独立于 UI 面板的可见性：即使 UI 自动隐藏，字幕仍需持续显示
     renderSubtitles();
+
+    // 同步网页 URL（用于画质切换和下载按钮显示）
+    currentPageUrl_ = player_.getLastPageUrl();
 
     if (!visible_) {
         // 即使不可见也需要调用 ImGui::Render，否则上一帧的 DrawData 会残留警告
@@ -630,8 +636,21 @@ void Controller::renderVolumeAndSettings(float btnH) {
     const float settingsIconX = volIconX - settingsBtnW - 4.0f;
     constexpr double VOL_CLOSE_DELAY = 0.4;
 
-    // 速度按钮紧贴设置图标左侧
-    ImGui::SameLine(settingsIconX - speedBtnW - 4.0f);
+    const float qualityBtnW = currentQualityLabel_.empty() ? 0.0f : 60.0f;
+    const float downloadBtnW = currentPageUrl_.empty() ? 0.0f : (btnH + 4.0f);
+
+    // 速度按钮紧贴设置图标左侧，画质/下载按钮在速度按钮左侧
+    float speedBtnX = settingsIconX - speedBtnW - 4.0f;
+    if (downloadBtnW > 0.0f) {
+        ImGui::SameLine(speedBtnX - downloadBtnW - 4.0f);
+        renderDownloadButton(btnH);
+    }
+    if (qualityBtnW > 0.0f) {
+        float qx = speedBtnX - qualityBtnW - 4.0f - (downloadBtnW > 0.0f ? downloadBtnW + 4.0f : 0.0f);
+        ImGui::SameLine(qx);
+        renderQualityButton(btnH);
+    }
+    ImGui::SameLine(speedBtnX);
     renderSpeedButton(btnH);
 
     // 设置图标按钮（在音量图标左侧）
@@ -1107,6 +1126,137 @@ void Controller::renderSpeedButton(float btnH) {
 
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar();
+}
+
+void Controller::renderQualityButton(float btnH) {
+    if (currentQualityLabel_.empty()) return;
+    const float btnW = 60.0f;
+
+    // 赛博蓝边框按钮，与速度按钮风格一致
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.00f,0.75f,1.00f,0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.00f,0.75f,1.00f,0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0.00f,0.75f,1.00f,1.00f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.00f,0.75f,1.00f,0.60f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+
+    bool clicked = ImGui::Button(currentQualityLabel_.c_str(), ImVec2(btnW, btnH));
+    ImVec2 btnMin = ImGui::GetItemRectMin();
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(5);
+
+    if (clicked) showQualityMenu_ = !showQualityMenu_;
+
+    if (showQualityMenu_ && !qualities_.empty()) {
+        float popupH = qualities_.size() * 24.0f + 8.0f;
+        ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popupH - 4.0f), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.04f,0.04f,0.10f,0.96f));
+        ImGui::PushStyleColor(ImGuiCol_Border,  ImVec4(0.00f,0.75f,1.00f,0.30f));
+
+        if (ImGui::BeginPopupContextVoid("##QualityPopup")) {
+            ImGui::EndPopup();
+        }
+        // 用 Window 方式弹出（BeginPopup 需要 OpenPopup 配合，改用直接窗口）
+        ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popupH - 4.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(btnW + 20.0f, popupH), ImGuiCond_Always);
+        ImGui::Begin("##QualityMenu", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
+
+        for (const auto& q : qualities_) {
+            bool isCurrent = (q.label == currentQualityLabel_);
+            if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f,0.75f,1.00f,1.00f));
+            if (ImGui::Selectable(q.label.c_str(), isCurrent, 0, ImVec2(0, 20))) {
+                // 切换画质：记录当前时间，重新提取并 seek
+                if (!isCurrent && !currentPageUrl_.empty()) {
+                    double currentTime = player_.getCurrentTime();
+                    // TODO: 调用 player_.switchQuality(currentPageUrl_, q.formatId, currentTime)
+                    currentQualityLabel_ = q.label;
+                    showQualityMenu_ = false;
+                }
+            }
+            if (isCurrent) ImGui::PopStyleColor();
+        }
+
+        if (!ImGui::IsWindowFocused()) showQualityMenu_ = false;
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
+    }
+}
+
+void Controller::renderDownloadButton(float btnH) {
+    if (currentPageUrl_.empty()) return;
+    const float btnW = btnH + 4.0f;
+
+    // 下载中：紫色进度指示；空闲：赛博蓝边框
+    if (isDownloading_) {
+        ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.3f,0.0f,0.5f,0.8f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f,0.0f,0.6f,0.9f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.4f,0.0f,0.6f,0.9f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.75f,0.00f,1.00f,0.12f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.75f,0.00f,1.00f,0.25f));
+    }
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.75f,0.00f,1.00f,0.60f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+
+    bool clicked = ImGui::Button(isDownloading_ ? "..." : "DL", ImVec2(btnW, btnH));
+    ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
+
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
+
+    // 下载进度条（蓝→紫渐变，绘制在按钮底部）
+    if (isDownloading_ && downloadProgress_ > 0.0f) {
+        float pw = (bmax.x - bmin.x) * downloadProgress_;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilledMultiColor(
+            ImVec2(bmin.x, bmax.y - 2.0f), ImVec2(bmin.x + pw, bmax.y),
+            IM_COL32(0,190,255,200), IM_COL32(190,0,255,200),
+            IM_COL32(190,0,255,200), IM_COL32(0,190,255,200));
+    }
+
+    if (clicked && !isDownloading_) {
+        // 弹出系统文件夹选择对话框
+        const char* dir = tinyfd_selectFolderDialog("选择下载目录", nullptr);
+        if (dir) {
+            std::string outputDir = dir;
+            isDownloading_ = true;
+            downloadProgress_ = 0.0f;
+            downloadSpeed_.clear();
+            downloadEta_.clear();
+            downloadStatus_ = "正在下载...";
+
+            downloader_ = std::make_unique<Downloader>();
+            downloader_->start(
+                currentPageUrl_,
+                outputDir,
+                [this](float p, const std::string& speed, const std::string& eta) {
+                    downloadProgress_ = p;
+                    downloadSpeed_    = speed;
+                    downloadEta_      = eta;
+                    downloadStatus_   = std::to_string(int(p * 100)) + "% " + speed
+                                      + (eta.empty() ? "" : " ETA " + eta);
+                },
+                [this](bool ok, const std::string& path, const std::string& error) {
+                    isDownloading_  = false;
+                    downloadStatus_ = ok ? ("完成: " + path) : ("失败: " + error);
+                    LOG_INFO("Download " + std::string(ok ? "OK" : "FAIL") + " " + path);
+                }
+            );
+        }
+    }
+
+    // Tooltip
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", isDownloading_ ? downloadStatus_.c_str() : "下载视频");
+    }
 }
 
 } // namespace FluxPlayer

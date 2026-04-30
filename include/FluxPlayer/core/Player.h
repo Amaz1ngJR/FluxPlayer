@@ -27,17 +27,19 @@ class Recorder;
 class SubtitleDecoder;
 class SubtitleManager;
 class FrameInterpolator;
+class DashMerger;
 
 /**
  * 播放器状态枚举
  */
 enum class PlayerState {
-    IDLE,       // 空闲状态（未加载任何媒体）
-    OPENING,    // 正在打开媒体文件
-    PLAYING,    // 播放中
-    PAUSED,     // 暂停
-    STOPPED,    // 停止（已加载但未播放）
-    ERRORED     // 错误状态
+    IDLE,        // 空闲状态（未加载任何媒体）
+    EXTRACTING,  // 正在通过 yt-dlp 提取网页视频流信息
+    OPENING,     // 正在打开媒体文件
+    PLAYING,     // 播放中
+    PAUSED,      // 暂停
+    STOPPED,     // 停止（已加载但未播放）
+    ERRORED      // 错误状态
 };
 
 /**
@@ -78,6 +80,14 @@ public:
      * @return 成功返回 true，失败返回 false
      */
     bool open(const std::string& filePath);
+
+    /**
+     * @brief 切换画质（仅网页视频有效）
+     * @param formatId  yt-dlp format_id
+     * @param seekTime  切换后 seek 到的时间（秒），保持播放位置
+     * @return 成功返回 true
+     */
+    bool switchQuality(const std::string& formatId, double seekTime);
 
     /**
      * 开始播放
@@ -129,6 +139,9 @@ public:
      * 获取当前播放状态
      */
     PlayerState getState() const { return state_; }
+
+    /// 获取最近一次打开的网页 URL（用于画质切换和下载）
+    const std::string& getLastPageUrl() const { return lastPageUrl_; }
 
     /**
      * 是否正在播放
@@ -474,6 +487,10 @@ private:
     std::unique_ptr<AudioDecoder> audioDecoder_;
     std::unique_ptr<AVSync> avSync_;
     std::unique_ptr<AudioOutput> audioOutput_;
+    std::unique_ptr<DashMerger> dashMerger_;  ///< DASH 流合并器（非 DASH 时为空）
+
+    // 网页视频提取相关
+    std::string lastPageUrl_;   ///< 最近一次打开的网页 URL（用于下载功能）
 
     // UI 控制器（不拥有，由外部管理）
     Controller* controller_;

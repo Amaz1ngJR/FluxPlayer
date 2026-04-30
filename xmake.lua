@@ -208,6 +208,19 @@ target("FluxPlayer")
         add_syslinks("GL", "X11", "pthread", "dl", "asound")  -- asound = ALSA 音频
     end
 
+    -- yt-dlp 打包路径：编译时固定，避免运行时路径推算失败
+    if is_plat("macosx") then
+        local ytdlp_path = path.join(os.projectdir(), "third_party/yt-dlp/yt-dlp_macos")
+        if os.isfile(ytdlp_path) then
+            add_defines('YTDLP_BUNDLED_PATH="' .. ytdlp_path .. '"')
+        end
+    elseif is_plat("windows") then
+        local ytdlp_path = path.join(os.projectdir(), "third_party/yt-dlp/yt-dlp.exe")
+        if os.isfile(ytdlp_path) then
+            add_defines('YTDLP_BUNDLED_PATH="' .. ytdlp_path .. '"')
+        end
+    end
+
     -- Debug 模式：保留调试符号，关闭优化，定义 DEBUG 宏
     -- Release 模式：最高优化，去除符号表（减小文件体积）
     if is_mode("debug") then

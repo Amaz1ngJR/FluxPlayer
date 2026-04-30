@@ -177,12 +177,28 @@ set(FLUXPLAYER_SOURCES
     src/utils/Logger.cpp
     src/utils/Screenshot.cpp
     src/utils/Timer.cpp
+    src/utils/StreamExtractor.cpp
+    src/utils/DashMerger.cpp
+    src/utils/Downloader.cpp
     src/recorder/Recorder.cpp
     src/video/FrameInterpolator.cpp
 )
 
 # add_executable：将源文件编译并链接为可执行程序
 add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
+
+# yt-dlp 打包路径：编译时固定，避免运行时路径推算失败
+if(APPLE)
+    set(YTDLP_BUNDLED_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/yt-dlp/yt-dlp_macos")
+elseif(WIN32)
+    set(YTDLP_BUNDLED_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/yt-dlp/yt-dlp.exe")
+else()
+    set(YTDLP_BUNDLED_PATH "")
+endif()
+if(EXISTS "${YTDLP_BUNDLED_PATH}")
+    target_compile_definitions(FluxPlayer PRIVATE
+        YTDLP_BUNDLED_PATH="${YTDLP_BUNDLED_PATH}")
+endif()
 
 # 预编译头（PCH）：把常用的 STL 头和 Logger.h 预先编译好，
 # 后续每个 .cpp 直接复用，避免重复解析，显著加快编译速度

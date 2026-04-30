@@ -389,4 +389,43 @@ bool Demuxer::seek(int64_t timestamp) {
     return true;
 }
 
+bool Demuxer::open(const std::string& filename,
+                   const std::string& httpHeaders,
+                   double knownDuration) {
+    AVDictionary* options = configureNetworkOptions(filename);
+
+    // 注入 HTTP headers（防盗链、Cookie 等）
+    if (!httpHeaders.empty())
+        av_dict_set(&options, "headers", httpHeaders.c_str(), 0);
+
+    int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
+    if (options) av_dict_free(&options);
+    if (ret < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to open: " + filename + " - " + std::string(errBuf));
+        return false;
+    }
+
+    ret = avformat_find_stream_info(m_formatCtx, nullptr);
+    if (ret < 0) {
+        LOG_ERROR("Failed to find stream info");
+        close();
+        return false;
+    }
+
+    // pipe 流无法从容器头读取 duration，手动注入避免被误判为直播流
+    if (knownDuration > 0.0)
+        m_formatCtx->duration = static_cast<int64_t>(knownDuration * AV_TIME_BASE);
+
+    if (!findStreams()) {
+        LOG_ERROR("No audio/video stream found: " + filename);
+        close();
+        return false;
+    }
+
+    logMediaInfo(filename);
+    return true;
+}
+
 } // namespace FluxPlayer

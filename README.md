@@ -8,7 +8,7 @@
 </div>
 
 
-基于 FFmpeg + OpenGL 的跨平台视频播放器，使用 C++17 开发。支持本地文件播放和网络流（RTSP/RTMP/HTTP/HLS）播放，具备完整的音视频同步、GPU 渲染和 ImGui 控制界面。
+基于 FFmpeg + OpenGL 的跨平台视频播放器，使用 C++17 开发。支持本地文件播放、网络流（RTSP/RTMP/HTTP/HLS）播放，以及 B站、YouTube 等网页视频直接播放，具备完整的音视频同步、GPU 渲染和 ImGui 控制界面。
 
 ## 功能特性
 
@@ -33,6 +33,10 @@
 - 🔁 循环播放
 - ⏩ 播放速度控制（0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x），音频最近邻重采样变速
 - 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
+- 🌍 网页视频播放（B站、YouTube 等 1000+ 平台），自动提取真实流地址，支持 DASH 分离流合并
+- 🍪 浏览器 Cookie 自动读取，支持会员内容播放（自动检测系统默认浏览器）
+- 📥 视频下载功能，支持进度和速度显示
+- 🎯 画质切换（360P / 480P / 720P / 1080P），切换时保持播放位置
 
 ## 技术栈
 | 组件 | 技术 |
@@ -66,7 +70,7 @@ FluxPlayer/
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
 │   ├── ui/               # 界面 (Window, Controller, HomeScreen)
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, DashMerger, Downloader)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档
@@ -260,6 +264,29 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 - 无参数启动：进入 HomeScreen 主界面，可点击按钮选择文件、拖放文件或输入网络 URL
 - 带参数启动：`FluxPlayer <文件路径或URL>` 直接播放
+
+### 网页视频播放
+
+在 URL 输入框中直接粘贴 B站、YouTube 等网页地址即可播放：
+
+```
+https://www.bilibili.com/video/BV1xx...
+https://www.youtube.com/watch?v=...
+```
+
+**依赖：** 需要 `yt-dlp`（已内置在 `third_party/yt-dlp/` 中，无需手动安装）
+
+**Cookie 支持：** 播放会员内容时，程序自动读取系统默认浏览器的 Cookie。可在配置文件 `[Stream]` 节中调整：
+
+```ini
+[Stream]
+# auto=自动检测默认浏览器 / chrome / safari / firefox / edge / off
+cookiesBrowser=auto
+```
+
+播放网页视频时，工具栏会出现：
+- **画质按钮**：切换 360P / 480P / 720P / 1080P，切换后自动 seek 到原位置
+- **DL 按钮**：下载当前视频，弹出目录选择后后台下载，进度条实时显示
 
 ### 快捷键
 

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <string>
+#include <vector>
+#include <functional>
 #include <memory>
 
 namespace FluxPlayer {
@@ -9,6 +11,7 @@ namespace FluxPlayer {
 class Player;
 class Window;
 class SubtitleManager;
+class Downloader;
 
 /**
  * Controller 类 - UI 控制界面
@@ -83,6 +86,8 @@ private:
      * @param btnH 按钮高度
      */
     void renderSpeedButton(float btnH);
+    void renderQualityButton(float btnH);   ///< 画质切换按钮（仅网页视频时显示）
+    void renderDownloadButton(float btnH);  ///< 下载按钮（仅网页视频时显示）
 
     void renderMediaInfo();
     void renderStats();
@@ -134,6 +139,27 @@ private:
     bool showSpeedMenu_;        // 速度菜单显示状态
     float speedMenuPosX_;       // 速度菜单X坐标
     float speedMenuPosY_;       // 速度菜单Y坐标
+
+    // ==================== 画质选择 ====================
+    /// 单个画质选项（来自 ExtractedStream::qualities）
+    struct QualityItem {
+        std::string formatId;
+        std::string label;  // "1080P" 等
+    };
+    bool showQualityMenu_ = false;
+    float qualityMenuPosX_ = 0.0f;
+    float qualityMenuPosY_ = 0.0f;
+    std::vector<QualityItem> qualities_;   ///< 当前可用画质列表
+    std::string currentQualityLabel_;      ///< 当前画质标签（空则不显示按钮）
+    std::string currentPageUrl_;           ///< 当前播放的网页 URL（用于切换画质和下载）
+
+    // ==================== 下载 ====================
+    bool isDownloading_ = false;
+    float downloadProgress_ = 0.0f;       ///< 0.0 ~ 1.0
+    std::string downloadSpeed_;            ///< 下载速度，如 "1.23MiB/s"
+    std::string downloadEta_;              ///< 剩余时间，如 "00:30"
+    std::string downloadStatus_;           ///< 状态文字
+    std::unique_ptr<Downloader> downloader_;
 
     // 鼠标活动追踪（自动显示/隐藏）
     double lastMouseMoveTime_;

@@ -18,6 +18,8 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/DashMerger.h"
 
 #include <GLFW/glfw3.h>
 #include <thread>
@@ -92,12 +94,50 @@ bool Player::open(const std::string& filePath) {
         return false;
     }
 
+    // 网页 URL 提取流程
+    std::string actualPath = filePath;
+    std::string httpHeaders;
+    double knownDuration = 0.0;
+
+    if (StreamExtractor::needsExtraction(filePath)) {
+        setState(PlayerState::EXTRACTING);
+        lastPageUrl_ = filePath;
+
+        ExtractedStream info;
+        std::string error;
+        if (!StreamExtractor::extract(filePath, "", info, error)) {
+            triggerError("流提取失败: " + error);
+            setState(PlayerState::ERRORED);
+            return false;
+        }
+
+        knownDuration = info.duration;
+
+        if (info.isDash) {
+            // DASH 分离流：启动合并器，Demuxer 读取管道
+            dashMerger_ = std::make_unique<DashMerger>();
+            if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers)) {
+                triggerError("DASH 合并器启动失败");
+                setState(PlayerState::ERRORED);
+                return false;
+            }
+            actualPath = dashMerger_->getPipeUrl();
+        } else {
+            actualPath   = info.videoUrl;
+            httpHeaders  = info.headers;
+        }
+    }
+
     setState(PlayerState::OPENING);
     filePath_ = filePath;
 
     // 创建并打开解复用器
     demuxer_ = std::make_unique<Demuxer>();
-    if (!demuxer_->open(filePath)) {
+    bool opened = httpHeaders.empty() && knownDuration == 0.0
+        ? demuxer_->open(actualPath)
+        : demuxer_->open(actualPath, httpHeaders, knownDuration);
+
+    if (!opened) {
         triggerError("Failed to open file: " + filePath);
         setState(PlayerState::ERRORED);
         return false;
@@ -1710,6 +1750,72 @@ bool Player::shouldDropFrameForSpeed(const AVFrame* avFrame, double rate) {
     }
 
     return false;
+}
+
+bool Player::switchQuality(const std::string& formatId, double seekTime) {
+    if (lastPageUrl_.empty()) {
+        LOG_WARN("switchQuality: 非网页视频，无法切换画质");
+        return false;
+    }
+
+    LOG_INFO("switchQuality: formatId=" + formatId + " seekTime=" + std::to_string(seekTime));
+
+    // 停止当前播放，保留窗口
+    pause();
+
+    // 重新提取指定画质的流
+    ExtractedStream info;
+    std::string error;
+    if (!StreamExtractor::extract(lastPageUrl_, formatId, info, error)) {
+        LOG_ERROR("switchQuality: 提取失败 " + error);
+        play();
+        return false;
+    }
+
+    // 停止解码线程，重置解复用器
+    shouldQuit_.store(true);
+    if (decodingThread_ && decodingThread_->joinable()) decodingThread_->join();
+    shouldQuit_.store(false);
+
+    if (dashMerger_) { dashMerger_->stop(); dashMerger_.reset(); }
+    demuxer_.reset();
+
+    // 打开新流
+    std::string actualUrl;
+    std::string headers;
+    if (info.isDash) {
+        dashMerger_ = std::make_unique<DashMerger>();
+        dashMerger_->start(info.videoUrl, info.audioUrl, info.headers);
+        actualUrl = dashMerger_->getPipeUrl();
+    } else {
+        actualUrl = info.videoUrl;
+        headers   = info.headers;
+    }
+
+    demuxer_ = std::make_unique<Demuxer>();
+    bool opened = headers.empty() && info.duration == 0.0
+        ? demuxer_->open(actualUrl)
+        : demuxer_->open(actualUrl, headers, info.duration);
+
+    if (!opened) {
+        LOG_ERROR("switchQuality: 打开新流失败");
+        setState(PlayerState::ERRORED);
+        return false;
+    }
+
+    // 刷新解码器缓冲区
+    if (videoDecoder_) videoDecoder_->flush();
+    if (audioDecoder_) audioDecoder_->flush();
+    videoQueue_->flush();
+    audioQueue_->flush();
+
+    // 重启解码线程并 seek 到原位置
+    decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
+    if (seekTime > 0.0) seek(seekTime);
+
+    setState(PlayerState::PLAYING);
+    LOG_INFO("switchQuality: 切换成功");
+    return true;
 }
 
 } // namespace FluxPlayer

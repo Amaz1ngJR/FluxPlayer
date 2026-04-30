@@ -49,12 +49,13 @@ static std::string playMedia(const std::string& mediaPath) {
     player.setStateChangeCallback([](PlayerState state) {
         std::string stateName;
         switch (state) {
-            case PlayerState::IDLE:    stateName = "IDLE"; break;
-            case PlayerState::OPENING: stateName = "OPENING"; break;
-            case PlayerState::PLAYING: stateName = "PLAYING"; break;
-            case PlayerState::PAUSED:  stateName = "PAUSED"; break;
-            case PlayerState::STOPPED: stateName = "STOPPED"; break;
-            case PlayerState::ERRORED:   stateName = "ERROR"; break;
+            case PlayerState::IDLE:       stateName = "IDLE"; break;
+            case PlayerState::EXTRACTING: stateName = "EXTRACTING"; break;
+            case PlayerState::OPENING:    stateName = "OPENING"; break;
+            case PlayerState::PLAYING:    stateName = "PLAYING"; break;
+            case PlayerState::PAUSED:     stateName = "PAUSED"; break;
+            case PlayerState::STOPPED:    stateName = "STOPPED"; break;
+            case PlayerState::ERRORED:    stateName = "ERROR"; break;
         }
         LOG_INFO("Player state changed to: " + stateName);
     });

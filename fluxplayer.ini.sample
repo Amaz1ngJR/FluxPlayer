@@ -85,3 +85,13 @@ subtitleFontScale=1.4
 # subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)
 # 推荐字体：macOS=PingFang.ttc, Windows=msyh.ttc, Linux=NotoSansCJK-Regular.ttc
 subtitleFontPath=
+
+[Stream]
+# 说明：从指定浏览器读取 cookies，用于播放需要登录的内容（如会员视频）
+# 取值：chrome / safari / firefox / edge / auto（自动检测系统默认浏览器）/ off（禁用）
+# 默认：auto
+cookiesBrowser=auto
+# 说明：cookies.txt 文件路径（Netscape 格式），cookiesBrowser = off 时生效
+# 取值：绝对路径，留空则不使用
+# 默认：（空）
+cookiesFile=

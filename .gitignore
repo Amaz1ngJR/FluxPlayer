@@ -19,6 +19,10 @@ build/
 !third_party/ffmpeg/lib/*.lib
 !third_party/ffmpeg-macos/lib/*.dylib
 
+# Allow yt-dlp prebuilt binaries
+!third_party/yt-dlp/yt-dlp_macos
+!third_party/yt-dlp/yt-dlp.exe
+
 # IDE files
 .vscode/
 .idea/

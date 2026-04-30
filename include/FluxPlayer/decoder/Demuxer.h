@@ -37,6 +37,16 @@ public:
      */
     bool open(const std::string& filename);
 
+    /**
+     * @brief 打开网页提取的流（带 headers 和已知时长）
+     * @param filename      流 URL 或 "pipe:N"
+     * @param httpHeaders   HTTP headers（"Key: Value\r\n" 格式），空则不注入
+     * @param knownDuration 已知时长（秒），>0 时手动注入 duration（解决 pipe 流被误判为直播流）
+     */
+    bool open(const std::string& filename,
+              const std::string& httpHeaders,
+              double knownDuration = 0.0);
+
     /** @brief 关闭文件并释放所有资源 */
     void close();
 

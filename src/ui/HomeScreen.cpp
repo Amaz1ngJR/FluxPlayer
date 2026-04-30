@@ -628,7 +628,7 @@ void HomeScreen::renderUI() {
             ImVec2 inputPos = ImGui::GetItemRectMin();
             ImGui::GetWindowDrawList()->AddText(
                 ImVec2(inputPos.x + 14.0f, inputPos.y + 10.0f),
-                IM_COL32(60, 120, 160, 160), "rtsp://... or http://...");
+                IM_COL32(60, 120, 160, 160), "rtsp://... or https://bilibili.com/video/...");
         }
 
         ImGui::PopStyleColor(4);
