@@ -284,12 +284,17 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 ## 配置文件
 
-程序首次运行时自动生成 `fluxplayer.ini`，后续修改值即可，切换界面时自动重载。
+程序首次运行时自动在平台标准缓存目录生成 `fluxplayer.ini`，后续修改值即可，切换界面时自动重载。
+
+| 平台 | 配置文件路径 |
+|------|------------|
+| macOS | `~/Library/Caches/FluxPlayer/fluxplayer.ini` |
+| Windows | `%LOCALAPPDATA%\FluxPlayer\fluxplayer.ini` |
+| Linux | `~/.cache/FluxPlayer/fluxplayer.ini` |
 
 ```ini
 # FluxPlayer Configuration
-# This file is auto-generated on first run. Modify values as needed.
-# Changes take effect when switching between HomeScreen and Player.
+# 配置文件自动生成在平台标准缓存目录，修改后切换界面时自动重载生效。
 
 [Audio]
 # volume: 音量 (0.0 ~ 1.0)
@@ -300,6 +305,10 @@ volume=0.6
 logLevel=INFO
 # tcpLogPort: TCP 远程日志端口 (用 nc ip port 查看实时日志)
 tcpLogPort=9999
+# logFileEnabled: 是否将日志写入文件 (true / false)
+logFileEnabled=false
+# logFilePath: 日志文件路径（留空则使用默认路径）
+logFilePath=
 
 [Window]
 # windowWidth: 窗口默认宽度 (像素)
@@ -330,13 +339,13 @@ playbackSpeed=1.0
 frameInterpolation=true
 
 [Screenshot]
-# screenshotDir: 截图保存目录 (相对于 ini 文件所在目录)
+# screenshotDir: 截图保存目录（默认为平台缓存目录下的 Screenshot 子目录）
 screenshotDir=Screenshot
 # screenshotFormat: 截图格式 (png / jpg)
 screenshotFormat=png
 
 [Record]
-# recordDir: 录制文件保存目录 (相对于 ini 文件所在目录)
+# recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）
 recordDir=Record
 # recordQuality: 录像质量 (low / medium / high / original)
 # low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流
@@ -382,6 +391,24 @@ cmake -B build -DENABLE_TCP_LOG=ON && cmake --build build
 ```bash
 nc <播放器IP> 9999
 ```
+
+## 文件日志
+
+在配置文件中开启：
+
+```ini
+logFileEnabled=true
+```
+
+日志文件默认保存在平台缓存目录下：
+
+| 平台 | 日志文件路径 |
+|------|------------|
+| macOS | `~/Library/Caches/FluxPlayer/fluxplayer.log` |
+| Windows | `%LOCALAPPDATA%\FluxPlayer\fluxplayer.log` |
+| Linux | `~/.cache/FluxPlayer/fluxplayer.log` |
+
+可通过 `logFilePath` 自定义路径。文件日志为纯文本格式（不含终端颜色码），以追加模式写入。
 
 ## 测试流地址
 

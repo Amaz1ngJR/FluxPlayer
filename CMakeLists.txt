@@ -228,6 +228,7 @@ elseif(WIN32)
         comdlg32    # 文件对话框
         d3d11       # D3D11VA 硬件解码
         dxgi        # DXGI 设备枚举
+        shell32     # SHGetFolderPath（应用数据目录）
     )
 elseif(UNIX)
     target_link_libraries(FluxPlayer PRIVATE

@@ -12,15 +12,17 @@ public:
         float volume = 1.0f;
         std::string logLevel = "INFO";
         int tcpLogPort = 9999;
+        bool logFileEnabled = false;       ///< 是否启用文件日志
+        std::string logFilePath;           ///< 日志文件路径（空则使用默认路径）
         int windowWidth = 960;
         int windowHeight = 600;
         bool uiVisible = true;
         bool showMediaInfo = false;
         bool showStats = false;
         bool loopPlayback = false;
-        std::string screenshotDir = "Screenshot";
+        std::string screenshotDir;
         std::string screenshotFormat = "png";  // png 或 jpg
-        std::string recordDir = "Record";
+        std::string recordDir;
         std::string recordQuality = "original";  // low / medium / high / original
         bool hwaccel = true;  // 硬件加速解码，默认开启
 
@@ -43,6 +45,10 @@ public:
     bool save();
     void checkAndReload();
 
+    /// 获取平台标准应用缓存目录（可丢失、可重生的数据）
+    /// Windows: %LOCALAPPDATA%\FluxPlayer  macOS: ~/Library/Caches/FluxPlayer  Linux: ~/.cache/FluxPlayer
+    static std::string getAppDataDir();
+
 private:
     Config();
     ~Config() = default;
@@ -50,7 +56,7 @@ private:
     long getFileModTime();
 
     Settings settings_;
-    std::string configPath_ = "fluxplayer.ini";
+    std::string configPath_;
     std::atomic<long> lastModTime_{0};
     mutable std::mutex mutex_;
 };

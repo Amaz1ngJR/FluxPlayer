@@ -74,6 +74,10 @@ bool Controller::init() {
     ImGuiIO& io = ImGui::GetIO();
     (void)io;
 
+    // imgui.ini 保存到平台缓存目录，避免在安装目录下生成文件
+    static std::string imguiIniPath = Config::getAppDataDir() + "/imgui.ini";
+    io.IniFilename = imguiIniPath.c_str();
+
     // 配置 ImGui
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // 启用键盘导航
 

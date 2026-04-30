@@ -1,6 +1,9 @@
 # FluxPlayer Configuration
-# This file is auto-generated on first run. Modify values as needed.
-# Changes take effect when switching between HomeScreen and Player.
+# 配置文件自动生成在平台标准缓存目录：
+#   macOS:   ~/Library/Caches/FluxPlayer/fluxplayer.ini
+#   Windows: %LOCALAPPDATA%\FluxPlayer\fluxplayer.ini
+#   Linux:   ~/.cache/FluxPlayer/fluxplayer.ini
+# 修改后切换界面时自动重载生效。
 
 [Audio]
 # volume: 音量 (0.0 ~ 1.0)
@@ -11,6 +14,14 @@ volume=0.6
 logLevel=INFO
 # tcpLogPort: TCP 远程日志端口 (用 nc ip port 查看实时日志)
 tcpLogPort=9999
+# logFileEnabled: 是否将日志写入文件 (true / false)
+# 默认：false
+logFileEnabled=false
+# logFilePath: 日志文件路径（留空则使用默认路径）
+#   macOS:   ~/Library/Caches/FluxPlayer/fluxplayer.log
+#   Windows: %LOCALAPPDATA%\FluxPlayer\fluxplayer.log
+#   Linux:   ~/.cache/FluxPlayer/fluxplayer.log
+logFilePath=
 
 [Window]
 # windowWidth: 窗口默认宽度 (像素)
@@ -41,13 +52,19 @@ playbackSpeed=1.0
 frameInterpolation=true
 
 [Screenshot]
-# screenshotDir: 截图保存目录 (相对于 ini 文件所在目录)
+# screenshotDir: 截图保存目录（默认为平台缓存目录下的 Screenshot 子目录）
+#   macOS:   ~/Library/Caches/FluxPlayer/Screenshot
+#   Windows: %LOCALAPPDATA%\FluxPlayer\Screenshot
+#   Linux:   ~/.cache/FluxPlayer/Screenshot
 screenshotDir=Screenshot
 # screenshotFormat: 截图格式 (png / jpg)
 screenshotFormat=png
 
 [Record]
-# recordDir: 录制文件保存目录 (相对于 ini 文件所在目录)
+# recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）
+#   macOS:   ~/Library/Caches/FluxPlayer/Record
+#   Windows: %LOCALAPPDATA%\FluxPlayer\Record
+#   Linux:   ~/.cache/FluxPlayer/Record
 recordDir=Record
 # recordQuality: 录像质量 (low / medium / high / original)
 # low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流

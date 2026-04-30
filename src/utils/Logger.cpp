@@ -134,9 +134,9 @@ void Logger::log(LogLevel level, const std::string& message, const char* file, i
     // 输出到控制台（带颜色）
     std::cout << coloredMessage << std::endl;
 
-    // 输出到文件（也带颜色）
+    // 输出到文件（不带颜色，纯文本）
     if (m_fileOutputEnabled && m_fileStream.is_open()) {
-        m_fileStream << coloredMessage << std::endl;
+        m_fileStream << logMessage << std::endl;
         m_fileStream.flush();
     }
 

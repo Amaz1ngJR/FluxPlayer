@@ -1,9 +1,16 @@
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <fstream>
-#include <sstream>
 #include <sys/stat.h>
+#include <filesystem>
+#ifdef _WIN32
+#include <windows.h>
+#include <shlobj.h>
+#else
 #include <unistd.h>
+#include <cstdlib>
+#include <pwd.h>
+#endif
 namespace FluxPlayer {
 
 // 获取配置单例
@@ -12,8 +19,55 @@ Config& Config::getInstance() {
     return instance;
 }
 
-// 构造函数
+// 获取平台标准应用缓存目录（可丢失、可重生的数据）
+// Windows: %LOCALAPPDATA%\FluxPlayer  macOS: ~/Library/Caches/FluxPlayer  Linux: ~/.cache/FluxPlayer
+std::string Config::getAppDataDir() {
+    std::string base;
+#ifdef _WIN32
+    // Windows：使用 %LOCALAPPDATA%（不会被 OneDrive 等云同步）
+    char path[MAX_PATH];
+    if (SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path) == S_OK) {
+        base = path;
+    } else {
+        const char* localAppData = std::getenv("LOCALAPPDATA");
+        base = localAppData ? localAppData : ".";
+    }
+    return base + "\\FluxPlayer";
+#elif defined(__APPLE__)
+    // macOS：~/Library/Caches 不会被 iCloud 同步，适合可重生数据
+    const char* home = std::getenv("HOME");
+    if (!home) {
+        struct passwd* pw = getpwuid(getuid());
+        home = pw ? pw->pw_dir : nullptr;
+    }
+    base = home ? std::string(home) + "/Library/Caches" : ".";
+    return base + "/FluxPlayer";
+#else
+    // Linux：遵循 XDG 规范，优先 $XDG_CACHE_HOME，默认 ~/.cache
+    const char* xdg = std::getenv("XDG_CACHE_HOME");
+    if (xdg && xdg[0] != '\0') {
+        base = xdg;
+    } else {
+        const char* home = std::getenv("HOME");
+        if (!home) {
+            struct passwd* pw = getpwuid(getuid());
+            home = pw ? pw->pw_dir : nullptr;
+        }
+        base = home ? std::string(home) + "/.cache" : ".";
+    }
+    return base + "/FluxPlayer";
+#endif
+}
+
+// 构造函数：初始化配置路径和默认目录为平台标准位置
 Config::Config() {
+    std::string appDir = getAppDataDir();
+    // 确保应用数据目录存在
+    std::filesystem::create_directories(appDir);
+    configPath_ = appDir + "/fluxplayer.ini";
+    settings_.screenshotDir = appDir + "/Screenshot";
+    settings_.recordDir = appDir + "/Record";
+    settings_.logFilePath = appDir + "/fluxplayer.log";
 }
 
 // 获取配置文件修改时间
@@ -52,6 +106,8 @@ bool Config::load() {
                 if (key == "volume") settings_.volume = std::stof(value);
                 else if (key == "logLevel") settings_.logLevel = value;
                 else if (key == "tcpLogPort") settings_.tcpLogPort = std::stoi(value);
+                else if (key == "logFileEnabled") settings_.logFileEnabled = (value == "true" || value == "1");
+                else if (key == "logFilePath") { if (!value.empty()) settings_.logFilePath = value; }
                 else if (key == "windowWidth") settings_.windowWidth = std::stoi(value);
                 else if (key == "windowHeight") settings_.windowHeight = std::stoi(value);
                 else if (key == "uiVisible") settings_.uiVisible = (value == "true" || value == "1");
@@ -101,6 +157,13 @@ bool Config::load() {
     else if (settings_.logLevel == "ERROR") level = LogLevel::LOG_ERROR;
     Logger::getInstance().setLogLevel(level);
 
+    // 同步文件日志开关（启动时 + 热重载时均生效）
+    if (settings_.logFileEnabled) {
+        Logger::getInstance().enableFileOutput(settings_.logFilePath);
+    } else {
+        Logger::getInstance().disableFileOutput();
+    }
+
     // 无论是新建还是旧文件缺少新配置项，都回写一次完整配置
     save();
     return true;
@@ -120,7 +183,11 @@ bool Config::save() {
     file << "volume=" << settings_.volume << "\n\n";
     file << "[Log]\n";
     file << "logLevel=" << settings_.logLevel << "\n";
-    file << "tcpLogPort=" << settings_.tcpLogPort << "\n\n";
+    file << "tcpLogPort=" << settings_.tcpLogPort << "\n";
+    file << "# logFileEnabled: 是否将日志写入文件 (true / false)\n";
+    file << "logFileEnabled=" << (settings_.logFileEnabled ? "true" : "false") << "\n";
+    file << "# logFilePath: 日志文件路径（留空则使用默认路径）\n";
+    file << "logFilePath=" << settings_.logFilePath << "\n\n";
     file << "[Window]\n";
     file << "windowWidth=" << settings_.windowWidth << "\n";
     file << "windowHeight=" << settings_.windowHeight << "\n\n";

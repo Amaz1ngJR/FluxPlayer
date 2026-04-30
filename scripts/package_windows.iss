@@ -32,6 +32,10 @@ Source: "..\build\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversio
 ; 字体文件（ImGui 渲染字幕和 UI 使用）
 Source: "..\build\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
 
+[UninstallDelete]
+; 卸载时清理运行时生成的文件
+Type: files; Name: "{app}\imgui.ini"
+
 [Icons]
 ; 开始菜单快捷方式
 Name: "{group}\FluxPlayer";         Filename: "{app}\FluxPlayer.exe"
@@ -46,3 +50,18 @@ Name: desktopicon; Description: "创建桌面快捷方式"; GroupDescription: "�
 [Run]
 ; 安装完成后可选择立即启动
 Filename: "{app}\FluxPlayer.exe"; Description: "启动 FluxPlayer"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// 卸载时清理平台缓存目录（%LOCALAPPDATA%\FluxPlayer）
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+    if CurUninstallStep = usPostUninstall then
+    begin
+        if MsgBox('是否同时删除配置文件、日志和录制文件？' + #13#10 +
+                  '(' + ExpandConstant('{localappdata}\FluxPlayer') + ')',
+                  mbConfirmation, MB_YESNO) = IDYES then
+        begin
+            DelTree(ExpandConstant('{localappdata}\FluxPlayer'), True, True, True);
+        end;
+    end;
+end;

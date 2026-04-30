@@ -148,6 +148,10 @@ bool HomeScreen::init() {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;  // 启用键盘导航（Tab/方向键）
 
+    // imgui.ini 保存到平台缓存目录，避免在安装目录下生成文件
+    static std::string imguiIniPath = Config::getAppDataDir() + "/imgui.ini";
+    io.IniFilename = imguiIniPath.c_str();
+
     // 加载字体：
     // - defaultFont_: ImGui 内置默认字体（13px），用于正文、按钮等
     // - titleFont_:   同样基于内置字体但放大到 36px，用于 "FluxPlayer" 大标题
