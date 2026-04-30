@@ -198,6 +198,31 @@ xcode-select --install
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
+### 图标制作
+
+打包脚本优先使用已有的图标文件（macOS: `source/pic.icns`，Windows: `source/pic.ico`），不存在时从 `source/pic.png` 自动转换。
+
+也可以手动制作：
+
+```bash
+# ICO → PNG（macOS 系统自带 sips）
+sips -s format png source/pic.ico --out source/pic.png
+
+# PNG → ICNS（macOS 系统自带 sips + iconutil）
+mkdir AppIcon.iconset
+for size in 16 32 64 128 256 512; do
+    sips -z $size $size source/pic.png --out AppIcon.iconset/icon_${size}x${size}.png
+    sips -z $((size*2)) $((size*2)) source/pic.png --out AppIcon.iconset/icon_${size}x${size}@2x.png
+done
+iconutil -c icns AppIcon.iconset -o source/pic.icns
+rm -rf AppIcon.iconset
+
+# PNG → ICO（需要 ImageMagick，或用在线工具 convertio.co【https://webfem.com/tools/ico/】）
+magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" source/pic.ico
+```
+
+> 源图建议使用 512x512 或 1024x1024 的正方形 PNG，非正方形会导致图标拉伸变形。
+
 ## 打包安装包
 
 ### macOS（生成 .dmg）
@@ -262,40 +287,76 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 程序首次运行时自动生成 `fluxplayer.ini`，后续修改值即可，切换界面时自动重载。
 
 ```ini
+# FluxPlayer Configuration
+# This file is auto-generated on first run. Modify values as needed.
+# Changes take effect when switching between HomeScreen and Player.
+
 [Audio]
-volume=0.6                    # 音量 (0.0 ~ 1.0)
+# volume: 音量 (0.0 ~ 1.0)
+volume=0.6
 
 [Log]
-logLevel=INFO                 # 日志级别 (DEBUG / INFO / WARN / ERROR)
-tcpLogPort=9999               # TCP 远程日志端口
+# logLevel: 日志级别 (DEBUG / INFO / WARN / ERROR)
+logLevel=INFO
+# tcpLogPort: TCP 远程日志端口 (用 nc ip port 查看实时日志)
+tcpLogPort=9999
 
 [Window]
-windowWidth=960               # 窗口默认宽度
-windowHeight=600              # 窗口默认高度
+# windowWidth: 窗口默认宽度 (像素)
+windowWidth=960
+# windowHeight: 窗口默认高度 (像素)
+windowHeight=600
 
 [UI]
-uiVisible=true                # 是否显示控制面板
-showMediaInfo=true            # 是否显示媒体信息面板
-showStats=true                # 是否显示统计信息面板
+# uiVisible: 是否显示控制面板 (true / false)
+uiVisible=true
+# showMediaInfo: 是否显示媒体信息面板 (true / false)
+showMediaInfo=true
+# showStats: 是否显示统计信息面板 (true / false)
+showStats=true
 
 [Playback]
-loopPlayback=false            # 是否循环播放
+# loopPlayback: 是否循环播放 (true / false)
+loopPlayback=false
+
+[Speed]
+# 说明：默认播放速度倍率
+# 取值：0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0
+# 默认：1.0
+playbackSpeed=1.0
+# 说明：慢放时是否启用帧插值（当前版本预留，暂未集成到渲染路径）
+# 取值：true / false
+# 默认：true
+frameInterpolation=true
 
 [Screenshot]
-screenshotDir=Screenshot      # 截图保存目录
-screenshotFormat=png          # 截图格式 (png / jpg)
+# screenshotDir: 截图保存目录 (相对于 ini 文件所在目录)
+screenshotDir=Screenshot
+# screenshotFormat: 截图格式 (png / jpg)
+screenshotFormat=png
 
 [Record]
-recordDir=Record              # 录制文件保存目录
-recordQuality=original        # 录像质量 (low / medium / high / original)
+# recordDir: 录制文件保存目录 (相对于 ini 文件所在目录)
+recordDir=Record
+# recordQuality: 录像质量 (low / medium / high / original)
+# low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流
+recordQuality=original
 
 [Decoder]
-hwaccel=true                  # 硬件加速解码 (macOS: VideoToolbox / Windows: CUDA > D3D11VA > DXVA2)
+# hwaccel: 是否启用硬件加速解码 (true / false)
+# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2
+# 硬件解码可显著降低 CPU 占用，对不支持的编解码器会自动降级为软件解码
+hwaccel=true
 
 [Subtitle]
-subtitleEnabled=true          # 是否启用内嵌字幕流解码与渲染
-subtitleFontScale=1.4         # 字幕字体缩放比例 (0.5 ~ 4.0)
-subtitleFontPath=             # 自定义字体路径（留空则按平台自动探测 CJK 字体）
+# subtitleEnabled: 是否启用内嵌字幕流解码与渲染 (true / false)
+# 修改后需重新打开媒体才会启停解码；运行时仅通过设置菜单开关影响渲染
+subtitleEnabled=true
+# subtitleFontScale: 字幕字体缩放比例 (0.5 ~ 4.0)，1.0 为字体基准大小
+subtitleFontScale=1.4
+# subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)
+# 推荐字体：macOS=PingFang.ttc, Windows=msyh.ttc, Linux=NotoSansCJK-Regular.ttc
+subtitleFontPath=
 ```
 
 录像质量说明：
