@@ -54,6 +54,11 @@ static std::string getYtDlpPath() {
     return "yt-dlp";
 }
 
+// 公开接口，供 Downloader 等模块使用
+std::string StreamExtractor::getExecutablePath() {
+    return getYtDlpPath();
+}
+
 static std::string runCommand(const std::string& cmd, int timeoutSec = 30) {
     std::string result;
 #ifdef _WIN32

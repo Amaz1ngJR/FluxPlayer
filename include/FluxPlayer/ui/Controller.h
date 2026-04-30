@@ -87,7 +87,14 @@ private:
      */
     void renderSpeedButton(float btnH);
     void renderQualityButton(float btnH);   ///< 画质切换按钮（仅网页视频时显示）
-    void renderDownloadButton(float btnH);  ///< 下载按钮（仅网页视频时显示）
+    void renderDownloadButton(float btnH);  ///< 下载按钮及下载中 UI（仅网页视频时显示）
+
+    /// 绘制下载进度条 + 暂停/取消图标按钮（Download 按钮右侧）
+    void renderDownloadProgress(float btnH, float btnMinX, float btnMinY,
+                                float btnMaxX, float btnMaxY);
+
+    /// 绘制下载速度/文件大小/ETA 文字信息（取消按钮右侧，缩小字号双行排列）
+    void renderDownloadInfo(float btnH, float btnMinY, float infoStartX);
 
     void renderMediaInfo();
     void renderStats();
@@ -154,11 +161,12 @@ private:
     std::string currentPageUrl_;           ///< 当前播放的网页 URL（用于切换画质和下载）
 
     // ==================== 下载 ====================
-    bool isDownloading_ = false;
-    float downloadProgress_ = 0.0f;       ///< 0.0 ~ 1.0
-    std::string downloadSpeed_;            ///< 下载速度，如 "1.23MiB/s"
-    std::string downloadEta_;              ///< 剩余时间，如 "00:30"
-    std::string downloadStatus_;           ///< 状态文字
+    std::atomic<bool>  isDownloading_{false};
+    std::atomic<float> downloadProgress_{0.0f};  ///< 原子变量，下载线程写，主线程读
+    mutable std::mutex downloadMutex_;            ///< 保护 speed/eta/fileSize string
+    std::string downloadSpeed_;
+    std::string downloadEta_;
+    std::string downloadFileSize_;                ///< 文件总大小（如 "123.45MiB"）
     std::unique_ptr<Downloader> downloader_;
 
     // 鼠标活动追踪（自动显示/隐藏）

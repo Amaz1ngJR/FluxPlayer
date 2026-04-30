@@ -318,8 +318,12 @@ void Controller::renderBottomOverlay() {
     ImGui::SameLine();
     ImGui::Text("%s", timeText.c_str());
 
-    // ── 第二行：控制按钮（居中） + 设置/音量（右） ──
+    // ── 第二行：下载（左） + 控制按钮（居中） + 设置/音量（右） ──
+    // 三个渲染函数共享同一行：保存行首 Y，下载 UI 可能推进光标，渲染后恢复
     const float btnH = 22.0f;
+    float row2Y = ImGui::GetCursorPosY();
+    renderDownloadButton(btnH);
+    ImGui::SetCursorPosY(row2Y);
     renderPlaybackButtons(btnH);
     renderVolumeAndSettings(btnH);
 
@@ -629,24 +633,19 @@ void Controller::renderVolumeAndSettings(float btnH) {
     const float volSliderW = 100.0f;
     const float volBtnW = btnH + 4.0f;
     const float settingsBtnW = volBtnW;
-    const float speedBtnW = 50.0f;
+    const float speedBtnW = 60.0f;
     // 音量图标留出滑块展开空间（滑块向右展开）
     const float volIconX = ds.x - volBtnW - volSliderW - 12.0f;
     // 设置按钮紧贴音量图标左侧
     const float settingsIconX = volIconX - settingsBtnW - 4.0f;
     constexpr double VOL_CLOSE_DELAY = 0.4;
 
-    const float qualityBtnW = currentQualityLabel_.empty() ? 0.0f : 60.0f;
-    const float downloadBtnW = currentPageUrl_.empty() ? 0.0f : (btnH + 4.0f);
+    const float qualityBtnW  = currentQualityLabel_.empty() ? 0.0f : 60.0f;
 
-    // 速度按钮紧贴设置图标左侧，画质/下载按钮在速度按钮左侧
+    // 速度按钮紧贴设置图标左侧，画质按钮在速度按钮左侧
     float speedBtnX = settingsIconX - speedBtnW - 4.0f;
-    if (downloadBtnW > 0.0f) {
-        ImGui::SameLine(speedBtnX - downloadBtnW - 4.0f);
-        renderDownloadButton(btnH);
-    }
     if (qualityBtnW > 0.0f) {
-        float qx = speedBtnX - qualityBtnW - 4.0f - (downloadBtnW > 0.0f ? downloadBtnW + 4.0f : 0.0f);
+        float qx = speedBtnX - qualityBtnW - 4.0f;
         ImGui::SameLine(qx);
         renderQualityButton(btnH);
     }
@@ -1075,7 +1074,7 @@ void Controller::renderSubtitles() {
 }
 
 void Controller::renderSpeedButton(float btnH) {
-    const float speedBtnW = 50.0f;
+    const float speedBtnW = 60.0f;
     double currentSpeed = player_.getPlaybackSpeed();
     bool isNonDefault = (std::abs(currentSpeed - 1.0) > 0.01);
 
@@ -1084,7 +1083,7 @@ void Controller::renderSpeedButton(float btnH) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
     }
 
-    bool clicked = ImGui::Button("Spd##speedbtn", ImVec2(speedBtnW, btnH));
+    bool clicked = ImGui::Button("Speed##speedbtn", ImVec2(speedBtnW, btnH));
     ImVec2 btnMin = ImGui::GetItemRectMin();
     ImVec2 btnMax = ImGui::GetItemRectMax();
 
@@ -1190,73 +1189,158 @@ void Controller::renderQualityButton(float btnH) {
 
 void Controller::renderDownloadButton(float btnH) {
     if (currentPageUrl_.empty()) return;
-    const float btnW = btnH + 4.0f;
+    const float btnW = 72.0f;
 
-    // 下载中：紫色进度指示；空闲：赛博蓝边框
-    if (isDownloading_) {
-        ImGui::PushStyleColor(ImGuiCol_Button,       ImVec4(0.3f,0.0f,0.5f,0.8f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f,0.0f,0.6f,0.9f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.4f,0.0f,0.6f,0.9f));
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.75f,0.00f,1.00f,0.12f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.75f,0.00f,1.00f,0.25f));
-    }
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.75f,0.00f,1.00f,0.60f));
+    // Download 按钮固定在工具栏左侧
+    ImGui::SetCursorPosX(8.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.75f,0.00f,1.00f,0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.75f,0.00f,1.00f,0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.75f,0.00f,1.00f,0.60f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
-
-    bool clicked = ImGui::Button(isDownloading_ ? "..." : "DL", ImVec2(btnW, btnH));
-    ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
-
+    bool clicked = ImGui::Button("Download", ImVec2(btnW, btnH));
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
 
-    // 下载进度条（蓝→紫渐变，绘制在按钮底部）
-    if (isDownloading_ && downloadProgress_ > 0.0f) {
-        float pw = (bmax.x - bmin.x) * downloadProgress_;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilledMultiColor(
-            ImVec2(bmin.x, bmax.y - 2.0f), ImVec2(bmin.x + pw, bmax.y),
-            IM_COL32(0,190,255,200), IM_COL32(190,0,255,200),
-            IM_COL32(190,0,255,200), IM_COL32(0,190,255,200));
-    }
-
     if (clicked && !isDownloading_) {
-        // 弹出系统文件夹选择对话框
-        const char* dir = tinyfd_selectFolderDialog("选择下载目录", nullptr);
+        const char* dir = tinyfd_selectFolderDialog("Select Download Directory", nullptr);
         if (dir) {
-            std::string outputDir = dir;
             isDownloading_ = true;
             downloadProgress_ = 0.0f;
-            downloadSpeed_.clear();
-            downloadEta_.clear();
-            downloadStatus_ = "正在下载...";
-
+            { std::lock_guard<std::mutex> lk(downloadMutex_); downloadSpeed_.clear(); downloadEta_.clear(); downloadFileSize_.clear(); }
             downloader_ = std::make_unique<Downloader>();
-            downloader_->start(
-                currentPageUrl_,
-                outputDir,
-                [this](float p, const std::string& speed, const std::string& eta) {
+            downloader_->start(currentPageUrl_, dir,
+                [this](float p, const std::string& spd, const std::string& eta, const std::string& fsize) {
                     downloadProgress_ = p;
-                    downloadSpeed_    = speed;
-                    downloadEta_      = eta;
-                    downloadStatus_   = std::to_string(int(p * 100)) + "% " + speed
-                                      + (eta.empty() ? "" : " ETA " + eta);
+                    std::lock_guard<std::mutex> lk(downloadMutex_);
+                    // 只在有值时更新，避免 "already downloaded" 等无速度行覆盖上次有效值
+                    if (!spd.empty())   downloadSpeed_ = spd;
+                    if (!eta.empty())   downloadEta_ = eta;
+                    if (!fsize.empty()) downloadFileSize_ = fsize;
                 },
-                [this](bool ok, const std::string& path, const std::string& error) {
-                    isDownloading_  = false;
-                    downloadStatus_ = ok ? ("完成: " + path) : ("失败: " + error);
-                    LOG_INFO("Download " + std::string(ok ? "OK" : "FAIL") + " " + path);
-                }
-            );
+                [this](bool ok, const std::string& path, const std::string& err) {
+                    isDownloading_ = false;
+                    LOG_INFO("Download " + std::string(ok?"OK":"FAIL") + " " + path + " " + err);
+                });
         }
     }
 
-    // Tooltip
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("%s", isDownloading_ ? downloadStatus_.c_str() : "下载视频");
+    if (!isDownloading_.load()) return;
+
+    // 下载中：在 Download 按钮右侧绘制进度条、暂停/取消按钮、速度信息
+    ImVec2 btnMax = ImGui::GetItemRectMax();
+    ImVec2 btnMin = ImGui::GetItemRectMin();
+    renderDownloadProgress(btnH, btnMin.x, btnMin.y, btnMax.x, btnMax.y);
+}
+
+/// 绘制下载进度条 + 暂停/取消图标按钮
+void Controller::renderDownloadProgress(float btnH,
+                                         float btnMinX, float btnMinY,
+                                         float btnMaxX, float btnMaxY) {
+    const float iconBtnW = 24.0f;
+    float progress = downloadProgress_.load();
+    // ForegroundDrawList 不受窗口裁剪，避免文字超出 overlay 边界触发滚动
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+
+    // 进度条（在 Download 按钮右侧，高度与按钮等高以容纳内嵌文字）
+    const float barW = 120.0f, barH = btnH;
+    float barX = btnMaxX + 8.0f;
+    float barY = btnMinY;
+    dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW, barY + barH),
+                      IM_COL32(20,20,50,200), 3.0f);
+    if (progress > 0.0f) {
+        dl->AddRectFilledMultiColor(
+            ImVec2(barX, barY), ImVec2(barX + barW * progress, barY + barH),
+            IM_COL32(0,190,255,220), IM_COL32(190,0,255,220),
+            IM_COL32(190,0,255,220), IM_COL32(0,190,255,220));
     }
+    // 百分比文字内嵌在进度条中央
+    char pct[8]; snprintf(pct, sizeof(pct), "%d%%", int(progress * 100));
+    ImVec2 ts = ImGui::CalcTextSize(pct);
+    dl->AddText(ImVec2(barX + (barW - ts.x) * 0.5f, barY + (barH - ts.y) * 0.5f),
+                IM_COL32(255,255,255,230), pct);
+
+    // 暂停/继续图标按钮（进度条右侧）
+    bool isPaused = downloader_ && downloader_->isPaused();
+    float pauseBtnX = barX + barW + 4.0f;
+    ImGui::SameLine(0, 0);
+    ImGui::SetCursorScreenPos(ImVec2(pauseBtnX, btnMinY));
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.0f,0.75f,1.0f,0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.0f,0.75f,1.0f,0.30f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.0f,0.75f,1.0f,0.50f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+    if (ImGui::Button("##dlpause", ImVec2(iconBtnW, btnH))) {
+        if (downloader_) { if (isPaused) downloader_->resume(); else downloader_->pause(); }
+    }
+    { // 手绘暂停/播放图标
+        ImVec2 ib = ImGui::GetItemRectMin(), ie = ImGui::GetItemRectMax();
+        float cx = (ib.x+ie.x)*0.5f, cy = (ib.y+ie.y)*0.5f, r = 5.0f;
+        if (isPaused)
+            dl->AddTriangleFilled(ImVec2(cx-r*0.5f,cy-r), ImVec2(cx-r*0.5f,cy+r),
+                                  ImVec2(cx+r,cy), IM_COL32(0,190,255,220));
+        else {
+            dl->AddRectFilled(ImVec2(cx-r,cy-r), ImVec2(cx-r*0.3f,cy+r), IM_COL32(0,190,255,220));
+            dl->AddRectFilled(ImVec2(cx+r*0.3f,cy-r), ImVec2(cx+r,cy+r), IM_COL32(0,190,255,220));
+        }
+    }
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
+
+    // 取消图标按钮（暂停按钮右侧）
+    ImGui::SameLine(0, 4.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(1.0f,0.2f,0.2f,0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(1.0f,0.2f,0.2f,0.30f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(1.0f,0.3f,0.3f,0.50f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+    if (ImGui::Button("##dlcancel", ImVec2(iconBtnW, btnH))) {
+        if (downloader_) downloader_->cancel();
+        isDownloading_ = false;
+    }
+    { // 手绘 X
+        ImVec2 xb = ImGui::GetItemRectMin(), xe = ImGui::GetItemRectMax();
+        float xc = (xb.x+xe.x)*0.5f, yc = (xb.y+xe.y)*0.5f, xr = 4.0f;
+        dl->AddLine(ImVec2(xc-xr,yc-xr), ImVec2(xc+xr,yc+xr), IM_COL32(255,80,80,220), 1.5f);
+        dl->AddLine(ImVec2(xc+xr,yc-xr), ImVec2(xc-xr,yc+xr), IM_COL32(255,80,80,220), 1.5f);
+    }
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
+
+    // 速度/文件大小/ETA 文字信息
+    float cancelMaxX = ImGui::GetItemRectMax().x;
+    renderDownloadInfo(btnH, btnMinY, cancelMaxX + 6.0f);
+}
+
+/// 绘制下载速度、文件大小、ETA 文字信息（缩小字号双行排列）
+void Controller::renderDownloadInfo(float btnH, float btnMinY, float infoStartX) {
+    std::string spd, eta, fsize;
+    { std::lock_guard<std::mutex> lk(downloadMutex_); spd = downloadSpeed_; eta = downloadEta_; fsize = downloadFileSize_; }
+
+    // 第一行：速度 + 文件大小，第二行：ETA
+    std::string line1, line2;
+    if (!spd.empty()) line1 += spd;
+    if (!fsize.empty()) { if (!line1.empty()) line1 += "  "; line1 += fsize; }
+    if (!eta.empty()) line2 = "ETA " + eta;
+
+    if (line1.empty() && line2.empty()) return;
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    ImFont* font = ImGui::GetFont();
+    float smallSize = font->FontSize * 0.6f;   // 缩小到 60%
+    float lineH = smallSize + 1.0f;             // 行高
+    float totalH = lineH + (!line2.empty() ? lineH : 0.0f);
+    float infoY = btnMinY + (btnH - totalH) * 0.5f;
+
+    if (!line1.empty())
+        dl->AddText(font, smallSize, ImVec2(infoStartX, infoY),
+                    IM_COL32(0,190,255,180), line1.c_str());
+    if (!line2.empty())
+        dl->AddText(font, smallSize, ImVec2(infoStartX, infoY + lineH),
+                    IM_COL32(0,190,255,140), line2.c_str());
 }
 
 } // namespace FluxPlayer

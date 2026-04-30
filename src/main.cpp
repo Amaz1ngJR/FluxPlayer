@@ -19,6 +19,7 @@
 #include "FluxPlayer/ui/HomeScreen.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/StreamExtractor.h"
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <string>
@@ -79,10 +80,13 @@ static std::string playMedia(const std::string& mediaPath) {
     }
 
     // 提取媒体信息（编码格式、分辨率、时长等），用于 UI 显示
+    // 网页 URL 无法直接提取，跳过（Player 内部已通过 yt-dlp 获取信息）
     LOG_INFO("Extracting media information...");
     MediaInfo mediaInfo;
-    if (!mediaInfo.extractFromFile(mediaPath)) {
-        LOG_WARN("Failed to extract media info, UI may have incomplete information");
+    if (!StreamExtractor::needsExtraction(mediaPath)) {
+        if (!mediaInfo.extractFromFile(mediaPath)) {
+            LOG_WARN("Failed to extract media info, UI may have incomplete information");
+        }
     }
 
     // 启动播放（开始解码和音视频输出）

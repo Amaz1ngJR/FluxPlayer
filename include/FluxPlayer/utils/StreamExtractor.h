@@ -65,6 +65,9 @@ public:
     /// 检测 yt-dlp 是否已安装
     static bool isAvailable();
 
+    /// 获取 yt-dlp 可执行文件路径（优先打包版本，回退到系统 PATH）
+    static std::string getExecutablePath();
+
     /// 检测系统默认浏览器名称（返回 yt-dlp 接受的名称：chrome/safari/firefox/edge）
     static std::string detectDefaultBrowser();
 
