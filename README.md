@@ -3,6 +3,11 @@
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
 ![Language](https://img.shields.io/badge/language-C%2B%2B17-orange)
 
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/d879b637-6d3a-4f70-a15e-95780d4a7b7b" width="720" height="600" alt="图片描述" />
+</div>
+
+
 基于 FFmpeg + OpenGL 的跨平台视频播放器，使用 C++17 开发。支持本地文件播放和网络流（RTSP/RTMP/HTTP/HLS）播放，具备完整的音视频同步、GPU 渲染和 ImGui 控制界面。
 
 ## 功能特性
