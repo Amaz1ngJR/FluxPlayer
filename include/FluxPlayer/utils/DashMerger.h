@@ -26,14 +26,17 @@ public:
 
     /**
      * @brief 启动合并线程
-     * @param videoUrl  视频流 URL
-     * @param audioUrl  音频流 URL
-     * @param headers   HTTP headers（"Key: Value\r\n" 格式）
+     * @param videoUrl      视频流 URL
+     * @param audioUrl      音频流 URL
+     * @param headers       HTTP headers（"Key: Value\r\n" 格式）
+     * @param startSeconds  从该位置开始下载（>0 时通过 FFmpeg "ss" 选项让上游
+     *                      利用 HTTP Range 跳过前面的数据，用于 seek 重启场景）
      * @return 成功返回 true
      */
     bool start(const std::string& videoUrl,
                const std::string& audioUrl,
-               const std::string& headers);
+               const std::string& headers,
+               double startSeconds = 0.0);
 
     /**
      * @brief 返回 Demuxer 可传给 avformat_open_input 的 URL
@@ -50,7 +53,8 @@ private:
     /// 合并线程主函数
     void mergeLoop(const std::string& videoUrl,
                    const std::string& audioUrl,
-                   const std::string& headers);
+                   const std::string& headers,
+                   double startSeconds);
 
     std::thread thread_;
     std::atomic<bool> running_{false};

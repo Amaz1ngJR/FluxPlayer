@@ -17,6 +17,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
 #else
 #include <unistd.h>
 #include <sys/wait.h>
@@ -47,7 +48,11 @@ static const std::vector<std::string> kDirectExts = {
 // 优先使用 third_party/yt-dlp/ 打包版本，找不到则回退到系统 PATH
 static std::string getYtDlpPath() {
 #ifdef YTDLP_BUNDLED_PATH
+#ifdef _WIN32
+    int ret = _access(YTDLP_BUNDLED_PATH, 0);  // Windows：0 = 检查文件是否存在
+#else
     int ret = access(YTDLP_BUNDLED_PATH, X_OK);
+#endif
     LOG_INFO(std::string("getYtDlpPath: path=") + YTDLP_BUNDLED_PATH + " access=" + std::to_string(ret));
     if (ret == 0) return YTDLP_BUNDLED_PATH;
 #endif
@@ -62,8 +67,9 @@ std::string StreamExtractor::getExecutablePath() {
 static std::string runCommand(const std::string& cmd, int timeoutSec = 30) {
     std::string result;
 #ifdef _WIN32
-    // Windows：使用 _popen
-    FILE* pipe = _popen(cmd.c_str(), "r");
+    // Windows：外包一层引号，防止 cmd.exe /c 剥离引号后 URL 中的 & 被当作命令分隔符
+    std::string wrapped = "\"" + cmd + "\"";
+    FILE* pipe = _popen(wrapped.c_str(), "r");
 #else
     FILE* pipe = popen(cmd.c_str(), "r");
 #endif
@@ -321,10 +327,20 @@ bool StreamExtractor::extract(const std::string& pageUrl,
 
     std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
                     + fmtArg + "\"" + cookieArg
-                    + " \"" + pageUrl + "\" 2>/dev/null";
+                    + " \"" + pageUrl + "\" 2>&1";
 
     LOG_INFO("StreamExtractor: " + cmd);
     std::string json = runCommand(cmd, 30);
+
+    // 若带 cookie 失败，自动降级为不带 cookie 重试
+    // 常见原因：app 进程无法访问浏览器 keychain（macOS 沙箱/权限限制）
+    if ((json.empty() || json[0] != '{') && !cookieArg.empty()) {
+        LOG_WARN("StreamExtractor: cookie 提取失败，降级重试（无 cookie）。原始输出: "
+                 + json.substr(0, 200));
+        std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
+                        + fmtArg + "\" \"" + pageUrl + "\" 2>&1";
+        json = runCommand(cmdNoCookie, 30);
+    }
 
     if (json.empty()) {
         error = "yt-dlp 未返回结果，请检查 URL 是否有效";

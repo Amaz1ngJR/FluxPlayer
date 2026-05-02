@@ -7,6 +7,8 @@
 #include <atomic>
 #include <mutex>
 
+#include "FluxPlayer/utils/StreamExtractor.h"  // ExtractedStream（DASH 流 seek 重启复用）
+
 // 前向声明 FFmpeg 类型，避免头文件引入平台 SDK
 struct AVFrame;
 
@@ -300,6 +302,15 @@ private:
     void processSeekRequest();
 
     /**
+     * @brief DASH 流 seek：停止当前 DashMerger，用 -ss 重启从 seekTime 开始下载
+     *
+     * pipe 输入对 FFmpeg 不可 seek，matroska 容器在流式生成时无 cues 索引，
+     * 因此 DASH 流不能通过 demuxer_->seek 实现跳转。此方法绕过 demuxer，
+     * 通过重启上游连接（HTTP Range）实现真正的 seek。
+     */
+    void restartDashMerger(double seekTime);
+
+    /**
      * 解码线程辅助函数：检查预缓冲是否完成
      * 网络流启动时等待视频队列积累到 5 帧后再允许渲染
      */
@@ -415,6 +426,9 @@ private:
     // 精确跳转控制（用于从关键帧解码到目标位置）
     std::atomic<bool> decodingToTarget_;   // 是否正在解码到目标位置
     std::atomic<double> decodeTargetPTS_;  // 目标 PTS
+    // seek 开始的 wall clock（steady_clock 秒），用于超时保护
+    // 仅在解码线程读写，无需原子操作
+    double seekTargetStartTime_{0.0};
 
     // 媒体信息
     std::string filePath_;
@@ -488,6 +502,7 @@ private:
     std::unique_ptr<AVSync> avSync_;
     std::unique_ptr<AudioOutput> audioOutput_;
     std::unique_ptr<DashMerger> dashMerger_;  ///< DASH 流合并器（非 DASH 时为空）
+    ExtractedStream lastExtractedInfo_;       ///< DASH 流提取结果，seek 时重启 merger 复用
 
     // 网页视频提取相关
     std::string lastPageUrl_;   ///< 最近一次打开的网页 URL（用于下载功能）

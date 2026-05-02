@@ -71,7 +71,11 @@ private:
     std::atomic<bool> paused_{false};
 
     std::mutex pidMutex_;
-    int childPid_{0};  ///< yt-dlp 子进程 PID（实际为 pid_t，头文件避免暴露平台类型）
+#ifdef _WIN32
+    void* childProcessHandle_{nullptr};  ///< Windows HANDLE（void* 避免头文件引入 windows.h）
+#else
+    int childPid_{0};  ///< POSIX pid_t，用于 SIGSTOP/SIGCONT/SIGTERM
+#endif
 };
 
 } // namespace FluxPlayer

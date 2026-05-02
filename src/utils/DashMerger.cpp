@@ -17,6 +17,7 @@ extern "C" {
 
 #ifdef _WIN32
 #include <io.h>
+#include <fcntl.h>   // _O_BINARY
 #else
 #include <unistd.h>
 #endif
@@ -29,7 +30,8 @@ DashMerger::~DashMerger() {
 
 bool DashMerger::start(const std::string& videoUrl,
                        const std::string& audioUrl,
-                       const std::string& headers) {
+                       const std::string& headers,
+                       double startSeconds) {
     if (running_.load()) {
         LOG_WARN("DashMerger: 已在运行");
         return false;
@@ -49,8 +51,10 @@ bool DashMerger::start(const std::string& videoUrl,
     writeFd_ = pipefd[1];
     running_.store(true);
 
-    thread_ = std::thread(&DashMerger::mergeLoop, this, videoUrl, audioUrl, headers);
-    LOG_INFO("DashMerger: 启动 readFd=" + std::to_string(readFd_));
+    thread_ = std::thread(&DashMerger::mergeLoop, this,
+                          videoUrl, audioUrl, headers, startSeconds);
+    LOG_INFO("DashMerger: 启动 readFd=" + std::to_string(readFd_)
+             + " startSeconds=" + std::to_string(startSeconds));
     return true;
 }
 
@@ -88,7 +92,8 @@ void DashMerger::stop() {
 
 void DashMerger::mergeLoop(const std::string& videoUrl,
                             const std::string& audioUrl,
-                            const std::string& headers) {
+                            const std::string& headers,
+                            double startSeconds) {
     AVFormatContext* videoCtx = nullptr;
     AVFormatContext* audioCtx = nullptr;
     AVFormatContext* outCtx   = nullptr;
@@ -139,6 +144,16 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     }
     av_dict_free(&optsCopy);
     avformat_find_stream_info(audioCtx, nullptr);
+
+    // seek 重启场景：在两个 input 打开后调用 av_seek_frame 跳到目标位置。
+    // 与 "ss" 选项不同，此方式保留原始 PTS（不重置为 0），合并输出的 PTS
+    // 仍是绝对时间，Player 的 AClock/VClock 无需偏移修正。
+    // 源 m4s URL 支持 HTTP Range，FFmpeg 内部会发起 Range 请求拉取目标位置数据。
+    if (startSeconds > 0.0) {
+        int64_t seekTs = static_cast<int64_t>(startSeconds * AV_TIME_BASE);
+        av_seek_frame(videoCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD);
+        av_seek_frame(audioCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD);
+    }
 
     // 创建输出上下文，写入管道写端
     std::string pipeUrl = "pipe:" + std::to_string(writeFd_);

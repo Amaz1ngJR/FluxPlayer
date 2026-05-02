@@ -122,6 +122,8 @@ bool Player::open(const std::string& filePath) {
                 return false;
             }
             actualPath = dashMerger_->getPipeUrl();
+            // 保存提取信息，用于 seek 时通过 -ss 参数重启 merger（见 restartDashMerger）
+            lastExtractedInfo_ = info;
         } else {
             actualPath   = info.videoUrl;
             httpHeaders  = info.headers;
@@ -753,6 +755,24 @@ void Player::decodingThread() {
         // 处理 seek 请求
         processSeekRequest();
 
+        // ===== 解码循环级 seek 超时保护 =====
+        // enqueueVideoFrame 的超时依赖视频帧产生；若解码器因参考帧缺失等原因
+        // 长时间不产生帧（如 HW 降级后 SW 解码器仍有错误），超时永远不触发。
+        //
+        // 此处仅清除 decodingToTarget_ 标志，让后续到达的视频/音频帧按实际 PTS
+        // 自然重新校准 AV sync（见 enqueueVideoFrame / enqueueAudioFrame）。
+        // 不在此处主动 seekTo，避免误用旧目标位置造成大幅落点偏差。
+        if (decodingToTarget_.load()) {
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()
+                - seekTargetStartTime_;
+            if (elapsed > 2.0) {
+                decodingToTarget_.store(false);
+                LOG_WARN("Seek loop timeout (" + std::to_string(elapsed)
+                         + "s), no frames produced, awaiting next frame for resync");
+            }
+        }
+
         // ===== 网络流预缓冲完成检测 =====
         // 等待视频队列积累到 5 帧后再允许渲染线程取帧
         checkPrebufferComplete();
@@ -898,6 +918,13 @@ void Player::processSeekRequest() {
 
     LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
 
+    // DASH 流：pipe 输入不可 seek（matroska 流式生成无 cues 索引），
+    // 必须重启上游连接通过 HTTP Range 跳转
+    if (dashMerger_) {
+        restartDashMerger(seekTime);
+        return;
+    }
+
     // 执行 seek（将秒转换为微秒）
     int64_t seekTimestamp = static_cast<int64_t>(seekTime * 1000000);
     if (demuxer_->seek(seekTimestamp)) {
@@ -932,8 +959,74 @@ void Player::processSeekRequest() {
         // 快速丢弃所有中间帧，直到到达目标位置
         decodingToTarget_.store(true);
         decodeTargetPTS_.store(seekTime);
+        // 记录开始时间，用于超时保护（见 enqueueVideoFrame）
+        seekTargetStartTime_ = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
     }
+}
+
+/**
+ * DASH 流 seek：停止旧 merger，用 -ss 参数重启从 seekTime 开始下载
+ *
+ * 调用上下文：解码线程内（由 processSeekRequest 调用）。
+ * 不能 join 解码线程自身，但可以原地停止/重建 dashMerger_ 与 demuxer_。
+ *
+ * 不启用 decodingToTarget_：上游已经从 seekTime 开始返回数据，第一帧 PTS
+ * 就在目标附近，无需丢帧。直接通过 avSync_->seekTo 校准时钟即可。
+ */
+void Player::restartDashMerger(double seekTime) {
+    LOG_INFO("restartDashMerger: seekTime=" + std::to_string(seekTime));
+
+    // 停止旧 merger（其内部线程会被 join）
+    if (dashMerger_) {
+        dashMerger_->stop();
+        dashMerger_.reset();
+    }
+    // 重置 demuxer，关闭旧 pipe 读端
+    demuxer_.reset();
+
+    // 用 -ss 参数重启 merger，从指定时间开始下载
+    dashMerger_ = std::make_unique<DashMerger>();
+    if (!dashMerger_->start(lastExtractedInfo_.videoUrl,
+                            lastExtractedInfo_.audioUrl,
+                            lastExtractedInfo_.headers,
+                            seekTime)) {
+        LOG_ERROR("restartDashMerger: DashMerger 启动失败");
+        triggerError("DASH 流 seek 失败");
+        setState(PlayerState::ERRORED);
+        return;
+    }
+
+    // 重新打开 demuxer 读取新 pipe
+    demuxer_ = std::make_unique<Demuxer>();
+    bool opened = lastExtractedInfo_.headers.empty() && lastExtractedInfo_.duration == 0.0
+        ? demuxer_->open(dashMerger_->getPipeUrl())
+        : demuxer_->open(dashMerger_->getPipeUrl(),
+                         lastExtractedInfo_.headers,
+                         lastExtractedInfo_.duration);
+    if (!opened) {
+        LOG_ERROR("restartDashMerger: Demuxer 打开失败");
+        triggerError("DASH 流 seek 失败");
+        setState(PlayerState::ERRORED);
+        return;
+    }
+
+    // 清空解码器与队列
+    if (videoDecoder_) videoDecoder_->flush();
+    if (audioDecoder_) audioDecoder_->flush();
+    if (subtitleDecoder_) subtitleDecoder_->flush();
+    if (subtitleManager_) subtitleManager_->clear();
+    videoQueue_->flush();
+    audioQueue_->flush();
+    pendingAudioOffset_ = 0;
+
+    // 校准 AV 同步时钟到目标位置（上游已从 seekTime 开始流，PTS 保持原值）
+    avSync_->seekTo(seekTime);
+    currentAudioFramePTS_.store(seekTime);
+    samplesPlayedInFrame_.store(0);
+
+    LOG_INFO("restartDashMerger: 完成，从 " + std::to_string(seekTime) + "s 开始播放");
 }
 
 /**
@@ -1150,16 +1243,42 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
         double targetPTS = decodeTargetPTS_.load();
 
         if (framePTS < targetPTS - 0.001) {  // 允许1ms的误差
-            // **中间帧快速丢弃**（加速到达目标位置）
-            // 包括关键帧也丢弃，避免画面闪烁
-            rawFrame.unreference();
-            return true;
-            // 不打印日志，减少开销
+            // 超时保护：seek 落点远早于目标时（如文件损坏导致 FFmpeg 回退到更早位置），
+            // 避免长时间丢帧卡住，超过 2 秒后放弃精确跳转，从当前帧开始播放
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()
+                - seekTargetStartTime_;
+            if (elapsed > 2.0) {
+                decodingToTarget_.store(false);
+                // 超时后重新校准 AV 同步时钟到实际位置，
+                // 否则 AClock 仍指向旧目标，渲染循环会强制跳 VClock 导致进度条错误
+                avSync_->seekTo(framePTS);
+                currentAudioFramePTS_.store(framePTS);
+                samplesPlayedInFrame_.store(0);
+                LOG_WARN("Seek timeout (" + std::to_string(elapsed) +
+                         "s), giving up, playing from PTS=" + std::to_string(framePTS));
+                // fall through：将当前帧入队，从此处开始播放
+            } else {
+                rawFrame.unreference();
+                return true;
+            }
         }
         else {
             // **到达目标位置**
             decodingToTarget_.store(false);
-            LOG_INFO("Seek: Reached target PTS=" + std::to_string(framePTS));
+            // seek 落点偏移检测：FFmpeg 回退到更晚的关键帧时，
+            // 实际 PTS 可能远大于目标，需重新校准 AV 同步时钟，
+            // 否则音频输出仍期望从旧目标位置开始，导致 AQueue 耗尽、播放器冻结
+            if (framePTS - decodeTargetPTS_.load() > 1.0) {
+                avSync_->seekTo(framePTS);
+                currentAudioFramePTS_.store(framePTS);
+                samplesPlayedInFrame_.store(0);
+                LOG_WARN("Seek: actual PTS=" + std::to_string(framePTS)
+                         + " differs from target=" + std::to_string(decodeTargetPTS_.load())
+                         + ", recalibrating AV sync");
+            } else {
+                LOG_INFO("Seek: Reached target PTS=" + std::to_string(framePTS));
+            }
         }
     }
 
@@ -1211,10 +1330,22 @@ bool Player::enqueueAudioFrame(Frame& rawFrame) {
     if (decodingToTarget_.load()) {
         double targetPTS = decodeTargetPTS_.load();
 
-        if (audioPTS < targetPTS - 0.001) {  // 允许1ms的误差
+        if (audioPTS < targetPTS - 0.001) {
             // 音频帧在目标位置之前，直接丢弃（跳过格式转换）
             rawFrame.unreference();
             return true;
+        }
+
+        // seek 落点偏移检测：音频帧 PTS 远超目标（FFmpeg 回退到更晚位置），
+        // 立即重新校准 AV 同步时钟，无需等待视频帧到达，减少冻结时间
+        if (audioPTS - targetPTS > 2.0) {
+            decodingToTarget_.store(false);
+            avSync_->seekTo(audioPTS);
+            currentAudioFramePTS_.store(audioPTS);
+            samplesPlayedInFrame_.store(0);
+            LOG_WARN("Seek: audio PTS=" + std::to_string(audioPTS)
+                     + " far from target=" + std::to_string(targetPTS)
+                     + ", recalibrating early");
         }
     }
 
@@ -1787,6 +1918,8 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
         dashMerger_ = std::make_unique<DashMerger>();
         dashMerger_->start(info.videoUrl, info.audioUrl, info.headers);
         actualUrl = dashMerger_->getPipeUrl();
+        // 同步保存新画质的提取信息，供后续 seek 重启使用
+        lastExtractedInfo_ = info;
     } else {
         actualUrl = info.videoUrl;
         headers   = info.headers;
