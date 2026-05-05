@@ -135,9 +135,11 @@ bool Player::open(const std::string& filePath) {
 
     // 创建并打开解复用器
     demuxer_ = std::make_unique<Demuxer>();
+    LOG_INFO("Player::open: 开始打开 demuxer, actualPath=" + actualPath);
     bool opened = httpHeaders.empty() && knownDuration == 0.0
         ? demuxer_->open(actualPath)
         : demuxer_->open(actualPath, httpHeaders, knownDuration);
+    LOG_INFO("Player::open: demuxer 打开结果=" + std::string(opened ? "成功" : "失败"));
 
     if (!opened) {
         triggerError("Failed to open file: " + filePath);

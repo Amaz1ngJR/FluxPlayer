@@ -127,17 +127,48 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     // 打开视频流
     AVDictionary* optsCopy = nullptr;
     av_dict_copy(&optsCopy, opts, 0);
+    LOG_INFO("DashMerger: 正在打开视频流 urlLen=" + std::to_string(videoUrl.size())
+             + " headersLen=" + std::to_string(headers.size()));
+
+#ifdef _WIN32
+    // Windows SEH 保护：FFmpeg 打开 HTTPS 流时可能因 TLS/HTTP 错误崩溃（如 403），
+    // 用 SEH 捕获访问违规，防止合并线程崩溃导致整个进程终止
+    int openResult = -1;
+    __try {
+        openResult = avformat_open_input(&videoCtx, videoUrl.c_str(), nullptr, &optsCopy);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("DashMerger: 打开视频流时发生异常（SEH），URL 可能无效或需要登录 cookie");
+        av_dict_free(&optsCopy);
+        cleanup(); return;
+    }
+    if (openResult < 0) {
+#else
     if (avformat_open_input(&videoCtx, videoUrl.c_str(), nullptr, &optsCopy) < 0) {
+#endif
         LOG_ERROR("DashMerger: 打开视频流失败: " + videoUrl);
         av_dict_free(&optsCopy);
         cleanup(); return;
     }
     av_dict_free(&optsCopy);
     avformat_find_stream_info(videoCtx, nullptr);
+    LOG_INFO("DashMerger: 视频流打开成功");
 
     // 打开音频流
     av_dict_copy(&optsCopy, opts, 0);
+    LOG_INFO("DashMerger: 正在打开音频流...");
+#ifdef _WIN32
+    openResult = -1;
+    __try {
+        openResult = avformat_open_input(&audioCtx, audioUrl.c_str(), nullptr, &optsCopy);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG_ERROR("DashMerger: 打开音频流时发生异常（SEH），URL 可能无效或需要登录 cookie");
+        av_dict_free(&optsCopy);
+        cleanup(); return;
+    }
+    if (openResult < 0) {
+#else
     if (avformat_open_input(&audioCtx, audioUrl.c_str(), nullptr, &optsCopy) < 0) {
+#endif
         LOG_ERROR("DashMerger: 打开音频流失败: " + audioUrl);
         av_dict_free(&optsCopy);
         cleanup(); return;

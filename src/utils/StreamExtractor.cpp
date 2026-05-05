@@ -14,10 +14,12 @@
 #include <cstdio>
 #include <sstream>
 #include <algorithm>
+#include <filesystem>
 
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <shlobj.h>
 #else
 #include <unistd.h>
 #include <sys/wait.h>
@@ -203,6 +205,195 @@ std::string StreamExtractor::detectDefaultBrowser() {
 #endif
 }
 
+// ─────────────────────────────────────────────
+// Windows Cookie 数据库复制（绕过浏览器文件锁）
+// ─────────────────────────────────────────────
+
+#ifdef _WIN32
+
+/// 复制被浏览器锁住的文件（三级回退）
+/// 1. CreateFileA + 共享读标志（适用于共享锁）
+/// 2. esentutl /y（Windows 内置，可绕过部分排他锁）
+/// 3. robocopy /B（Backup 模式，使用 BackupRead API 绕过文件锁）
+static bool copyLockedFile(const std::string& src, const std::string& dst) {
+    // 策略 1：共享读标志直接复制
+    HANDLE hSrc = CreateFileA(
+        src.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hSrc != INVALID_HANDLE_VALUE) {
+        HANDLE hDst = CreateFileA(
+            dst.c_str(), GENERIC_WRITE, 0,
+            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hDst != INVALID_HANDLE_VALUE) {
+            constexpr DWORD kBufSize = 65536;
+            char buf[kBufSize];
+            DWORD bytesRead = 0, bytesWritten = 0;
+            bool ok = true;
+            while (ReadFile(hSrc, buf, kBufSize, &bytesRead, nullptr) && bytesRead > 0) {
+                if (!WriteFile(hDst, buf, bytesRead, &bytesWritten, nullptr)
+                    || bytesWritten != bytesRead) {
+                    ok = false;
+                    break;
+                }
+            }
+            CloseHandle(hSrc);
+            CloseHandle(hDst);
+            if (ok) {
+                LOG_INFO("copyLockedFile: CreateFile 复制成功 " + src);
+                return true;
+            }
+        } else {
+            CloseHandle(hSrc);
+        }
+    }
+    DWORD createFileErr = GetLastError();
+
+    // 策略 2：esentutl /y（Windows 内置工具，可复制被排他锁锁住的数据库文件）
+    {
+        std::string cmd = "esentutl /y \"" + src + "\" /d \"" + dst + "\" /o >nul 2>&1";
+        if (system(cmd.c_str()) == 0) {
+            LOG_INFO("copyLockedFile: esentutl 复制成功 " + src);
+            return true;
+        }
+    }
+
+    // 策略 3：robocopy /B（Backup 模式，使用 BackupRead API 绕过文件锁）
+    // robocopy 返回值 < 8 表示成功（0=无变化, 1=已复制）
+    {
+        size_t lastSlash = src.find_last_of("\\/");
+        if (lastSlash != std::string::npos) {
+            std::string srcDir  = src.substr(0, lastSlash);
+            std::string srcFile = src.substr(lastSlash + 1);
+            size_t dstSlash = dst.find_last_of("\\/");
+            std::string dstDir = (dstSlash != std::string::npos)
+                                 ? dst.substr(0, dstSlash) : ".";
+            std::string cmd = "robocopy \"" + srcDir + "\" \"" + dstDir
+                            + "\" \"" + srcFile + "\" /B /IS /NP /NJH /NJS >nul 2>&1";
+            int ret = system(cmd.c_str());
+            if (ret >= 0 && ret < 8) {
+                LOG_INFO("copyLockedFile: robocopy 复制成功 " + src);
+                return true;
+            }
+        }
+    }
+
+    LOG_WARN("copyLockedFile: 所有复制策略均失败 " + src
+             + " err=" + std::to_string(createFileErr));
+    return false;
+}
+
+/// 根据浏览器名称返回其 User Data 目录路径
+/// @param browser yt-dlp 浏览器名（chrome / edge）
+/// @return User Data 目录绝对路径，失败返回空
+static std::string getBrowserUserDataDir(const std::string& browser) {
+    char localAppData[MAX_PATH];
+    if (SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData) != S_OK) {
+        const char* env = std::getenv("LOCALAPPDATA");
+        if (!env) return "";
+        strncpy(localAppData, env, MAX_PATH - 1);
+        localAppData[MAX_PATH - 1] = '\0';
+    }
+
+    std::string base(localAppData);
+    if (browser == "edge")
+        return base + "\\Microsoft\\Edge\\User Data";
+    if (browser == "chrome")
+        return base + "\\Google\\Chrome\\User Data";
+    // 其他浏览器（Firefox 等）不走复制路径
+    return "";
+}
+
+/// 复制浏览器 cookie 数据库和解密密钥到应用缓存目录
+/// 缓存目录与 fluxplayer.ini 同级，卸载时一并删除。
+/// @param browser yt-dlp 浏览器名（chrome / edge）
+/// @return 成功时返回缓存中的 profile 路径（供 --cookies-from-browser 使用），失败返回空
+static std::string copyCookieDatabase(const std::string& browser) {
+    LOG_INFO("copyCookieDatabase: 进入函数 browser=" + browser);
+    std::string userDataDir = getBrowserUserDataDir(browser);
+    if (userDataDir.empty()) return "";
+
+    // 源文件路径
+    std::string srcCookies   = userDataDir + "\\Default\\Network\\Cookies";
+    std::string srcLocalState = userDataDir + "\\Local State";
+
+    // 目标路径：与 ini 同级的 browser_cookies 子目录
+    std::string cacheRoot = Config::getAppDataDir() + "\\browser_cookies\\" + browser;
+    std::string dstNetwork = cacheRoot + "\\Default\\Network";
+    std::string dstCookies = dstNetwork + "\\Cookies";
+    std::string dstLocalState = cacheRoot + "\\Local State";
+
+    LOG_INFO("copyCookieDatabase: src=" + srcCookies + " dst=" + dstCookies);
+
+    // 创建目录结构
+    try {
+        std::filesystem::create_directories(dstNetwork);
+    } catch (const std::exception& e) {
+        LOG_WARN("copyCookieDatabase: 创建目录失败 " + dstNetwork + " " + e.what());
+        return "";
+    }
+
+    LOG_INFO("copyCookieDatabase: 目录创建完成，开始复制 Cookies");
+
+    // 复制 cookie 数据库（必须成功）
+    if (!copyLockedFile(srcCookies, dstCookies)) {
+        LOG_WARN("copyCookieDatabase: 复制 Cookies 失败 " + srcCookies);
+        return "";
+    }
+
+    // 复制 Local State（含 AES 解密密钥，必须成功）
+    if (!copyLockedFile(srcLocalState, dstLocalState)) {
+        LOG_WARN("copyCookieDatabase: 复制 Local State 失败 " + srcLocalState);
+        return "";
+    }
+
+    LOG_INFO("copyCookieDatabase: 成功复制 " + browser + " cookie 到 " + cacheRoot);
+    // 返回 profile 路径，yt-dlp 会在其父目录找 Local State
+    return cacheRoot + "\\Default";
+}
+
+#endif // _WIN32
+
+std::string StreamExtractor::prepareCookieArg() {
+    const auto& cfg = Config::getInstance().get();
+
+    // cookiesBrowser = off 时，使用 cookiesFile 或不带 cookie
+    if (cfg.cookiesBrowser == "off" || cfg.cookiesBrowser.empty()) {
+        if (!cfg.cookiesFile.empty())
+            return " --cookies \"" + cfg.cookiesFile + "\"";
+        return "";
+    }
+
+    // 解析浏览器名称
+    std::string browser = (cfg.cookiesBrowser == "auto")
+        ? detectDefaultBrowser()
+        : cfg.cookiesBrowser;
+    if (browser.empty()) return "";
+
+#ifdef _WIN32
+    // Windows + Chromium 系浏览器：复制 cookie 数据库到缓存目录绕过文件锁
+    // Firefox 不受文件锁影响，直接走标准路径
+    if (browser == "chrome" || browser == "edge") {
+        LOG_INFO("prepareCookieArg: 开始复制 " + browser + " cookie 数据库");
+        std::string profilePath = copyCookieDatabase(browser);
+        LOG_INFO("prepareCookieArg: copyCookieDatabase 返回 profilePath=" + profilePath);
+        if (!profilePath.empty()) {
+            // 将反斜杠转为正斜杠，避免 yt-dlp 按 ':' 分割时把 C:\ 中的冒号误判为分隔符
+            std::replace(profilePath.begin(), profilePath.end(), '\\', '/');
+            std::string arg = " --cookies-from-browser " + browser + ":" + profilePath;
+            LOG_INFO("prepareCookieArg: " + arg);
+            return arg;
+        }
+        LOG_WARN("prepareCookieArg: cookie 数据库复制失败（浏览器后台进程锁住了文件），"
+                 "回退到直接读取。如需登录内容，请关闭 " + browser
+                 + " 所有窗口和后台进程后重试，或在配置中设置 cookiesFile 路径");
+    }
+#endif
+
+    // 非 Windows / Firefox / 复制失败时的标准路径
+    return " --cookies-from-browser " + browser;
+}
+
 std::string StreamExtractor::parseHeaders(const std::string& json) {
     // 优先从 requested_formats 第一个对象里提取（含完整 User-Agent）
     // 回退到顶层 http_headers
@@ -312,18 +503,8 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         ? "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
         : formatId;
 
-    // Cookie 配置（从 Config 读取）
-    std::string cookieArg;
-    const auto& cfg = Config::getInstance().get();
-    if (!cfg.cookiesBrowser.empty() && cfg.cookiesBrowser != "off") {
-        std::string browser = (cfg.cookiesBrowser == "auto")
-            ? detectDefaultBrowser()
-            : cfg.cookiesBrowser;
-        if (!browser.empty())
-            cookieArg = " --cookies-from-browser " + browser;
-    } else if (!cfg.cookiesFile.empty()) {
-        cookieArg = " --cookies \"" + cfg.cookiesFile + "\"";
-    }
+    // Cookie 配置（统一由 prepareCookieArg 构建，含 Windows 文件锁回退逻辑）
+    std::string cookieArg = prepareCookieArg();
 
     std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
                     + fmtArg + "\"" + cookieArg
@@ -333,10 +514,11 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     std::string json = runCommand(cmd, 30);
 
     // 若带 cookie 失败，自动降级为不带 cookie 重试
-    // 常见原因：app 进程无法访问浏览器 keychain（macOS 沙箱/权限限制）
+    // 常见原因：Windows 浏览器后台进程锁住 cookie 数据库 / macOS 沙箱权限限制
     if ((json.empty() || json[0] != '{') && !cookieArg.empty()) {
-        LOG_WARN("StreamExtractor: cookie 提取失败，降级重试（无 cookie）。原始输出: "
-                 + json.substr(0, 200));
+        LOG_WARN("StreamExtractor: cookie 方式失败，降级为无 cookie 重试。"
+                 "如需播放登录内容，请关闭浏览器所有窗口和后台进程后重试，"
+                 "或在配置中设置 cookiesFile。原始输出: " + json.substr(0, 200));
         std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
                         + fmtArg + "\" \"" + pageUrl + "\" 2>&1";
         json = runCommand(cmdNoCookie, 30);

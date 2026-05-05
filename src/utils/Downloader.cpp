@@ -10,12 +10,10 @@
 
 #include "FluxPlayer/utils/Downloader.h"
 #include "FluxPlayer/utils/Logger.h"
-#include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
 
 #include <cstdio>
 #include <array>
-#include <sstream>
 #include <vector>
 
 #ifdef _WIN32
@@ -143,17 +141,8 @@ void Downloader::downloadLoop(const std::string& pageUrl,
     // 构造 yt-dlp 命令
     // --newline: 每行输出进度（便于解析）
     // --continue: 支持断点续传
-    std::string cookieArg;
-    const auto& cfg = Config::getInstance().get();
-    if (!cfg.cookiesBrowser.empty() && cfg.cookiesBrowser != "off") {
-        std::string browser = (cfg.cookiesBrowser == "auto")
-            ? StreamExtractor::detectDefaultBrowser()
-            : cfg.cookiesBrowser;
-        if (!browser.empty())
-            cookieArg = " --cookies-from-browser " + browser;
-    } else if (!cfg.cookiesFile.empty()) {
-        cookieArg = " --cookies \"" + cfg.cookiesFile + "\"";
-    }
+    // Cookie 配置（统一由 prepareCookieArg 构建，含 Windows 文件锁回退逻辑）
+    std::string cookieArg = StreamExtractor::prepareCookieArg();
 
     std::string outputTemplate = outputDir + "/%(title)s.%(ext)s";
 #ifdef _WIN32
