@@ -8,6 +8,7 @@
 
 #include "FluxPlayer/utils/DashMerger.h"
 #include "FluxPlayer/utils/Logger.h"
+#include <chrono>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -23,6 +24,11 @@ extern "C" {
 #endif
 
 namespace FluxPlayer {
+
+static int dashInterruptCb(void* opaque) {
+    auto* deadline = static_cast<std::chrono::steady_clock::time_point*>(opaque);
+    return std::chrono::steady_clock::now() > *deadline ? 1 : 0;
+}
 
 DashMerger::~DashMerger() {
     stop();
@@ -94,10 +100,14 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
                             const std::string& audioUrl,
                             const std::string& headers,
                             double startSeconds) {
+    // Windows 上必须初始化 Winsock，否则 HTTP 请求会崩溃
+    LOG_INFO("DashMerger: 调用 avformat_network_init...");
+    avformat_network_init();
+    LOG_INFO("DashMerger: avformat_network_init 完成");
+
     AVFormatContext* videoCtx = nullptr;
     AVFormatContext* audioCtx = nullptr;
     AVFormatContext* outCtx   = nullptr;
-    AVDictionary*   opts      = nullptr;
 
     auto cleanup = [&]() {
         if (videoCtx) avformat_close_input(&videoCtx);
@@ -107,8 +117,7 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
                 avio_closep(&outCtx->pb);
             avformat_free_context(outCtx);
         }
-        if (opts) av_dict_free(&opts);
-        // 关闭写端通知 Demuxer EOF
+        // ��闭写端通知 Demuxer EOF
         if (writeFd_ >= 0) {
 #ifdef _WIN32
             _close(writeFd_);
@@ -119,61 +128,62 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         }
     };
 
-    // 注入 HTTP headers
-    if (!headers.empty())
-        av_dict_set(&opts, "headers", headers.c_str(), 0);
-    av_dict_set(&opts, "reconnect", "1", 0);
-
     // 打开视频流
     AVDictionary* optsCopy = nullptr;
-    av_dict_copy(&optsCopy, opts, 0);
+    // 不使用 av_dict_copy，直接重新设置选项，避免跨 DLL 内存问题
+    LOG_INFO("DashMerger: headers.size()=" + std::to_string(headers.size()));
+    if (!headers.empty()) {
+        LOG_INFO("DashMerger: 即将调用 av_dict_set...");
+        av_dict_set(&optsCopy, "headers", headers.c_str(), 0);
+        LOG_INFO("DashMerger: av_dict_set 完成");
+    }
     LOG_INFO("DashMerger: 正在打开视频流 urlLen=" + std::to_string(videoUrl.size())
              + " headersLen=" + std::to_string(headers.size()));
+    LOG_INFO("DashMerger: videoUrl scheme=" + videoUrl.substr(0, std::min<size_t>(8, videoUrl.size())));
 
-#ifdef _WIN32
-    // Windows SEH 保护：FFmpeg 打开 HTTPS 流时可能因 TLS/HTTP 错误崩溃（如 403），
-    // 用 SEH 捕获访问违规，防止合并线程崩溃导致整个进程终止
-    int openResult = -1;
-    __try {
-        openResult = avformat_open_input(&videoCtx, videoUrl.c_str(), nullptr, &optsCopy);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("DashMerger: 打开视频流时发生异常（SEH），URL 可能无效或需要登录 cookie");
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    videoCtx = avformat_alloc_context();
+    if (!videoCtx) {
+        LOG_ERROR("DashMerger: avformat_alloc_context 返回 null");
         av_dict_free(&optsCopy);
         cleanup(); return;
     }
-    if (openResult < 0) {
-#else
-    if (avformat_open_input(&videoCtx, videoUrl.c_str(), nullptr, &optsCopy) < 0) {
-#endif
-        LOG_ERROR("DashMerger: 打开视频流失败: " + videoUrl);
+    // 暂时禁用 interrupt_callback 以排查崩溃
+    videoCtx->interrupt_callback = {dashInterruptCb, &deadline};
+    LOG_INFO("DashMerger: 即将调用 avformat_open_input...(无 interrupt_callback)");
+
+    int openRet = avformat_open_input(&videoCtx, videoUrl.c_str(), nullptr, &optsCopy);
+    LOG_INFO("DashMerger: avformat_open_input 返回 " + std::to_string(openRet));
+    if (openRet < 0) {
+        char errbuf[128];
+        av_strerror(openRet, errbuf, sizeof(errbuf));
+        LOG_ERROR("DashMerger: 打开视频流失败: " + std::string(errbuf));
         av_dict_free(&optsCopy);
         cleanup(); return;
     }
     av_dict_free(&optsCopy);
+    LOG_INFO("DashMerger: avformat_open_input 视频成功，获取流信息中...");
     avformat_find_stream_info(videoCtx, nullptr);
     LOG_INFO("DashMerger: 视频流打开成功");
 
     // 打开音频流
-    av_dict_copy(&optsCopy, opts, 0);
+    optsCopy = nullptr;
+    if (!headers.empty())
+        av_dict_set(&optsCopy, "headers", headers.c_str(), 0);
     LOG_INFO("DashMerger: 正在打开音频流...");
-#ifdef _WIN32
-    openResult = -1;
-    __try {
-        openResult = avformat_open_input(&audioCtx, audioUrl.c_str(), nullptr, &optsCopy);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG_ERROR("DashMerger: 打开音频流时发生异常（SEH），URL 可能无效或需要登录 cookie");
-        av_dict_free(&optsCopy);
-        cleanup(); return;
-    }
-    if (openResult < 0) {
-#else
+
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    audioCtx = avformat_alloc_context();
+    // 暂时禁用 interrupt_callback 排查崩溃
+    audioCtx->interrupt_callback = {dashInterruptCb, &deadline};
+
     if (avformat_open_input(&audioCtx, audioUrl.c_str(), nullptr, &optsCopy) < 0) {
-#endif
         LOG_ERROR("DashMerger: 打开音频流失败: " + audioUrl);
         av_dict_free(&optsCopy);
         cleanup(); return;
     }
     av_dict_free(&optsCopy);
+    LOG_INFO("DashMerger: avformat_open_input 音频成功，获取流信息中...");
     avformat_find_stream_info(audioCtx, nullptr);
 
     // seek 重启场景：在两个 input 打开后调用 av_seek_frame 跳到目标位置。

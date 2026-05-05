@@ -25,6 +25,10 @@
 #include <string>
 #include <memory>
 
+extern "C" {
+#include <libavformat/avformat.h>
+}
+
 using namespace FluxPlayer;
 
 /**
@@ -190,6 +194,11 @@ int main(int argc, char* argv[]) {
 #endif
     LOG_INFO("=== FluxPlayer V2 Starting ===");
     LOG_INFO("Refactored with Player class architecture");
+
+    // 初始化 FFmpeg 网络子系统（Windows 上初始化 Winsock，DASH 流需要）
+    avformat_network_init();
+    // 在主线程预热 FFmpeg 内存分配，避免子线程首次分配时 CRT 死锁
+    { AVDictionary* d = nullptr; av_dict_set(&d, "x", "x", 0); av_dict_free(&d); }
 
     // 全局初始化 GLFW（整个程序生命周期只初始化一次）
     if (!glfwInit()) {
