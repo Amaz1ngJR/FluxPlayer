@@ -122,6 +122,9 @@ bool Player::open(const std::string& filePath) {
                 return false;
             }
             actualPath = dashMerger_->getPipeUrl();
+            // 等待合并线程完成 FFmpeg 初始化，避免和 Demuxer 竞态崩溃
+            dashMerger_->waitReady();
+            LOG_INFO("Player::open: waitReady 返回, actualPath=" + actualPath);
             // 保存提取信息，用于 seek 时通过 -ss 参数重启 merger（见 restartDashMerger）
             lastExtractedInfo_ = info;
         } else {
@@ -1002,6 +1005,7 @@ void Player::restartDashMerger(double seekTime) {
 
     // 重新打开 demuxer 读取新 pipe
     demuxer_ = std::make_unique<Demuxer>();
+    dashMerger_->waitReady();
     bool opened = lastExtractedInfo_.headers.empty() && lastExtractedInfo_.duration == 0.0
         ? demuxer_->open(dashMerger_->getPipeUrl())
         : demuxer_->open(dashMerger_->getPipeUrl(),
@@ -1928,6 +1932,7 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     }
 
     demuxer_ = std::make_unique<Demuxer>();
+    if (info.isDash) dashMerger_->waitReady();
     bool opened = headers.empty() && info.duration == 0.0
         ? demuxer_->open(actualUrl)
         : demuxer_->open(actualUrl, headers, info.duration);

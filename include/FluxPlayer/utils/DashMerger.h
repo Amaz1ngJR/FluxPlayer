@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <chrono>
 
 namespace FluxPlayer {
 
@@ -40,7 +41,7 @@ public:
 
     /**
      * @brief 返回 Demuxer 可传给 avformat_open_input 的 URL
-     * 格式为 "pipe:N"（N 为可读端 fd）
+     * Windows 上返回命名管道路径，其他平台返回 "pipe:N"
      */
     std::string getPipeUrl() const;
 
@@ -48,6 +49,9 @@ public:
     void stop();
 
     bool isRunning() const { return running_.load(); }
+
+    /// 等待合并线程完成 FFmpeg 初始化（打开输入流），避免和 Demuxer 竞态
+    void waitReady() const { while (!ready_.load() && running_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
 
 private:
     /// 合并线程主函数
@@ -58,8 +62,15 @@ private:
 
     std::thread thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> ready_{false};   ///< 合并线程已完成 FFmpeg 初始化，可以开始写数据
+#ifdef _WIN32
+    std::string pipeName_;  ///< Windows 命名管道名称
+    void*       pipeHandle_ = nullptr;  ///< 服务端句柄（写端）
+    void*       stopEvent_  = nullptr;  ///< 用于中断 ConnectNamedPipe 等待
+#else
     int readFd_  = -1;  ///< 管道读端，传给 Demuxer
     int writeFd_ = -1;  ///< 管道写端，合并线程写入
+#endif
 };
 
 } // namespace FluxPlayer

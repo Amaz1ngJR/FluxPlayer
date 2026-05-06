@@ -21,9 +21,12 @@
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include <GLFW/glfw3.h>
-#include <iostream>
 #include <string>
 #include <memory>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -177,6 +180,9 @@ static std::string playMedia(const std::string& mediaPath) {
  * - glfwTerminate() 在程序退出前调用一次（已从 Window::destroy 中移除）
  */
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    SetConsoleOutputCP(65001);
+#endif
     // 加载配置
     Config::getInstance().load();
 
