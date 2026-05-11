@@ -134,7 +134,8 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
     LOG_INFO("Video decoder initialized successfully" +
              std::string(isHWAccelActive() ? " [HW]" : " [SW]"));
     LOG_INFO("Resolution: " + std::to_string(m_width) + "x" + std::to_string(m_height));
-    LOG_INFO("Pixel Format: " + std::string(av_get_pix_fmt_name(m_pixelFormat)));
+    const char* pixFmtName = av_get_pix_fmt_name(m_pixelFormat);
+    LOG_INFO("Pixel Format: " + std::string(pixFmtName ? pixFmtName : "unknown"));
 
     return true;
 }
@@ -430,7 +431,8 @@ bool VideoDecoder::prepareFrame(AVFrame* srcFrame, Frame& dstFrame) {
 
         if (!m_swsCtx) {
             LOG_DEBUG("Creating SwsContext for pixel format conversion");
-            LOG_DEBUG("Source format: " + std::string(av_get_pix_fmt_name(processFmt)));
+            const char* srcFmtName = av_get_pix_fmt_name(processFmt);
+            LOG_DEBUG("Source format: " + std::string(srcFmtName ? srcFmtName : "unknown"));
 
             m_swsCtx = sws_getContext(
                 frameToProcess->width, frameToProcess->height, processFmt,
@@ -464,8 +466,9 @@ bool VideoDecoder::prepareFrame(AVFrame* srcFrame, Frame& dstFrame) {
     dstFrame.setPTS(srcFrame->pts * av_q2d(m_timeBase));
     dstFrame.setType(FrameType::VIDEO);
 
+    const char* fmtName = av_get_pix_fmt_name(processFmt);
     LOG_DEBUG("Frame prepared successfully (format: " +
-              std::string(av_get_pix_fmt_name(processFmt)) + ")");
+              std::string(fmtName ? fmtName : "unknown") + ")");
     return true;
 }
 

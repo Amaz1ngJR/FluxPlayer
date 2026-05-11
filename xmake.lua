@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 -- 项目基本信息
 set_project("FluxPlayer")
-set_version("0.1.0")
+set_version("0.2.0")
 set_languages("cxx17")  -- 要求 C++17 标准
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
@@ -217,6 +217,7 @@ target("FluxPlayer")
     elseif is_plat("windows") then
         local ytdlp_path = path.join(os.projectdir(), "third_party/yt-dlp/yt-dlp.exe")
         if os.isfile(ytdlp_path) then
+            ytdlp_path = ytdlp_path:gsub("\\", "/")
             add_defines('YTDLP_BUNDLED_PATH="' .. ytdlp_path .. '"')
         end
     end

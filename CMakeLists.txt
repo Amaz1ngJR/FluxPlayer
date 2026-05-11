@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.1.0 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.2.0 LANGUAGES C CXX)
 
 # 要求使用 C++17 标准，且不允许降级
 set(CMAKE_CXX_STANDARD 17)
@@ -195,6 +195,7 @@ elseif(WIN32)
 else()
     set(YTDLP_BUNDLED_PATH "")
 endif()
+string(REPLACE "\\" "/" YTDLP_BUNDLED_PATH "${YTDLP_BUNDLED_PATH}")
 if(EXISTS "${YTDLP_BUNDLED_PATH}")
     target_compile_definitions(FluxPlayer PRIVATE
         YTDLP_BUNDLED_PATH="${YTDLP_BUNDLED_PATH}")

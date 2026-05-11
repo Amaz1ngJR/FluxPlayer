@@ -91,7 +91,8 @@ bool AudioDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
     LOG_INFO("Audio decoder initialized successfully");
     LOG_INFO("Sample Rate: " + std::to_string(m_sampleRate) + " Hz");
     LOG_INFO("Channels: " + std::to_string(m_channels));
-    LOG_INFO("Sample Format: " + std::string(av_get_sample_fmt_name(m_sampleFormat)));
+    const char* fmtName = av_get_sample_fmt_name(m_sampleFormat);
+    LOG_INFO("Sample Format: " + std::string(fmtName ? fmtName : "unknown"));
 
     // 初始化音频重采样器 (SwrContext)
     // 将解码后的音频转换为 16-bit PCM 交错格式
@@ -246,6 +247,11 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
         return false;
     }
 
+    if (srcFrame->nb_samples <= 0) {
+        LOG_WARN("Source frame has no samples, skipping");
+        return false;
+    }
+
     // 计算输出采样数（考虑重采样器内部延迟）
     int outSamples = av_rescale_rnd(
         swr_get_delay(m_swrCtx, m_sampleRate) + srcFrame->nb_samples,
@@ -253,6 +259,11 @@ bool AudioDecoder::convertToS16(AVFrame* srcFrame, Frame& dstFrame) {
         m_sampleRate,
         AV_ROUND_UP
     );
+
+    if (outSamples <= 0) {
+        LOG_WARN("Calculated outSamples <= 0, skipping");
+        return false;
+    }
 
     // 直接在目标 AVFrame 上分配缓冲区，让 swr_convert 直接写入
     // 省去中间临时 buffer 的分配和 memcpy

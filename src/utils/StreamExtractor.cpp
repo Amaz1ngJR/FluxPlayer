@@ -510,7 +510,13 @@ bool StreamExtractor::extract(const std::string& pageUrl,
                                ExtractedStream& out,
                                std::string& error) {
     if (!isAvailable()) {
+#ifdef _WIN32
+        error = "yt-dlp 未安装，请将 yt-dlp.exe 放入 third_party/yt-dlp/ 或添加到系统 PATH";
+#elif defined(__APPLE__)
         error = "yt-dlp 未安装，请运行: brew install yt-dlp";
+#else
+        error = "yt-dlp 未安装，请运行: sudo apt install yt-dlp 或 pip install yt-dlp";
+#endif
         return false;
     }
 
