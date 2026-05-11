@@ -37,6 +37,7 @@
 - 🍪 浏览器 Cookie 自动读取，支持会员内容播放（自动检测系统默认浏览器）
 - 📥 视频下载功能，支持进度/速度/文件大小/ETA 显示，可暂停/恢复/取消，取消时自动清理临时文件
 - 🎯 画质切换（360P / 480P / 720P / 1080P），切换时保持播放位置
+- 🔒 网络代理支持（HTTP/SOCKS5），默认 127.0.0.1:7890，可配置开关
 
 ## 技术栈
 | 组件 | 技术 |
@@ -340,7 +341,11 @@ cookiesBrowser=auto
 
 ```ini
 # FluxPlayer Configuration
-# 配置文件自动生成在平台标准缓存目录，修改后切换界面时自动重载生效。
+# 配置文件自动生成在平台标准缓存目录：
+#   macOS:   ~/Library/Caches/FluxPlayer/fluxplayer.ini
+#   Windows: %LOCALAPPDATA%\FluxPlayer\fluxplayer.ini
+#   Linux:   ~/.cache/FluxPlayer/fluxplayer.ini
+# 修改后切换界面时自动重载生效。
 
 [Audio]
 # volume: 音量 (0.0 ~ 1.0)
@@ -352,8 +357,12 @@ logLevel=INFO
 # tcpLogPort: TCP 远程日志端口 (用 nc ip port 查看实时日志)
 tcpLogPort=9999
 # logFileEnabled: 是否将日志写入文件 (true / false)
+# 默认：false
 logFileEnabled=false
 # logFilePath: 日志文件路径（留空则使用默认路径）
+#   macOS:   ~/Library/Caches/FluxPlayer/fluxplayer.log
+#   Windows: %LOCALAPPDATA%\FluxPlayer\fluxplayer.log
+#   Linux:   ~/.cache/FluxPlayer/fluxplayer.log
 logFilePath=
 
 [Window]
@@ -386,12 +395,18 @@ frameInterpolation=true
 
 [Screenshot]
 # screenshotDir: 截图保存目录（默认为平台缓存目录下的 Screenshot 子目录）
+#   macOS:   ~/Library/Caches/FluxPlayer/Screenshot
+#   Windows: %LOCALAPPDATA%\FluxPlayer\Screenshot
+#   Linux:   ~/.cache/FluxPlayer/Screenshot
 screenshotDir=Screenshot
 # screenshotFormat: 截图格式 (png / jpg)
 screenshotFormat=png
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）
+#   macOS:   ~/Library/Caches/FluxPlayer/Record
+#   Windows: %LOCALAPPDATA%\FluxPlayer\Record
+#   Linux:   ~/.cache/FluxPlayer/Record
 recordDir=Record
 # recordQuality: 录像质量 (low / medium / high / original)
 # low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流
@@ -412,6 +427,30 @@ subtitleFontScale=1.4
 # subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)
 # 推荐字体：macOS=PingFang.ttc, Windows=msyh.ttc, Linux=NotoSansCJK-Regular.ttc
 subtitleFontPath=
+
+[Stream]
+# 说明：从指定浏览器读取 cookies，用于播放需要登录的内容（如会员视频）
+# 取值：chrome / safari / firefox / edge / auto（自动检测系统默认浏览器）/ off（禁用）
+# 默认：auto
+cookiesBrowser=auto
+# 说明：cookies.txt 文件路径（Netscape 格式），cookiesBrowser = off 时生效
+# 取值：绝对路径，留空则不使用
+# 默认：（空）
+cookiesFile=
+
+[Proxy]
+# 说明：是否启用网络代理（用于访问需要代理的流媒体，如 YouTube）
+# 取值：true / false
+# 默认：true
+proxyEnabled=true
+# 说明：HTTP/HTTPS 代理地址，FFmpeg 打开 http/https 流时使用
+# 取值：完整代理 URL
+# 默认：http://127.0.0.1:7890
+httpProxy=http://127.0.0.1:7890
+# 说明：SOCKS5 代理地址（备用，部分协议可能使用）
+# 取值：完整代理 URL
+# 默认：socks5://127.0.0.1:7890
+socksProxy=socks5://127.0.0.1:7890
 ```
 
 录像质量说明：

@@ -7,6 +7,7 @@
 
 #include "FluxPlayer/decoder/Demuxer.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Config.h"
 
 namespace FluxPlayer {
 
@@ -105,6 +106,15 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
         av_dict_set(&options, "stimeout", "5000000", 0);      // 连接超时 5 秒
         av_dict_set(&options, "buffer_size", "1048576", 0);   // 1MB 接收缓冲区，减少丢包
         LOG_DEBUG("RTSP options: tcp, stimeout=5s, buffer_size=1MB");
+    }
+
+    // === 代理设置 ===
+    const auto& cfg = Config::getInstance().get();
+    if (cfg.proxyEnabled && !cfg.httpProxy.empty()) {
+        if (filename.find("http://") == 0 || filename.find("https://") == 0) {
+            av_dict_set(&options, "http_proxy", cfg.httpProxy.c_str(), 0);
+            LOG_DEBUG("Proxy enabled: " + cfg.httpProxy);
+        }
     }
 
     // === RTMP 专用选项 ===

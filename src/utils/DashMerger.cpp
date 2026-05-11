@@ -11,6 +11,7 @@
 
 #include "FluxPlayer/utils/DashMerger.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Config.h"
 #include <chrono>
 
 extern "C" {
@@ -229,6 +230,13 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     // ── 第一阶段：打开远程流，准备输出上下文 ──
     AVDictionary* optsCopy = nullptr;
     av_dict_set(&optsCopy, "headers", headers.c_str(), 0);
+
+    const auto& cfg = Config::getInstance().get();
+    if (cfg.proxyEnabled && !cfg.httpProxy.empty()) {
+        av_dict_set(&optsCopy, "http_proxy", cfg.httpProxy.c_str(), 0);
+        LOG_INFO("DashMerger: 使用代理 " + cfg.httpProxy);
+    }
+
     LOG_INFO("DashMerger: 正在打开视频流...");
 
     InterruptCtx intCtx{std::chrono::steady_clock::now() + std::chrono::seconds(15), &running_};
@@ -256,6 +264,8 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     optsCopy = nullptr;
     if (!headers.empty())
         av_dict_set(&optsCopy, "headers", headers.c_str(), 0);
+    if (cfg.proxyEnabled && !cfg.httpProxy.empty())
+        av_dict_set(&optsCopy, "http_proxy", cfg.httpProxy.c_str(), 0);
 
     intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     audioCtx = avformat_alloc_context();

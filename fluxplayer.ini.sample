@@ -95,3 +95,17 @@ cookiesBrowser=auto
 # 取值：绝对路径，留空则不使用
 # 默认：（空）
 cookiesFile=
+
+[Proxy]
+# 说明：是否启用网络代理（用于访问需要代理的流媒体，如 YouTube）
+# 取值：true / false
+# 默认：true
+proxyEnabled=true
+# 说明：HTTP/HTTPS 代理地址，FFmpeg 打开 http/https 流时使用
+# 取值：完整代理 URL
+# 默认：http://127.0.0.1:7890
+httpProxy=http://127.0.0.1:7890
+# 说明：SOCKS5 代理地址（备用，部分协议可能使用）
+# 取值：完整代理 URL
+# 默认：socks5://127.0.0.1:7890
+socksProxy=socks5://127.0.0.1:7890

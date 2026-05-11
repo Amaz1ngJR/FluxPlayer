@@ -141,6 +141,9 @@ bool Config::load() {
                 else if (key == "frameInterpolation") settings_.frameInterpolation = (value == "true" || value == "1");
                 else if (key == "cookiesBrowser") settings_.cookiesBrowser = value;
                 else if (key == "cookiesFile") settings_.cookiesFile = value;
+                else if (key == "proxyEnabled") settings_.proxyEnabled = (value == "true" || value == "1");
+                else if (key == "httpProxy") settings_.httpProxy = value;
+                else if (key == "socksProxy") settings_.socksProxy = value;
             }
 
             lastModTime_ = getFileModTime();
@@ -238,6 +241,18 @@ bool Config::save() {
     file << "# 取值：绝对路径，留空则不使用\n";
     file << "# 默认：（空）\n";
     file << "cookiesFile=" << settings_.cookiesFile << "\n";
+
+    file << "\n[Proxy]\n";
+    file << "# 说明：是否启用网络代理（用于访问需要代理的流媒体）\n";
+    file << "# 取值：true / false\n";
+    file << "# 默认：true\n";
+    file << "proxyEnabled=" << (settings_.proxyEnabled ? "true" : "false") << "\n";
+    file << "# 说明：HTTP/HTTPS 代理地址\n";
+    file << "# 默认：http://127.0.0.1:7890\n";
+    file << "httpProxy=" << settings_.httpProxy << "\n";
+    file << "# 说明：SOCKS5 代理地址（部分协议可能使用）\n";
+    file << "# 默认：socks5://127.0.0.1:7890\n";
+    file << "socksProxy=" << settings_.socksProxy << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
     return true;

@@ -37,6 +37,11 @@ public:
         /// cookies.txt 文件路径（cookiesBrowser = off 时生效）
         std::string cookiesFile;
 
+        // ==================== 网络代理设置 ====================
+        std::string httpProxy = "http://127.0.0.1:7890";    ///< HTTP/HTTPS 代理
+        std::string socksProxy = "socks5://127.0.0.1:7890"; ///< SOCKS5 代理（备用）
+        bool proxyEnabled = true;                            ///< 代理总开关
+
         // ==================== 播放速度设置 ====================
         double playbackSpeed = 1.0;           ///< 默认播放速度（0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0）
         bool frameInterpolation = true;       ///< 慢放时是否启用帧插值（关闭则使用简单重复帧）
