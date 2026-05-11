@@ -145,6 +145,9 @@ public:
     /// 获取最近一次打开的网页 URL（用于画质切换和下载）
     const std::string& getLastPageUrl() const { return lastPageUrl_; }
 
+    /// 获取最近一次提取的流信息（含画质列表、上传者等）
+    const ExtractedStream& getLastExtractedInfo() const { return lastExtractedInfo_; }
+
     /**
      * 是否正在播放
      */

@@ -111,6 +111,75 @@ bool Player::open(const std::string& filePath) {
             return false;
         }
 
+        // ==================== 输出视频信息到日志 ====================
+        LOG_INFO("========================================");
+        LOG_INFO("  视频信息");
+        LOG_INFO("========================================");
+        LOG_INFO("  标题:     " + (info.title.empty() ? "未知" : info.title));
+
+        // 时长格式化
+        if (info.duration > 0.0) {
+            int total = static_cast<int>(info.duration);
+            int h = total / 3600;
+            int m = (total % 3600) / 60;
+            int s = total % 60;
+            char durBuf[32];
+            if (h > 0) {
+                snprintf(durBuf, sizeof(durBuf), "%02d:%02d:%02d", h, m, s);
+            } else {
+                snprintf(durBuf, sizeof(durBuf), "%02d:%02d", m, s);
+            }
+            LOG_INFO("  时长:     " + std::string(durBuf));
+        } else {
+            LOG_INFO("  时长:     直播/未知");
+        }
+
+        // 上传者
+        if (!info.uploader.empty()) {
+            LOG_INFO("  上传者:   " + info.uploader);
+        }
+
+        // 平台
+        if (!info.platform.empty()) {
+            LOG_INFO("  平台:     " + info.platform);
+        }
+
+        // 播放量
+        if (info.viewCount >= 0) {
+            // 格式化为带千分位的数字
+            std::string viewStr = std::to_string(info.viewCount);
+            std::string formatted;
+            int count = 0;
+            for (auto it = viewStr.rbegin(); it != viewStr.rend(); ++it) {
+                if (count > 0 && count % 3 == 0) formatted = ',' + formatted;
+                formatted = *it + formatted;
+                ++count;
+            }
+            LOG_INFO("  播放量:   " + formatted);
+        }
+
+        // 上传日期
+        if (!info.uploadDate.empty()) {
+            LOG_INFO("  上传日期: " + info.uploadDate);
+        }
+
+        // 分辨率
+        if (info.width > 0 && info.height > 0) {
+            LOG_INFO("  分辨率:   " + std::to_string(info.width) + "x" + std::to_string(info.height));
+        }
+
+        // 可用画质列表
+        if (!info.qualities.empty()) {
+            std::string qualityStr = "  可用画质: ";
+            for (size_t i = 0; i < info.qualities.size(); ++i) {
+                if (i > 0) qualityStr += ", ";
+                qualityStr += info.qualities[i].label;
+            }
+            LOG_INFO(qualityStr);
+        }
+
+        LOG_INFO("========================================");
+
         knownDuration = info.duration;
 
         if (info.isDash) {
@@ -130,6 +199,8 @@ bool Player::open(const std::string& filePath) {
         } else {
             actualPath   = info.videoUrl;
             httpHeaders  = info.headers;
+            // 非 DASH 流也保存提取信息，用于画质切换
+            lastExtractedInfo_ = info;
         }
     }
 
@@ -236,6 +307,39 @@ bool Player::open(const std::string& filePath) {
 
     // 创建音视频同步器
     avSync_ = std::make_unique<AVSync>(clockType);
+
+    // 同步画质列表到 Controller（网页视频专用）
+    if (controller_ && !lastPageUrl_.empty() && !lastExtractedInfo_.qualities.empty()) {
+        std::vector<Controller::QualityItem> qualities;
+        for (const auto& q : lastExtractedInfo_.qualities) {
+            Controller::QualityItem item;
+            item.formatId = q.formatId;
+            item.label = q.label;
+            qualities.push_back(item);
+        }
+        // 当前画质：如果有 selectedFormatId 则查找对应 label，否则取第一个（最高画质）
+        std::string currentLabel;
+        if (!lastExtractedInfo_.selectedFormatId.empty()) {
+            for (const auto& q : lastExtractedInfo_.qualities) {
+                if (q.formatId == lastExtractedInfo_.selectedFormatId) {
+                    currentLabel = q.label;
+                    break;
+                }
+            }
+        }
+        if (currentLabel.empty() && !qualities.empty()) {
+            currentLabel = qualities[0].label;
+        }
+        controller_->setQualities(qualities, currentLabel);
+
+        // 同步网页视频扩展信息到 Controller
+        controller_->setWebVideoInfo(
+            lastExtractedInfo_.uploader,
+            lastExtractedInfo_.platform,
+            lastExtractedInfo_.viewCount,
+            lastExtractedInfo_.uploadDate
+        );
+    }
 
     setState(PlayerState::STOPPED);
     LOG_INFO("File opened successfully");
@@ -1910,7 +2014,10 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     }
 
     // 停止解码线程，重置解复用器
+    // 先 flush 队列解除解码线程的阻塞（pause 后消费者停止，解码线程可能卡在 push）
     shouldQuit_.store(true);
+    if (videoQueue_) videoQueue_->flush();
+    if (audioQueue_) audioQueue_->flush();
     if (decodingThread_ && decodingThread_->joinable()) decodingThread_->join();
     shouldQuit_.store(false);
 
@@ -1922,9 +2029,9 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     std::string headers;
     if (info.isDash) {
         dashMerger_ = std::make_unique<DashMerger>();
-        dashMerger_->start(info.videoUrl, info.audioUrl, info.headers);
+        // 直接用 seekTime 启动 merger（-ss 参数），避免在 pipe 上 seek
+        dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime);
         actualUrl = dashMerger_->getPipeUrl();
-        // 同步保存新画质的提取信息，供后续 seek 重启使用
         lastExtractedInfo_ = info;
     } else {
         actualUrl = info.videoUrl;
@@ -1943,15 +2050,42 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
         return false;
     }
 
-    // 刷新解码器缓冲区
-    if (videoDecoder_) videoDecoder_->flush();
-    if (audioDecoder_) audioDecoder_->flush();
+    // 用新流的 codec 参数重新初始化解码器（画质切换后编码参数可能不同）
+    videoDecoder_.reset();
+    audioDecoder_.reset();
+    if (!initDecoders()) {
+        LOG_ERROR("switchQuality: 解码器初始化失败");
+        setState(PlayerState::ERRORED);
+        return false;
+    }
+
+    // 更新渲染器纹理尺寸（新画质分辨率可能不同）
+    if (renderer_) {
+        renderer_->setVideoSize(videoWidth_, videoHeight_);
+    }
+
     videoQueue_->flush();
     audioQueue_->flush();
 
-    // 重启解码线程并 seek 到原位置
+    // 在解码线程启动前直接 seek，避免通过异步机制产生竞态
+    if (seekTime > 0.0) {
+        // DASH 流：merger 已用 -ss seekTime 启动，pipe 不可 seek，只更新时钟
+        if (!info.isDash) {
+            int64_t seekTs = static_cast<int64_t>(seekTime * 1000000);
+            demuxer_->seek(seekTs);
+        }
+        avSync_->seekTo(seekTime);
+        currentAudioFramePTS_.store(seekTime);
+        samplesPlayedInFrame_.store(0);
+    }
+
     decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
-    if (seekTime > 0.0) seek(seekTime);
+
+    // 恢复音频输出（pause() 暂停了它，不恢复则音频时钟不推进，视频也卡死）
+    if (audioOutput_) {
+        audioOutput_->resume();
+    }
+    avSync_->resume();
 
     setState(PlayerState::PLAYING);
     LOG_INFO("switchQuality: 切换成功");

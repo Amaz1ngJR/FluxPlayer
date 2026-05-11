@@ -32,6 +32,12 @@ struct ExtractedStream {
     int height = 0;
     std::vector<QualityOption> qualities;  ///< 所有可用画质
     std::string selectedFormatId;          ///< 当前选中的 format_id
+
+    // 扩展信息（用于日志输出）
+    std::string uploader;              ///< 上传者
+    std::string platform;              ///< 平台名称（BiliBili/YouTube 等）
+    int64_t viewCount = -1;            ///< 播放量（-1 表示未知）
+    std::string uploadDate;            ///< 上传日期（YYYY-MM-DD 格式）
 };
 
 /**

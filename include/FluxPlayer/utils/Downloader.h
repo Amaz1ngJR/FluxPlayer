@@ -44,6 +44,7 @@ public:
      */
     void start(const std::string& pageUrl,
                const std::string& outputDir,
+               const std::string& formatId,
                ProgressCallback onProgress,
                FinishCallback   onFinish);
 
@@ -62,6 +63,7 @@ public:
 private:
     void downloadLoop(const std::string& pageUrl,
                       const std::string& outputDir,
+                      const std::string& formatId,
                       ProgressCallback onProgress,
                       FinishCallback   onFinish);
 

@@ -52,6 +52,7 @@ namespace FluxPlayer {
 
 void Downloader::start(const std::string& pageUrl,
                        const std::string& outputDir,
+                       const std::string& formatId,
                        ProgressCallback onProgress,
                        FinishCallback   onFinish) {
     if (running_.load()) return;
@@ -67,7 +68,7 @@ void Downloader::start(const std::string& pageUrl,
     }
     running_.store(true);
     thread_ = std::thread(&Downloader::downloadLoop, this,
-                          pageUrl, outputDir,
+                          pageUrl, outputDir, formatId,
                           std::move(onProgress), std::move(onFinish));
 }
 
@@ -136,22 +137,20 @@ void Downloader::cancel() {
  */
 void Downloader::downloadLoop(const std::string& pageUrl,
                                const std::string& outputDir,
+                               const std::string& formatId,
                                ProgressCallback onProgress,
                                FinishCallback   onFinish) {
-    // 构造 yt-dlp 命令
-    // --newline: 每行输出进度（便于解析）
-    // --continue: 支持断点续传
-    // Cookie 配置（统一由 prepareCookieArg 构建，含 Windows 文件锁回退逻辑）
     std::string cookieArg = StreamExtractor::prepareCookieArg();
+    std::string fmtArg = formatId.empty()
+        ? "bestvideo+bestaudio/best"
+        : formatId + "+bestaudio/" + formatId;
 
     std::string outputTemplate = outputDir + "/%(title)s.%(ext)s";
 #ifdef _WIN32
-    // Windows：通过 SetEnvironmentVariable 禁用 Python 缓冲（不能用 shell 前缀赋值）
     SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
-    std::string cmd = "\"" + StreamExtractor::getExecutablePath() + "\" -f \"bestvideo+bestaudio/best\""
+    std::string cmd = "\"" + StreamExtractor::getExecutablePath() + "\" -f \"" + fmtArg + "\""
 #else
-    // POSIX：shell 前缀赋值环境变量，确保 yt-dlp 进度行实时写入 pipe
-    std::string cmd = "PYTHONUNBUFFERED=1 \"" + StreamExtractor::getExecutablePath() + "\" -f \"bestvideo+bestaudio/best\""
+    std::string cmd = "PYTHONUNBUFFERED=1 \"" + StreamExtractor::getExecutablePath() + "\" -f \"" + fmtArg + "\""
 #endif
                     + cookieArg
                     + " --merge-output-format mp4"

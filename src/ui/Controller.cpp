@@ -37,6 +37,10 @@ Controller::Controller(Player& player, Window& window)
     , audioCodec_("")
     , audioSampleRate_(0)
     , audioChannels_(0)
+    , webUploader_("")
+    , webPlatform_("")
+    , webViewCount_(-1)
+    , webUploadDate_("")
     , isDraggingProgress_(false)
     , draggedProgress_(0.0f)
     , seekPrecision_(0.1)
@@ -173,7 +177,34 @@ void Controller::render() {
     renderSubtitles();
 
     // 同步网页 URL（用于画质切换和下载按钮显示）
-    currentPageUrl_ = player_.getLastPageUrl();
+    std::string newUrl = player_.getLastPageUrl();
+    if (newUrl != currentPageUrl_) {
+        currentPageUrl_ = newUrl;
+        // URL 变化时从 Player 拉取画质列表（open() 时 controller_ 尚未注册，需主动拉取）
+        if (!newUrl.empty()) {
+            const auto& info = player_.getLastExtractedInfo();
+            qualities_.clear();
+            for (const auto& q : info.qualities) {
+                QualityItem item;
+                item.formatId = q.formatId;
+                item.label = q.label;
+                qualities_.push_back(item);
+            }
+            // 取第一个（最高画质）作为当前画质
+            currentQualityLabel_ = qualities_.empty() ? "" : qualities_[0].label;
+            webUploader_ = info.uploader;
+            webPlatform_ = info.platform;
+            webViewCount_ = info.viewCount;
+            webUploadDate_ = info.uploadDate;
+        } else {
+            qualities_.clear();
+            currentQualityLabel_.clear();
+            webUploader_.clear();
+            webPlatform_.clear();
+            webViewCount_ = -1;
+            webUploadDate_.clear();
+        }
+    }
 
     if (!visible_) {
         // 即使不可见也需要调用 ImGui::Render，否则上一帧的 DrawData 会残留警告
@@ -258,6 +289,21 @@ void Controller::setMediaInfo(const std::string& filename,
     audioSampleRate_ = audioSampleRate;
     audioChannels_ = audioChannels;
     LOG_INFO("Controller: Media info set - " + filename);
+}
+
+void Controller::setWebVideoInfo(const std::string& uploader, const std::string& platform,
+                                  int64_t viewCount, const std::string& uploadDate) {
+    webUploader_ = uploader;
+    webPlatform_ = platform;
+    webViewCount_ = viewCount;
+    webUploadDate_ = uploadDate;
+    LOG_INFO("Controller: Web video info set - platform=" + platform + " uploader=" + uploader);
+}
+
+void Controller::setQualities(const std::vector<QualityItem>& qualities, const std::string& currentLabel) {
+    qualities_ = qualities;
+    currentQualityLabel_ = currentLabel;
+    LOG_INFO("Controller: Qualities set - current=" + currentLabel + " count=" + std::to_string(qualities.size()));
 }
 
 // ===== 底部统一浮层 =====
@@ -803,8 +849,15 @@ void Controller::renderMediaInfo() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
 
+    // 根据是否有网页视频信息调整窗口高度
+    float windowHeight = 250.0f;
+    bool hasWebInfo = !webPlatform_.empty() || !webUploader_.empty() || webViewCount_ >= 0 || !webUploadDate_.empty();
+    if (hasWebInfo) {
+        windowHeight = 320.0f;  // 增加高度以容纳网页视频信息
+    }
+
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(450, 250), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(450, windowHeight), ImGuiCond_Always);
     ImGui::Begin("Media Info", &showMediaInfo_,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
@@ -815,6 +868,35 @@ void Controller::renderMediaInfo() {
     ImGui::TextUnformatted(filename_.c_str());
     ImGui::PopStyleColor();
     ImGui::Separator();
+
+    // 网页视频扩展信息（如果有）
+    if (hasWebInfo) {
+        ImGui::TextUnformatted("WEB VIDEO:");
+        ImGui::Indent();
+        if (!webPlatform_.empty()) {
+            ImGui::Text("Platform   : %s", webPlatform_.c_str());
+        }
+        if (!webUploader_.empty()) {
+            ImGui::Text("Uploader   : %s", webUploader_.c_str());
+        }
+        if (webViewCount_ >= 0) {
+            // 格式化播放量为带千分位的数字
+            std::string viewStr = std::to_string(webViewCount_);
+            std::string formatted;
+            int count = 0;
+            for (auto it = viewStr.rbegin(); it != viewStr.rend(); ++it) {
+                if (count > 0 && count % 3 == 0) formatted = ',' + formatted;
+                formatted = *it + formatted;
+                ++count;
+            }
+            ImGui::Text("Views      : %s", formatted.c_str());
+        }
+        if (!webUploadDate_.empty()) {
+            ImGui::Text("Upload Date: %s", webUploadDate_.c_str());
+        }
+        ImGui::Unindent();
+        ImGui::Separator();
+    }
 
     ImGui::TextUnformatted("VIDEO:");
     ImGui::Indent();
@@ -1169,11 +1251,16 @@ void Controller::renderQualityButton(float btnH) {
             bool isCurrent = (q.label == currentQualityLabel_);
             if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f,0.75f,1.00f,1.00f));
             if (ImGui::Selectable(q.label.c_str(), isCurrent, 0, ImVec2(0, 20))) {
-                // 切换画质：记录当前时间，重新提取并 seek
+                // 切换画质：记录当前时间，调用 Player::switchQuality
                 if (!isCurrent && !currentPageUrl_.empty()) {
                     double currentTime = player_.getCurrentTime();
-                    // TODO: 调用 player_.switchQuality(currentPageUrl_, q.formatId, currentTime)
-                    currentQualityLabel_ = q.label;
+                    LOG_INFO("Controller: 切换画质 " + q.label + " formatId=" + q.formatId);
+                    if (player_.switchQuality(q.formatId, currentTime)) {
+                        currentQualityLabel_ = q.label;
+                        LOG_INFO("Controller: 画质切换成功");
+                    } else {
+                        LOG_ERROR("Controller: 画质切换失败");
+                    }
                     showQualityMenu_ = false;
                 }
             }
@@ -1210,7 +1297,12 @@ void Controller::renderDownloadButton(float btnH) {
             downloadProgress_ = 0.0f;
             { std::lock_guard<std::mutex> lk(downloadMutex_); downloadSpeed_.clear(); downloadEta_.clear(); downloadFileSize_.clear(); }
             downloader_ = std::make_unique<Downloader>();
-            downloader_->start(currentPageUrl_, dir,
+            // 查找当前画质对应的 formatId，空则下载最高画质
+            std::string dlFormatId;
+            for (const auto& q : qualities_) {
+                if (q.label == currentQualityLabel_) { dlFormatId = q.formatId; break; }
+            }
+            downloader_->start(currentPageUrl_, dir, dlFormatId,
                 [this](float p, const std::string& spd, const std::string& eta, const std::string& fsize) {
                     downloadProgress_ = p;
                     std::lock_guard<std::mutex> lk(downloadMutex_);

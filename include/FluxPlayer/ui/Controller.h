@@ -24,6 +24,12 @@ class Downloader;
  */
 class Controller {
 public:
+    /// 单个画质选项（来自 ExtractedStream::qualities）
+    struct QualityItem {
+        std::string formatId;
+        std::string label;  // "1080P" 等
+    };
+
     Controller(Player& player, Window& window);
     ~Controller();
 
@@ -39,6 +45,23 @@ public:
                       int width, int height, double duration, double videoFps,
                       const std::string& videoCodec, const std::string& audioCodec,
                       int audioSampleRate, int audioChannels);
+
+    /**
+     * @brief 设置网页视频扩展信息（上传者、平台、播放量、上传日期）
+     * @param uploader 上传者
+     * @param platform 平台名称
+     * @param viewCount 播放量（-1 表示未知）
+     * @param uploadDate 上传日期（YYYY-MM-DD 格式）
+     */
+    void setWebVideoInfo(const std::string& uploader, const std::string& platform,
+                         int64_t viewCount, const std::string& uploadDate);
+
+    /**
+     * @brief 设置可用画质列表（网页视频专用）
+     * @param qualities 画质选项列表
+     * @param currentLabel 当前画质标签（如 "1080P"）
+     */
+    void setQualities(const std::vector<QualityItem>& qualities, const std::string& currentLabel);
 
     void setVisible(bool visible) { visible_ = visible; }
     bool isVisible() const { return visible_; }
@@ -131,6 +154,12 @@ private:
     int audioSampleRate_;
     int audioChannels_;
 
+    // 网页视频扩展信息
+    std::string webUploader_;       ///< 上传者
+    std::string webPlatform_;       ///< 平台名称
+    int64_t webViewCount_;          ///< 播放量（-1 表示未知）
+    std::string webUploadDate_;     ///< 上传日期（YYYY-MM-DD）
+
     // UI 状态
     bool isDraggingProgress_;
     float draggedProgress_;
@@ -148,11 +177,6 @@ private:
     float speedMenuPosY_;       // 速度菜单Y坐标
 
     // ==================== 画质选择 ====================
-    /// 单个画质选项（来自 ExtractedStream::qualities）
-    struct QualityItem {
-        std::string formatId;
-        std::string label;  // "1080P" 等
-    };
     bool showQualityMenu_ = false;
     float qualityMenuPosX_ = 0.0f;
     float qualityMenuPosY_ = 0.0f;

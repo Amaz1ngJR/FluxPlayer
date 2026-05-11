@@ -109,11 +109,30 @@ static std::string jsonString(const std::string& json, const std::string& key) {
         end = json.find('"', end + 1);
     if (end == std::string::npos) return "";
     std::string val = json.substr(pos + 1, end - pos - 1);
-    // 反转义 \"
+    // 反转义：处理 \" 和 \uXXXX（yt-dlp 对非 ASCII 字符输出 Unicode 转义）
     std::string out;
     for (size_t i = 0; i < val.size(); ++i) {
-        if (val[i] == '\\' && i + 1 < val.size() && val[i+1] == '"') { out += '"'; ++i; }
-        else out += val[i];
+        if (val[i] != '\\' || i + 1 >= val.size()) { out += val[i]; continue; }
+        char next = val[i+1];
+        if (next == '"') { out += '"'; ++i; }
+        else if (next == 'u' && i + 5 < val.size()) {
+            // \uXXXX → UTF-8
+            unsigned int cp = 0;
+            bool ok = true;
+            for (int j = 2; j < 6; ++j) {
+                char c = val[i+j];
+                if      (c >= '0' && c <= '9') cp = cp*16 + (c-'0');
+                else if (c >= 'a' && c <= 'f') cp = cp*16 + (c-'a'+10);
+                else if (c >= 'A' && c <= 'F') cp = cp*16 + (c-'A'+10);
+                else { ok = false; break; }
+            }
+            if (ok) {
+                if      (cp < 0x80)  { out += (char)cp; }
+                else if (cp < 0x800) { out += (char)(0xC0|(cp>>6)); out += (char)(0x80|(cp&0x3F)); }
+                else                 { out += (char)(0xE0|(cp>>12)); out += (char)(0x80|((cp>>6)&0x3F)); out += (char)(0x80|(cp&0x3F)); }
+                i += 5;
+            } else { out += val[i]; }
+        } else { out += val[i]; }
     }
     return out;
 }
@@ -444,9 +463,10 @@ std::vector<QualityOption> StreamExtractor::parseQualities(const std::string& js
     if (pos == std::string::npos) return result;
 
     // 逐个解析 format 对象
-    int depth = 0;
+    // depth=1 表示已在 '[' 内部，遇到 '{' 时 depth==1 说明是顶层 format 对象
+    int depth = 1;
     size_t objStart = std::string::npos;
-    for (size_t i = pos; i < json.size(); ++i) {
+    for (size_t i = pos + 1; i < json.size(); ++i) {
         if (json[i] == '{') {
             if (depth == 1) objStart = i;
             ++depth;
@@ -501,7 +521,8 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     std::string fmtArg = formatId.empty()
         // 优先 H.264 视频（avc1），避免 AV1/HEVC 在 MKV pipe 中的兼容性问题
         ? "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
-        : formatId;
+        // 指定画质时补充 bestaudio，确保返回 DASH 分离流（video+audio）
+        : formatId + "+bestaudio/" + formatId;
 
     // Cookie 配置（统一由 prepareCookieArg 构建，含 Windows 文件锁回退逻辑）
     std::string cookieArg = prepareCookieArg();
@@ -539,6 +560,23 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     out.qualities = parseQualities(json);
     out.selectedFormatId = formatId;
 
+    // 解析扩展信息
+    out.uploader = jsonString(json, "uploader");
+    if (out.uploader.empty()) out.uploader = jsonString(json, "channel");
+    out.platform = jsonString(json, "extractor_key");
+    if (out.platform.empty()) out.platform = jsonString(json, "extractor");
+
+    std::string viewStr = jsonNumber(json, "view_count");
+    out.viewCount = viewStr.empty() ? -1 : std::stoll(viewStr);
+
+    std::string uploadDateRaw = jsonString(json, "upload_date");
+    if (uploadDateRaw.size() == 8) {
+        // YYYYMMDD -> YYYY-MM-DD
+        out.uploadDate = uploadDateRaw.substr(0, 4) + "-"
+                       + uploadDateRaw.substr(4, 2) + "-"
+                       + uploadDateRaw.substr(6, 2);
+    }
+
     std::string durStr = jsonNumber(json, "duration");
     out.duration = durStr.empty() ? 0.0 : std::stod(durStr);
 
@@ -551,25 +589,29 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     bool hasTwoStreams = json.find("\"requested_formats\"") != std::string::npos;
 
     if (hasTwoStreams) {
-        // DASH：分别提取视频和音频 URL
-        // requested_formats 是数组，第一个是视频，第二个是音频
+        // 用深度追踪正确提取 requested_formats 中每个完整的 format 对象
         size_t rfPos = json.find("\"requested_formats\"");
         size_t arrStart = json.find('[', rfPos);
         if (arrStart != std::string::npos) {
-            // 第一个对象：视频
-            size_t obj1s = json.find('{', arrStart);
-            size_t obj1e = json.find('}', obj1s);
-            if (obj1s != std::string::npos && obj1e != std::string::npos) {
-                std::string fmt1 = json.substr(obj1s, obj1e - obj1s + 1);
-                out.videoUrl = jsonString(fmt1, "url");
-                // 第二个对象：音频
-                size_t obj2s = json.find('{', obj1e + 1);
-                size_t obj2e = json.find('}', obj2s);
-                if (obj2s != std::string::npos && obj2e != std::string::npos) {
-                    std::string fmt2 = json.substr(obj2s, obj2e - obj2s + 1);
-                    out.audioUrl = jsonString(fmt2, "url");
+            int depth = 0;
+            size_t objStart = std::string::npos;
+            std::vector<std::string> fmts;
+            for (size_t i = arrStart; i < json.size() && fmts.size() < 2; ++i) {
+                if (json[i] == '{') {
+                    if (depth == 0) objStart = i;
+                    ++depth;
+                } else if (json[i] == '}') {
+                    --depth;
+                    if (depth == 0 && objStart != std::string::npos) {
+                        fmts.push_back(json.substr(objStart, i - objStart + 1));
+                        objStart = std::string::npos;
+                    }
+                } else if (json[i] == ']' && depth == 0) {
+                    break;
                 }
             }
+            if (fmts.size() >= 1) out.videoUrl = jsonString(fmts[0], "url");
+            if (fmts.size() >= 2) out.audioUrl = jsonString(fmts[1], "url");
         }
         out.isDash = !out.videoUrl.empty() && !out.audioUrl.empty();
     }
