@@ -521,6 +521,11 @@ private:
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
     std::unique_ptr<SubtitleManager> subtitleManager_;
 
+    bool audioOnly_{false};  ///< 纯音频模式（无视频流时为 true）
+
+    /// 纯音频模式：提取封面图并上传到渲染器
+    void loadCoverImage();
+
     // 线程相关
     std::unique_ptr<std::thread> decodingThread_;
     std::unique_ptr<std::thread> renderingThread_;

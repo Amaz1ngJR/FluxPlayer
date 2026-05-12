@@ -358,20 +358,27 @@ int Demuxer::getBitrate() const {
  * 注意：跳转后需要刷新解码器缓冲区（调用 decoder.flush()）
  */
 bool Demuxer::seek(int64_t timestamp) {
-    if (!m_formatCtx || m_videoStreamIndex < 0) {
-        LOG_ERROR("Cannot seek: format context is null or no video stream");
+    if (!m_formatCtx) {
+        LOG_ERROR("Cannot seek: format context is null");
+        return false;
+    }
+
+    // 优先使用视频流作为 seek 基准，无视频流时退回音频流
+    int seekStreamIndex = (m_videoStreamIndex >= 0) ? m_videoStreamIndex : m_audioStreamIndex;
+    if (seekStreamIndex < 0) {
+        LOG_ERROR("Cannot seek: no audio or video stream");
         return false;
     }
 
     LOG_INFO("Seeking to timestamp (microseconds): " + std::to_string(timestamp));
 
-    // 将微秒转换为基于视频流 time_base 的时间戳
-    AVStream* videoStream = m_formatCtx->streams[m_videoStreamIndex];
-    int64_t seekTarget = av_rescale_q(timestamp, AV_TIME_BASE_Q, videoStream->time_base);
+    // 将微秒转换为基于 seek 基准流 time_base 的时间戳
+    AVStream* seekStream = m_formatCtx->streams[seekStreamIndex];
+    int64_t seekTarget = av_rescale_q(timestamp, AV_TIME_BASE_Q, seekStream->time_base);
 
     LOG_DEBUG("Converted timestamp: " + std::to_string(seekTarget) +
-              " (time_base: " + std::to_string(videoStream->time_base.num) +
-              "/" + std::to_string(videoStream->time_base.den) + ")");
+              " (time_base: " + std::to_string(seekStream->time_base.num) +
+              "/" + std::to_string(seekStream->time_base.den) + ")");
 
     // 使用 avformat_seek_file 实现更精确的跳转
     // 参数说明:
@@ -383,7 +390,7 @@ bool Demuxer::seek(int64_t timestamp) {
     //
     // 注意: 对于 H.264/H.265 等帧间压缩格式,仍然会跳转到关键帧,
     // 但解码器会从关键帧开始解码,直到目标位置,实现精确跳转
-    int ret = avformat_seek_file(m_formatCtx, m_videoStreamIndex,
+    int ret = avformat_seek_file(m_formatCtx, seekStreamIndex,
                                   INT64_MIN,     // min_ts: 允许任意最小值
                                   seekTarget,    // ts: 目标时间戳
                                   seekTarget,    // max_ts: 目标时间戳

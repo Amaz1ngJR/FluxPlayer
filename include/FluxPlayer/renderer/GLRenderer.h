@@ -94,6 +94,16 @@ public:
      */
     void setVideoSize(int width, int height);
 
+    /**
+     * @brief 渲染静态 RGBA 图片（纯音频模式封面图）
+     * @param rgbaData RGBA 像素数据（宽×高×4 字节）
+     * @param width    图片宽度（像素）
+     * @param height   图片高度（像素）
+     *
+     * 首次调用时创建纹理并上传数据；后续调用直接复用已上传的纹理。
+     */
+    void renderStaticImage(const uint8_t* rgbaData, int width, int height);
+
 private:
     /** @brief 创建全屏四边形的 VAO/VBO，包含顶点位置和纹理坐标 */
     void setupQuad();
@@ -150,6 +160,10 @@ private:
     /// NV12 UV 解交错缓冲区（预分配，避免每帧动态分配）
     std::vector<uint8_t> m_nv12UBuffer;  ///< 解交错后的 U 平面
     std::vector<uint8_t> m_nv12VBuffer;  ///< 解交错后的 V 平面
+
+    std::unique_ptr<Shader> m_rgbaShader;       ///< RGBA 直通着色器（纯音频封面图用）
+    unsigned int m_textureRGBA{0};              ///< RGBA 封面图纹理
+    bool m_staticImageUploaded{false};          ///< 封面图是否已上传到 GPU
 };
 
 } // namespace FluxPlayer

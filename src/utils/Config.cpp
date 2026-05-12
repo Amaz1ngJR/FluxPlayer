@@ -6,6 +6,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <climits>
+#include <unistd.h>
+#include <cstdlib>
+#include <pwd.h>
 #else
 #include <unistd.h>
 #include <cstdlib>
@@ -57,6 +63,51 @@ std::string Config::getAppDataDir() {
     }
     return base + "/FluxPlayer";
 #endif
+}
+
+/**
+ * 获取内置资源文件的绝对路径（相对可执行文件目录查找）
+ * macOS: 先尝试 bundle Resources，再尝试可执行文件同级 source/ 目录
+ * Windows/Linux: 可执行文件同级 resources/ 目录
+ * 兜底: 当前工作目录下的 source/ 目录（开发调试用）
+ */
+std::string Config::getResourcePath(const std::string& filename) {
+#ifdef __APPLE__
+    char exePath[PATH_MAX];
+    uint32_t size = sizeof(exePath);
+    if (_NSGetExecutablePath(exePath, &size) == 0) {
+        std::string dir(exePath);
+        auto pos = dir.rfind('/');
+        if (pos != std::string::npos) {
+            std::string bundleRes = dir.substr(0, pos) + "/../Resources/" + filename;
+            if (access(bundleRes.c_str(), F_OK) == 0) return bundleRes;
+            std::string devPath = dir.substr(0, pos) + "/source/" + filename;
+            if (access(devPath.c_str(), F_OK) == 0) return devPath;
+        }
+    }
+#elif defined(_WIN32)
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string dir(exePath);
+    auto pos = dir.rfind('\\');
+    if (pos != std::string::npos) {
+        std::string resPath = dir.substr(0, pos) + "\\resources\\" + filename;
+        if (GetFileAttributesA(resPath.c_str()) != INVALID_FILE_ATTRIBUTES) return resPath;
+    }
+#else
+    char exePath[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+    if (len > 0) {
+        exePath[len] = '\0';
+        std::string dir(exePath);
+        auto pos = dir.rfind('/');
+        if (pos != std::string::npos) {
+            std::string resPath = dir.substr(0, pos) + "/resources/" + filename;
+            if (access(resPath.c_str(), F_OK) == 0) return resPath;
+        }
+    }
+#endif
+    return "source/" + filename;
 }
 
 // 构造函数：初始化配置路径和默认目录为平台标准位置

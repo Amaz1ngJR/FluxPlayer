@@ -198,6 +198,10 @@ void GLRenderer::destroy() {
         glDeleteTextures(1, &m_textureUV);
         m_textureUV = 0;
     }
+    if (m_textureRGBA) {
+        glDeleteTextures(1, &m_textureRGBA);
+        m_textureRGBA = 0;
+    }
 
     LOG_DEBUG("GLRenderer resources destroyed");
 }
@@ -254,10 +258,23 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
 
 /**
  * 使用 GPU 纹理中已有的帧数据重新渲染
- * 用于暂停、队列为空等场景，避免保留 CPU 侧帧数据
+ * 纯音频模式（m_staticImageUploaded）使用 RGBA 着色器渲染封面图；
+ * 视频模式使用 YUV 着色器渲染上一帧
  */
 void GLRenderer::renderCachedFrame() {
     if (!m_hasValidTexture) return;
+
+    // 纯音频模式：使用 RGBA 直通着色器渲染封面图
+    if (m_staticImageUploaded && m_rgbaShader) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
+        m_rgbaShader->use();
+        glBindVertexArray(m_VAO);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+        m_rgbaShader->unuse();
+        return;
+    }
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_textureY);
@@ -274,6 +291,53 @@ void GLRenderer::renderCachedFrame() {
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
     m_shader->unuse();
+}
+
+/**
+ * 渲染静态 RGBA 图片（纯音频模式封面图）
+ * 首次调用时创建纹理并上传数据；后续调用直接复用已上传的纹理
+ */
+void GLRenderer::renderStaticImage(const uint8_t* rgbaData, int width, int height) {
+    // 首次调用：加载 RGBA 着色器并创建纹理
+    if (!m_staticImageUploaded) {
+        // 加载 RGBA 直通着色器
+        m_rgbaShader = std::make_unique<Shader>();
+        std::string exeDir = getExeDir();
+        if (!m_rgbaShader->loadFromFile(exeDir + "/shaders/image.vert",
+                                         exeDir + "/shaders/image.frag")) {
+            LOG_ERROR("Failed to load image shaders");
+            m_rgbaShader.reset();
+            return;
+        }
+        m_rgbaShader->use();
+        m_rgbaShader->setInt("texRGBA", 0);  // RGBA 纹理绑定到纹理单元 0
+        m_rgbaShader->unuse();
+
+        // 创建 RGBA 纹理
+        glGenTextures(1, &m_textureRGBA);
+        glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, rgbaData);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        m_staticImageUploaded = true;
+        m_hasValidTexture = true;
+        LOG_INFO("Static RGBA image uploaded: " + std::to_string(width) + "x" + std::to_string(height));
+    }
+
+    // 渲染（首次或后续调用均执行）
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
+    m_rgbaShader->use();
+    glBindVertexArray(m_VAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    m_rgbaShader->unuse();
 }
 
 void GLRenderer::clear(float r, float g, float b, float a) {

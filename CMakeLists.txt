@@ -285,6 +285,9 @@ add_custom_command(TARGET FluxPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts
         $<TARGET_FILE_DIR:FluxPlayer>/fonts
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/source
+        $<TARGET_FILE_DIR:FluxPlayer>/source
     COMMENT "Copying shader files..."
 )
 

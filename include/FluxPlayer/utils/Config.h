@@ -60,6 +60,9 @@ public:
     /// Windows: %LOCALAPPDATA%\FluxPlayer  macOS: ~/Library/Caches/FluxPlayer  Linux: ~/.cache/FluxPlayer
     static std::string getAppDataDir();
 
+    /// 获取内置资源文件的绝对路径（相对可执行文件目录查找）
+    static std::string getResourcePath(const std::string& filename);
+
 private:
     Config();
     ~Config() = default;

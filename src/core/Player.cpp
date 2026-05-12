@@ -29,11 +29,115 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/mem.h>
 }
 
 namespace FluxPlayer {
+
+namespace {
+
+/**
+ * 用 FFmpeg 将任意格式图片数据解码为 RGBA 像素
+ * @param data    图片原始字节
+ * @param size    字节数
+ * @param codecId 图片编解码器 ID
+ * @param outW    输出宽度
+ * @param outH    输出高度
+ * @return RGBA 像素数据（av_malloc 分配，调用者负责 av_free），失败返回 nullptr
+ */
+static uint8_t* decodeImageToRGBA(const uint8_t* data, int size, AVCodecID codecId,
+                                   int* outW, int* outH) {
+    const AVCodec* codec = avcodec_find_decoder(codecId);
+    if (!codec) return nullptr;
+
+    AVCodecContext* ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return nullptr;
+
+    if (avcodec_open2(ctx, codec, nullptr) < 0) {
+        avcodec_free_context(&ctx);
+        return nullptr;
+    }
+
+    AVPacket* pkt = av_packet_alloc();
+    pkt->data = const_cast<uint8_t*>(data);
+    pkt->size = size;
+
+    AVFrame* frame = av_frame_alloc();
+    uint8_t* result = nullptr;
+
+    if (avcodec_send_packet(ctx, pkt) == 0 && avcodec_receive_frame(ctx, frame) == 0) {
+        // 转换为 RGBA
+        SwsContext* sws = sws_getContext(frame->width, frame->height,
+                                          static_cast<AVPixelFormat>(frame->format),
+                                          frame->width, frame->height,
+                                          AV_PIX_FMT_RGBA, SWS_BILINEAR,
+                                          nullptr, nullptr, nullptr);
+        if (sws) {
+            int stride = frame->width * 4;
+            result = static_cast<uint8_t*>(av_malloc(stride * frame->height));
+            uint8_t* dst[1] = { result };
+            int dstStride[1] = { stride };
+            sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dst, dstStride);
+            sws_freeContext(sws);
+            *outW = frame->width;
+            *outH = frame->height;
+        }
+    }
+
+    av_frame_free(&frame);
+    // pkt->data 指向外部内存，不能 av_packet_free（会尝试释放 data）
+    av_free(pkt);
+    avcodec_free_context(&ctx);
+    return result;
+}
+
+/**
+ * 从文件路径加载图片为 RGBA 像素（通过 FFmpeg avformat 打开）
+ */
+static uint8_t* loadImageFileToRGBA(const std::string& path, int* outW, int* outH) {
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return nullptr;
+    if (avformat_find_stream_info(fmt, nullptr) < 0) {
+        avformat_close_input(&fmt);
+        return nullptr;
+    }
+
+    // 找到图片流（PNG/JPEG 等静态图片被 FFmpeg 视为视频流）
+    int streamIdx = -1;
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            streamIdx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (streamIdx < 0) {
+        avformat_close_input(&fmt);
+        return nullptr;
+    }
+
+    AVCodecParameters* par = fmt->streams[streamIdx]->codecpar;
+    AVPacket* pkt = av_packet_alloc();
+    uint8_t* result = nullptr;
+
+    while (av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index == streamIdx) {
+            result = decodeImageToRGBA(pkt->data, pkt->size, par->codec_id, outW, outH);
+            av_packet_unref(pkt);
+            break;
+        }
+        av_packet_unref(pkt);
+    }
+
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt);
+    return result;
+}
+
+} // anonymous namespace
 
 Player::Player()
     : state_(PlayerState::IDLE)
@@ -221,11 +325,15 @@ bool Player::open(const std::string& filePath) {
         return false;
     }
 
-    // 检查视频流
+    // 纯音频模式检测：无视频流但有音频流时进入音频-only 模式
     if (demuxer_->getVideoStreamIndex() < 0) {
-        triggerError("No video stream found in file");
-        setState(PlayerState::ERRORED);
-        return false;
+        if (demuxer_->getAudioStreamIndex() < 0) {
+            triggerError("No audio or video stream found in file");
+            setState(PlayerState::ERRORED);
+            return false;
+        }
+        audioOnly_ = true;
+        LOG_INFO("Audio-only mode: no video stream detected");
     }
 
     // 获取媒体信息（Demuxer 返回微秒，需要转换为秒）
@@ -257,7 +365,10 @@ bool Player::open(const std::string& filePath) {
     constexpr int kLiveAudioQueueSize  = 20;
     int videoQueueSize = isLiveStream_ ? kLiveVideoQueueSize : kLocalVideoQueueSize;
     int audioQueueSize = isLiveStream_ ? kLiveAudioQueueSize : kLocalAudioQueueSize;
-    videoQueue_ = std::make_unique<FrameQueue>(videoQueueSize, /*keepLast=*/true);
+    // 纯音频模式不需要视频队列
+    if (!audioOnly_) {
+        videoQueue_ = std::make_unique<FrameQueue>(videoQueueSize, /*keepLast=*/true);
+    }
     audioQueue_ = std::make_unique<FrameQueue>(audioQueueSize, /*keepLast=*/false);
     LOG_INFO("Frame queues created: video=" + std::to_string(videoQueueSize) +
              ", audio=" + std::to_string(audioQueueSize));
@@ -274,6 +385,11 @@ bool Player::open(const std::string& filePath) {
         triggerError("Failed to initialize window and renderer");
         setState(PlayerState::ERRORED);
         return false;
+    }
+
+    // 纯音频模式：加载封面图
+    if (audioOnly_) {
+        loadCoverImage();
     }
 
     // 初始化音频输出（如果有音频流）
@@ -393,8 +509,8 @@ bool Player::play() {
         LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
     }
 
-    // 启动解码线程
-    videoQueue_->start();
+    // 启动解码线程（纯音频模式无视频队列）
+    if (videoQueue_) videoQueue_->start();
     audioQueue_->start();
     shouldQuit_.store(false);
     decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
@@ -529,14 +645,23 @@ void Player::run() {
         while (!window_->shouldClose() && !shouldQuit_.load()) {
             // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
             // 用 numReadable() 而非 size()：keep-last 保留的已显示帧不算"待消费"
-            if (decodingFinished_.load() && videoQueue_->numReadable() == 0) {
+            // 纯音频模式等待音频队列消费完，视频模式等待视频队列消费完
+            bool queueDrained = audioOnly_
+                ? (audioQueue_->numReadable() == 0)
+                : (videoQueue_ && videoQueue_->numReadable() == 0);
+            if (decodingFinished_.load() && queueDrained) {
                 shouldQuit_.store(true);
                 break;
             }
             double currentTime = timer.getElapsedSeconds();
 
-            // 从队列获取视频帧并渲染
-            renderVideoFrame(lastFrameTime);
+            // 纯音频模式渲染静态封面，视频模式从队列取帧渲染
+            if (audioOnly_) {
+                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
+                if (renderer_->hasValidTexture()) renderer_->renderCachedFrame();
+            } else {
+                renderVideoFrame(lastFrameTime);
+            }
 
             // 调用渲染回调（用于渲染 UI）
             if (renderCallback_) {
@@ -748,13 +873,13 @@ bool Player::handleLoopRestart() {
         }
 
         // 清空帧队列
-        videoQueue_->flush();
+        if (videoQueue_) videoQueue_->flush();
         audioQueue_->flush();
         pendingAudioOffset_ = 0;
 
         // seek demuxer到开头
         demuxer_->seek(0);
-        videoDecoder_->flush();
+        if (videoDecoder_) videoDecoder_->flush();
         if (audioDecoder_) audioDecoder_->flush();
         // 字幕同步重置
         if (subtitleDecoder_) subtitleDecoder_->flush();
@@ -766,8 +891,8 @@ bool Player::handleLoopRestart() {
         currentAudioFramePTS_.store(0.0);
         samplesPlayedInFrame_.store(0);
 
-        // 重启队列和解码线程
-        videoQueue_->start();
+        // 重启队列和解码线程（纯音频模式无视频队列）
+        if (videoQueue_) videoQueue_->start();
         audioQueue_->start();
         shouldQuit_.store(false);
         decodingFinished_.store(false);  // 必须重置，否则渲染循环立即退出
@@ -788,6 +913,10 @@ void Player::quit() {
 }
 
 double Player::getCurrentTime() const {
+    // 纯音频模式：没有视频帧渲染，直接返回音频时钟
+    if (audioOnly_ && avSync_) {
+        return avSync_->getAudioClock();
+    }
     // 返回最后实际渲染的帧的 PTS，而不是 AVSync 的时钟
     // 这样可以避免 seek 时时钟立即更新导致的连续 seek 问题
     return lastRenderedPTS_.load();
@@ -888,9 +1017,9 @@ void Player::decodingThread() {
 
         bool frameReceived = false;
 
-        // **优先接收视频帧**
+        // **优先接收视频帧**（纯音频模式无视频解码器，跳过）
         // 注意：必须优先调用receiveFrame()清空解码器缓冲区
-        if (videoDecoder_->receiveFrame(rawFrame)) {
+        if (!audioOnly_ && videoDecoder_ && videoDecoder_->receiveFrame(rawFrame)) {
             // ===== 实时流PTS归一化 =====
             if (!normalizeVideoPTS(rawFrame)) {
                 // 帧无效（校准期间的无效PTS帧），已丢弃
@@ -1038,7 +1167,7 @@ void Player::processSeekRequest() {
     int64_t seekTimestamp = static_cast<int64_t>(seekTime * 1000000);
     if (demuxer_->seek(seekTimestamp)) {
         // 清空解码器缓冲
-        videoDecoder_->flush();
+        if (videoDecoder_) videoDecoder_->flush();
         if (audioDecoder_) {
             audioDecoder_->flush();
         }
@@ -1051,7 +1180,7 @@ void Player::processSeekRequest() {
         }
 
         // 清空帧队列
-        videoQueue_->flush();
+        if (videoQueue_) videoQueue_->flush();
         audioQueue_->flush();
 
         // 清空残留音频偏移
@@ -1127,7 +1256,7 @@ void Player::restartDashMerger(double seekTime) {
     if (audioDecoder_) audioDecoder_->flush();
     if (subtitleDecoder_) subtitleDecoder_->flush();
     if (subtitleManager_) subtitleManager_->clear();
-    videoQueue_->flush();
+    if (videoQueue_) videoQueue_->flush();
     audioQueue_->flush();
     pendingAudioOffset_ = 0;
 
@@ -1148,7 +1277,7 @@ void Player::checkPrebufferComplete() {
         return;
     }
 
-    size_t buffered = videoQueue_->size();
+    size_t buffered = videoQueue_ ? videoQueue_->size() : audioQueue_->size();
     if (buffered >= 5) {
         prebuffering_.store(false);
         LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
@@ -1576,6 +1705,12 @@ void Player::cleanup() {
 bool Player::initWindowAndRenderer() {
     LOG_INFO("Initializing window and renderer");
 
+    // 纯音频模式：使用固定窗口尺寸展示封面
+    if (audioOnly_) {
+        videoWidth_ = 480;
+        videoHeight_ = 480;
+    }
+
     // 将视频原始分辨率限制在屏幕 80% 以内，保持宽高比
     auto [clampedW, clampedH] = Window::clampToPrimaryMonitor(videoWidth_, videoHeight_);
     if (clampedW != videoWidth_ || clampedH != videoHeight_) {
@@ -1687,23 +1822,25 @@ bool Player::initWindowAndRenderer() {
 bool Player::initDecoders() {
     LOG_INFO("Initializing decoders");
 
-    // 初始化视频解码器
-    videoDecoder_ = std::make_unique<VideoDecoder>();
-    AVCodecParameters* videoParams = demuxer_->getVideoCodecParams();
-    AVStream* videoStream = demuxer_->getVideoStream();
+    // 初始化视频解码器（纯音频模式跳过）
+    if (!audioOnly_) {
+        videoDecoder_ = std::make_unique<VideoDecoder>();
+        AVCodecParameters* videoParams = demuxer_->getVideoCodecParams();
+        AVStream* videoStream = demuxer_->getVideoStream();
 
-    if (!videoDecoder_->init(videoParams, videoStream->time_base)) {
-        LOG_ERROR("Failed to initialize video decoder");
-        return false;
+        if (!videoDecoder_->init(videoParams, videoStream->time_base)) {
+            LOG_ERROR("Failed to initialize video decoder");
+            return false;
+        }
+
+        videoWidth_ = videoDecoder_->getWidth();
+        videoHeight_ = videoDecoder_->getHeight();
+        double fps = demuxer_->getFrameRate();
+        videoFrameInterval_ = (fps > 0) ? (1.0 / fps) : 0.04;  // 默认 25fps
+        LOG_INFO("Video resolution: " + std::to_string(videoWidth_) + "x" +
+                 std::to_string(videoHeight_) +
+                 ", frame interval: " + std::to_string(videoFrameInterval_) + "s");
     }
-
-    videoWidth_ = videoDecoder_->getWidth();
-    videoHeight_ = videoDecoder_->getHeight();
-    double fps = demuxer_->getFrameRate();
-    videoFrameInterval_ = (fps > 0) ? (1.0 / fps) : 0.04;  // 默认 25fps
-    LOG_INFO("Video resolution: " + std::to_string(videoWidth_) + "x" +
-             std::to_string(videoHeight_) +
-             ", frame interval: " + std::to_string(videoFrameInterval_) + "s");
 
     // 初始化音频解码器（如果有音频流）
     if (demuxer_->getAudioStreamIndex() >= 0) {
@@ -2064,7 +2201,7 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
         renderer_->setVideoSize(videoWidth_, videoHeight_);
     }
 
-    videoQueue_->flush();
+    if (videoQueue_) videoQueue_->flush();
     audioQueue_->flush();
 
     // 在解码线程启动前直接 seek，避免通过异步机制产生竞态
@@ -2090,6 +2227,43 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     setState(PlayerState::PLAYING);
     LOG_INFO("switchQuality: 切换成功");
     return true;
+}
+
+/**
+ * 纯音频模式：提取内嵌封面图并上传到渲染器
+ * 优先使用 AV_DISPOSITION_ATTACHED_PIC，无封面时加载 source/pic2.png 兜底
+ */
+void Player::loadCoverImage() {
+    if (!renderer_ || !demuxer_) return;
+
+    int w = 0, h = 0;
+    uint8_t* rgba = nullptr;
+
+    // 遍历流，查找内嵌封面（MP3/FLAC 的 ID3 封面标记为 ATTACHED_PIC）
+    AVFormatContext* fmtCtx = demuxer_->getFormatContext();
+    for (unsigned i = 0; i < fmtCtx->nb_streams && !rgba; i++) {
+        AVStream* st = fmtCtx->streams[i];
+        if (st->disposition & AV_DISPOSITION_ATTACHED_PIC) {
+            AVPacket& pic = st->attached_pic;
+            rgba = decodeImageToRGBA(pic.data, pic.size, st->codecpar->codec_id, &w, &h);
+            if (rgba) LOG_INFO("Cover image loaded from embedded attached_pic");
+        }
+    }
+
+    // 兜底：加载 pic2.png
+    if (!rgba) {
+        std::string fallbackPath = Config::getInstance().getResourcePath("pic2.png");
+        rgba = loadImageFileToRGBA(fallbackPath, &w, &h);
+        if (rgba) {
+            LOG_INFO("Cover image loaded from fallback: " + fallbackPath);
+        } else {
+            LOG_WARN("No cover image available, audio-only mode will show black screen");
+            return;
+        }
+    }
+
+    renderer_->renderStaticImage(rgba, w, h);
+    av_free(rgba);
 }
 
 } // namespace FluxPlayer
