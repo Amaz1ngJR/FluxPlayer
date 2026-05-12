@@ -486,10 +486,15 @@ std::vector<QualityOption> StreamExtractor::parseQualities(const std::string& js
                         opt.formatId = fid;
                         opt.height   = h;
                         opt.label    = std::to_string(h) + "P";
-                        // 去重（同分辨率保留第一个）
-                        bool dup = false;
-                        for (const auto& q : result) { if (q.height == h) { dup = true; break; } }
-                        if (!dup) result.push_back(opt);
+                        bool isH264  = vcodec.find("avc1") == 0 || vcodec.find("avc") == 0;
+                        // 同分辨率：H.264 优先；已有 H.264 则跳过，已有非 H.264 则被 H.264 替换
+                        auto it = std::find_if(result.begin(), result.end(),
+                                               [h](const QualityOption& q){ return q.height == h; });
+                        if (it == result.end()) {
+                            result.push_back(opt);
+                        } else if (isH264 && it->formatId.find("avc") == std::string::npos) {
+                            *it = opt;  // 用 H.264 替换已有的非 H.264
+                        }
                     }
                 }
                 objStart = std::string::npos;
@@ -533,8 +538,13 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     // Cookie 配置（统一由 prepareCookieArg 构建，含 Windows 文件锁回退逻辑）
     std::string cookieArg = prepareCookieArg();
 
+    const auto& cfg = Config::getInstance().get();
+    std::string proxyArg = (cfg.proxyEnabled && !cfg.httpProxy.empty())
+        ? " --proxy \"" + cfg.httpProxy + "\""
+        : "";
+
     std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
-                    + fmtArg + "\"" + cookieArg
+                    + fmtArg + "\"" + cookieArg + proxyArg
                     + " \"" + pageUrl + "\" 2>&1";
 
     LOG_INFO("StreamExtractor: " + cmd);
@@ -547,7 +557,7 @@ bool StreamExtractor::extract(const std::string& pageUrl,
                  "如需播放登录内容，请关闭浏览器所有窗口和后台进程后重试，"
                  "或在配置中设置 cookiesFile。原始输出: " + json.substr(0, 200));
         std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
-                        + fmtArg + "\" \"" + pageUrl + "\" 2>&1";
+                        + fmtArg + "\"" + proxyArg + " \"" + pageUrl + "\" 2>&1";
         json = runCommand(cmdNoCookie, 30);
     }
 

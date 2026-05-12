@@ -11,6 +11,7 @@
 #include "FluxPlayer/utils/Downloader.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/Config.h"
 
 #include <cstdio>
 #include <array>
@@ -145,6 +146,11 @@ void Downloader::downloadLoop(const std::string& pageUrl,
         ? "bestvideo+bestaudio/best"
         : formatId + "+bestaudio/" + formatId;
 
+    const auto& cfg = Config::getInstance().get();
+    std::string proxyArg = (cfg.proxyEnabled && !cfg.httpProxy.empty())
+        ? " --proxy \"" + cfg.httpProxy + "\""
+        : "";
+
     std::string outputTemplate = outputDir + "/%(title)s.%(ext)s";
 #ifdef _WIN32
     SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
@@ -153,6 +159,7 @@ void Downloader::downloadLoop(const std::string& pageUrl,
     std::string cmd = "PYTHONUNBUFFERED=1 \"" + StreamExtractor::getExecutablePath() + "\" -f \"" + fmtArg + "\""
 #endif
                     + cookieArg
+                    + proxyArg
                     + " --merge-output-format mp4"
                     + " --newline"
                     + " --progress"
