@@ -28,6 +28,8 @@ struct ExtractedStream {
     std::string headers;               ///< HTTP headers，格式 "Key: Value\r\n..."
     bool isDash = false;               ///< 是否为 DASH 分离流
     double duration = 0.0;             ///< 时长（秒），0 表示未知（直播）
+    int64_t filesize = 0;              ///< 文件总大小（字节），0 表示未知
+                                       ///< 优先 requested_formats 各分段累加，fallback 到顶层 filesize_approx
     int width = 0;
     int height = 0;
     std::vector<QualityOption> qualities;  ///< 所有可用画质

@@ -1307,7 +1307,8 @@ void Controller::renderDownloadButton(float btnH) {
             }
             downloader_->start(currentPageUrl_, dir, dlHeight,
                 [this](float p, const std::string& spd, const std::string& eta, const std::string& fsize) {
-                    downloadProgress_ = p;
+                    // p < 0 表示进度未变化（暂停/重连等过渡态），保留上次进度条不动
+                    if (p >= 0.0f) downloadProgress_ = p;
                     std::lock_guard<std::mutex> lk(downloadMutex_);
                     // 只在有值时更新，避免 "already downloaded" 等无速度行覆盖上次有效值
                     if (!spd.empty())   downloadSpeed_ = spd;

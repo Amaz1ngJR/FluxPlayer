@@ -461,7 +461,18 @@ struct FormatDetail {
     std::string vcodec;
     std::string acodec;
     int height = 0;
+    int64_t filesize = 0;  ///< 文件大小（字节），0 表示未知
+    double tbr = 0.0;      ///< 总码率 kbps（yt-dlp 对 HLS 不给 filesize 时用它估算）
 };
+
+/// 从 JSON 片段中解析文件大小：优先 filesize，fallback 到 filesize_approx
+/// yt-dlp 对部分源（尤其 HLS）只提供 filesize_approx（基于码率估算）
+static int64_t parseFilesize(const std::string& json) {
+    std::string s = jsonNumber(json, "filesize");
+    if (s.empty() || s == "null") s = jsonNumber(json, "filesize_approx");
+    if (s.empty() || s == "null") return 0;
+    try { return std::stoll(s); } catch (...) { return 0; }
+}
 
 /// 解析 formats 数组，返回所有格式的详细信息
 static std::vector<FormatDetail> parseFormatsArray(const std::string& json) {
@@ -488,6 +499,9 @@ static std::vector<FormatDetail> parseFormatsArray(const std::string& json) {
                 d.acodec   = jsonString(fmt, "acodec");
                 std::string hStr = jsonNumber(fmt, "height");
                 d.height   = hStr.empty() ? 0 : std::stoi(hStr);
+                d.filesize = parseFilesize(fmt);
+                std::string tbrStr = jsonNumber(fmt, "tbr");
+                d.tbr      = (tbrStr.empty() || tbrStr == "null") ? 0.0 : std::stod(tbrStr);
                 if (!d.formatId.empty()) result.push_back(d);
                 objStart = std::string::npos;
             }
@@ -735,9 +749,38 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         return false;
     }
 
+    // 计算文件总大小（用于下载进度估算）
+    // 优先级：选中格式 filesize → 顶层 filesize_approx → 用 tbr (kbps) × duration 估算
+    // HLS 源 yt-dlp 常不给 filesize，tbr 是最后兜底的可靠码率来源
+    int64_t totalSize = 0;
+    double totalTbr = 0.0;  // 视频 + 音频总码率（kbps）
+    for (const auto& f : allFormats) {
+        if (f.formatId == out.selectedFormatId) {
+            totalSize = f.filesize;
+            totalTbr = f.tbr;
+            break;
+        }
+    }
+    if (out.isDash && !out.audioUrl.empty()) {
+        for (const auto& f : allFormats) {
+            if (f.url == out.audioUrl) {
+                totalSize += f.filesize;
+                totalTbr += f.tbr;
+                break;
+            }
+        }
+    }
+    if (totalSize <= 0) totalSize = parseFilesize(json);  // 顶层 filesize_approx
+    if (totalSize <= 0 && totalTbr > 0 && out.duration > 0) {
+        // tbr 单位 kbps：bytes = tbr * 1000 / 8 * duration = tbr * duration * 125
+        totalSize = static_cast<int64_t>(totalTbr * out.duration * 125);
+    }
+    out.filesize = totalSize;
+
     LOG_INFO("StreamExtractor: 提取成功 title=" + out.title
            + " isDash=" + (out.isDash ? "true" : "false")
-           + " duration=" + std::to_string(out.duration));
+           + " duration=" + std::to_string(out.duration)
+           + " filesize=" + std::to_string(out.filesize));
     return true;
 }
 
