@@ -1297,12 +1297,15 @@ void Controller::renderDownloadButton(float btnH) {
             downloadProgress_ = 0.0f;
             { std::lock_guard<std::mutex> lk(downloadMutex_); downloadSpeed_.clear(); downloadEta_.clear(); downloadFileSize_.clear(); }
             downloader_ = std::make_unique<Downloader>();
-            // 查找当前画质对应的 formatId，空则下载最高画质
-            std::string dlFormatId;
-            for (const auto& q : qualities_) {
-                if (q.label == currentQualityLabel_) { dlFormatId = q.formatId; break; }
+            // 从当前画质标签提取高度（如 "1080P" → "1080"），传给 Downloader 按高度筛选
+            // format_id 是会话级的，下载时 yt-dlp 重新提取会生成新 ID，不能直接复用
+            std::string dlHeight;
+            if (!currentQualityLabel_.empty()) {
+                for (char c : currentQualityLabel_) {
+                    if (std::isdigit(c)) dlHeight += c;
+                }
             }
-            downloader_->start(currentPageUrl_, dir, dlFormatId,
+            downloader_->start(currentPageUrl_, dir, dlHeight,
                 [this](float p, const std::string& spd, const std::string& eta, const std::string& fsize) {
                     downloadProgress_ = p;
                     std::lock_guard<std::mutex> lk(downloadMutex_);

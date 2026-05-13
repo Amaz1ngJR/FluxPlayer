@@ -309,8 +309,8 @@ bool Demuxer::isLiveStream() const {
     const char* formatName = m_formatCtx->iformat ? m_formatCtx->iformat->name : "";
     bool isStreamFormat = (std::string(formatName).find("rtsp") != std::string::npos ||
                           std::string(formatName).find("rtmp") != std::string::npos ||
-                          std::string(formatName).find("rtp") != std::string::npos ||
-                          std::string(formatName).find("hls") != std::string::npos);
+                          std::string(formatName).find("rtp") != std::string::npos);
+    // HLS 不加入 isStreamFormat：HLS 点播有有效 duration，由 hasInvalidDuration 区分直播
 
     // 通过 URL 协议头补充检测（RTMP 流实际被解析为 FLV 格式）
     const char* url = m_formatCtx->url ? m_formatCtx->url : "";

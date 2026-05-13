@@ -2,9 +2,9 @@
  * @file Downloader.h
  * @brief 视频下载器
  *
- * 调用 yt-dlp 在后台线程下载网页视频，
- * 解析进度、下载速度，通过回调通知 UI。
- * 暂停/恢复通过 SIGSTOP/SIGCONT 实现（macOS/Linux）。
+ * 用 FFmpeg API 直接读取网络流写入文件，支持 DASH 分离流合并。
+ * 不依赖 ffmpeg.exe CLI 工具，复用项目已集成的 FFmpeg 库。
+ * 暂停/恢复通过原子标志实现，取消通过 interrupt_callback 中断网络 I/O。
  */
 
 #pragma once
@@ -13,7 +13,6 @@
 #include <functional>
 #include <thread>
 #include <atomic>
-#include <mutex>
 
 namespace FluxPlayer {
 
@@ -39,6 +38,7 @@ public:
      * @brief 异步启动下载
      * @param pageUrl    网页 URL
      * @param outputDir  输出目录
+     * @param formatId   画质高度字符串（如 "1080"），空则下载最佳画质
      * @param onProgress 进度回调（在下载线程调用）
      * @param onFinish   完成回调（在下载线程调用）
      */
@@ -48,13 +48,13 @@ public:
                ProgressCallback onProgress,
                FinishCallback   onFinish);
 
-    /// 暂停下载（SIGSTOP 冻结 yt-dlp 进程）
+    /// 暂停下载（原子标志，写入循环中检查）
     void pause();
 
-    /// 恢复下载（SIGCONT 恢复 yt-dlp 进程）
+    /// 恢复下载
     void resume();
 
-    /// 取消下载
+    /// 取消下载（interrupt_callback 中断网络 I/O）
     void cancel();
 
     bool isRunning()  const { return running_.load(); }
@@ -71,13 +71,6 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> cancelled_{false};
     std::atomic<bool> paused_{false};
-
-    std::mutex pidMutex_;
-#ifdef _WIN32
-    void* childProcessHandle_{nullptr};  ///< Windows HANDLE（void* 避免头文件引入 windows.h）
-#else
-    int childPid_{0};  ///< POSIX pid_t，用于 SIGSTOP/SIGCONT/SIGTERM
-#endif
 };
 
 } // namespace FluxPlayer

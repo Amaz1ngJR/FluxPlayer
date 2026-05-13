@@ -454,16 +454,23 @@ std::string StreamExtractor::parseHeaders(const std::string& json) {
     return result;
 }
 
-std::vector<QualityOption> StreamExtractor::parseQualities(const std::string& json) {
-    std::vector<QualityOption> result;
-    // 找 "formats" 数组
+/// 内部结构：formats 数组中每个格式的详细信息
+struct FormatDetail {
+    std::string formatId;
+    std::string url;
+    std::string vcodec;
+    std::string acodec;
+    int height = 0;
+};
+
+/// 解析 formats 数组，返回所有格式的详细信息
+static std::vector<FormatDetail> parseFormatsArray(const std::string& json) {
+    std::vector<FormatDetail> result;
     size_t pos = json.find("\"formats\"");
     if (pos == std::string::npos) return result;
     pos = json.find('[', pos);
     if (pos == std::string::npos) return result;
 
-    // 逐个解析 format 对象
-    // depth=1 表示已在 '[' 内部，遇到 '{' 时 depth==1 说明是顶层 format 对象
     int depth = 1;
     size_t objStart = std::string::npos;
     for (size_t i = pos + 1; i < json.size(); ++i) {
@@ -474,37 +481,45 @@ std::vector<QualityOption> StreamExtractor::parseQualities(const std::string& js
             --depth;
             if (depth == 1 && objStart != std::string::npos) {
                 std::string fmt = json.substr(objStart, i - objStart + 1);
-                std::string fid    = jsonString(fmt, "format_id");
-                std::string vcodec = jsonString(fmt, "vcodec");
-                std::string hStr   = jsonNumber(fmt, "height");
-
-                // 只保留有视频的格式
-                if (!fid.empty() && vcodec != "none" && !vcodec.empty() && !hStr.empty()) {
-                    int h = std::stoi(hStr);
-                    if (h > 0) {
-                        QualityOption opt;
-                        opt.formatId = fid;
-                        opt.height   = h;
-                        opt.label    = std::to_string(h) + "P";
-                        bool isH264  = vcodec.find("avc1") == 0 || vcodec.find("avc") == 0;
-                        // 同分辨率：H.264 优先；已有 H.264 则跳过，已有非 H.264 则被 H.264 替换
-                        auto it = std::find_if(result.begin(), result.end(),
-                                               [h](const QualityOption& q){ return q.height == h; });
-                        if (it == result.end()) {
-                            result.push_back(opt);
-                        } else if (isH264 && it->formatId.find("avc") == std::string::npos) {
-                            *it = opt;  // 用 H.264 替换已有的非 H.264
-                        }
-                    }
-                }
+                FormatDetail d;
+                d.formatId = jsonString(fmt, "format_id");
+                d.url      = jsonString(fmt, "url");
+                d.vcodec   = jsonString(fmt, "vcodec");
+                d.acodec   = jsonString(fmt, "acodec");
+                std::string hStr = jsonNumber(fmt, "height");
+                d.height   = hStr.empty() ? 0 : std::stoi(hStr);
+                if (!d.formatId.empty()) result.push_back(d);
                 objStart = std::string::npos;
             }
         } else if (json[i] == ']' && depth == 1) {
             break;
         }
     }
+    return result;
+}
 
-    // 按分辨率降序排列
+std::vector<QualityOption> StreamExtractor::parseQualities(const std::string& json) {
+    std::vector<QualityOption> result;
+    auto formats = parseFormatsArray(json);
+
+    for (const auto& d : formats) {
+        if (d.vcodec.empty() || d.vcodec == "none" || d.height <= 0) continue;
+
+        QualityOption opt;
+        opt.formatId = d.formatId;
+        opt.height   = d.height;
+        opt.label    = std::to_string(d.height) + "P";
+        bool isH264  = d.vcodec.find("avc1") == 0 || d.vcodec.find("avc") == 0;
+
+        auto it = std::find_if(result.begin(), result.end(),
+                               [&](const QualityOption& q){ return q.height == d.height; });
+        if (it == result.end()) {
+            result.push_back(opt);
+        } else if (isH264 && it->formatId.find("avc") == std::string::npos) {
+            *it = opt;
+        }
+    }
+
     std::sort(result.begin(), result.end(),
               [](const QualityOption& a, const QualityOption& b) { return a.height > b.height; });
     return result;
@@ -529,11 +544,17 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     // -j: 输出 JSON，不下载
     // --no-playlist: 只处理单个视频
     // --no-warnings: 减少干扰输出
-    std::string fmtArg = formatId.empty()
-        // 优先 H.264 视频（avc1），避免 AV1/HEVC 在 MKV pipe 中的兼容性问题
-        ? "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best"
-        // 指定画质时补充 bestaudio，确保返回 DASH 分离流（video+audio）
-        : formatId + "+bestaudio/" + formatId;
+    // 初始提取不指定 -f，让 yt-dlp 返回默认格式信息（formats 数组始终完整）
+    // 指定 formatId 时才用 -f 精确选择
+    std::string fmtPart;
+    if (formatId.empty()) {
+        // 不指定 -f，获取完整 JSON 后自行从 formats 数组选最佳格式
+        fmtPart = "";
+    } else if (formatId.find("hls-") == 0) {
+        fmtPart = " -f \"" + formatId + "\"";
+    } else {
+        fmtPart = " -f \"" + formatId + "+bestaudio/" + formatId + "\"";
+    }
 
     // Cookie 配置（统一由 prepareCookieArg 构建，含 Windows 文件锁回退逻辑）
     std::string cookieArg = prepareCookieArg();
@@ -543,8 +564,8 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         ? " --proxy \"" + cfg.httpProxy + "\""
         : "";
 
-    std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
-                    + fmtArg + "\"" + cookieArg + proxyArg
+    std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
+                    + fmtPart + cookieArg + proxyArg
                     + " \"" + pageUrl + "\" 2>&1";
 
     LOG_INFO("StreamExtractor: " + cmd);
@@ -556,8 +577,8 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         LOG_WARN("StreamExtractor: cookie 方式失败，降级为无 cookie 重试。"
                  "如需播放登录内容，请关闭浏览器所有窗口和后台进程后重试，"
                  "或在配置中设置 cookiesFile。原始输出: " + json.substr(0, 200));
-        std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings -f \""
-                        + fmtArg + "\"" + proxyArg + " \"" + pageUrl + "\" 2>&1";
+        std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
+                        + fmtPart + proxyArg + " \"" + pageUrl + "\" 2>&1";
         json = runCommand(cmdNoCookie, 30);
     }
 
@@ -574,7 +595,6 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     out.title    = jsonString(json, "title");
     out.headers  = parseHeaders(json);
     out.qualities = parseQualities(json);
-    out.selectedFormatId = formatId;
 
     // 解析扩展信息
     out.uploader = jsonString(json, "uploader");
@@ -587,7 +607,6 @@ bool StreamExtractor::extract(const std::string& pageUrl,
 
     std::string uploadDateRaw = jsonString(json, "upload_date");
     if (uploadDateRaw.size() == 8) {
-        // YYYYMMDD -> YYYY-MM-DD
         out.uploadDate = uploadDateRaw.substr(0, 4) + "-"
                        + uploadDateRaw.substr(4, 2) + "-"
                        + uploadDateRaw.substr(6, 2);
@@ -596,44 +615,116 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     std::string durStr = jsonNumber(json, "duration");
     out.duration = durStr.empty() ? 0.0 : std::stod(durStr);
 
-    std::string wStr = jsonNumber(json, "width");
-    std::string hStr = jsonNumber(json, "height");
-    out.width  = wStr.empty() ? 0 : std::stoi(wStr);
-    out.height = hStr.empty() ? 0 : std::stoi(hStr);
+    // ── 从 formats 数组中选择最佳格式并提取 URL ──
+    auto allFormats = parseFormatsArray(json);
 
-    // 判断是否为 DASH 分离流：requested_formats 存在且含两个流
-    bool hasTwoStreams = json.find("\"requested_formats\"") != std::string::npos;
+    if (formatId.empty() && !out.qualities.empty()) {
+        // 初始提取：自行从 formats 数组选最佳格式（不依赖 yt-dlp 的 -f 选择）
+        std::string bestId = out.qualities[0].formatId;  // 最高画质 H.264 优先
+        out.selectedFormatId = bestId;
 
-    if (hasTwoStreams) {
-        // 用深度追踪正确提取 requested_formats 中每个完整的 format 对象
-        size_t rfPos = json.find("\"requested_formats\"");
-        size_t arrStart = json.find('[', rfPos);
-        if (arrStart != std::string::npos) {
-            int depth = 0;
-            size_t objStart = std::string::npos;
-            std::vector<std::string> fmts;
-            for (size_t i = arrStart; i < json.size() && fmts.size() < 2; ++i) {
-                if (json[i] == '{') {
-                    if (depth == 0) objStart = i;
-                    ++depth;
-                } else if (json[i] == '}') {
-                    --depth;
-                    if (depth == 0 && objStart != std::string::npos) {
-                        fmts.push_back(json.substr(objStart, i - objStart + 1));
-                        objStart = std::string::npos;
+        // 找到该格式的详细信息
+        const FormatDetail* bestFmt = nullptr;
+        for (const auto& f : allFormats) {
+            if (f.formatId == bestId) { bestFmt = &f; break; }
+        }
+
+        if (bestFmt && !bestFmt->url.empty()) {
+            bool hasAudio = !bestFmt->acodec.empty() && bestFmt->acodec != "none";
+            if (hasAudio) {
+                // 音视频已合并（HLS 等），直接用单一 URL
+                out.videoUrl = bestFmt->url;
+                out.audioUrl = "";
+                out.isDash   = false;
+            } else {
+                // 纯视频流（DASH），需要找最佳音频流
+                out.videoUrl = bestFmt->url;
+                out.isDash   = true;
+                // 从 formats 中找最佳音频（acodec != none, vcodec == none）
+                std::string bestAudioUrl;
+                for (const auto& f : allFormats) {
+                    if ((f.vcodec.empty() || f.vcodec == "none") &&
+                        !f.acodec.empty() && f.acodec != "none" && !f.url.empty()) {
+                        // 简单选最后一个（formats 数组通常按质量升序排列）
+                        bestAudioUrl = f.url;
                     }
-                } else if (json[i] == ']' && depth == 0) {
+                }
+                if (!bestAudioUrl.empty()) {
+                    out.audioUrl = bestAudioUrl;
+                } else {
+                    // 没有独立音频流，退回单流模式
+                    out.isDash = false;
+                    out.audioUrl = "";
+                }
+            }
+            out.height = bestFmt->height;
+            out.width  = 0;  // demuxer 会检测实际宽度
+        } else {
+            // fallback：用顶层 url
+            out.videoUrl = jsonString(json, "url");
+            out.audioUrl = "";
+            out.isDash   = false;
+            out.selectedFormatId = formatId;
+        }
+    } else if (!formatId.empty()) {
+        // 指定了 formatId（画质切换）：用 requested_formats 或顶层 url
+        out.selectedFormatId = formatId;
+
+        std::string wStr = jsonNumber(json, "width");
+        std::string hStr = jsonNumber(json, "height");
+        out.width  = wStr.empty() ? 0 : std::stoi(wStr);
+        out.height = hStr.empty() ? 0 : std::stoi(hStr);
+
+        bool hasTwoStreams = json.find("\"requested_formats\"") != std::string::npos;
+        if (hasTwoStreams) {
+            size_t rfPos = json.find("\"requested_formats\"");
+            size_t arrStart = json.find('[', rfPos);
+            if (arrStart != std::string::npos) {
+                int depth = 0;
+                size_t objStart = std::string::npos;
+                std::vector<std::string> fmts;
+                for (size_t i = arrStart; i < json.size() && fmts.size() < 2; ++i) {
+                    if (json[i] == '{') {
+                        if (depth == 0) objStart = i;
+                        ++depth;
+                    } else if (json[i] == '}') {
+                        --depth;
+                        if (depth == 0 && objStart != std::string::npos) {
+                            fmts.push_back(json.substr(objStart, i - objStart + 1));
+                            objStart = std::string::npos;
+                        }
+                    } else if (json[i] == ']' && depth == 0) {
+                        break;
+                    }
+                }
+                if (fmts.size() >= 1) out.videoUrl = jsonString(fmts[0], "url");
+                if (fmts.size() >= 2) out.audioUrl = jsonString(fmts[1], "url");
+            }
+            out.isDash = !out.videoUrl.empty() && !out.audioUrl.empty();
+        }
+
+        if (!out.isDash) {
+            // 对于 HLS 等已合并格式，也从 formats 数组取 URL（更可靠）
+            for (const auto& f : allFormats) {
+                if (f.formatId == formatId && !f.url.empty()) {
+                    out.videoUrl = f.url;
                     break;
                 }
             }
-            if (fmts.size() >= 1) out.videoUrl = jsonString(fmts[0], "url");
-            if (fmts.size() >= 2) out.audioUrl = jsonString(fmts[1], "url");
+            if (out.videoUrl.empty()) {
+                out.videoUrl = jsonString(json, "url");
+            }
+            out.audioUrl = "";
+            out.isDash   = false;
         }
-        out.isDash = !out.videoUrl.empty() && !out.audioUrl.empty();
-    }
+    } else {
+        // 无 qualities 且无 formatId：用顶层 url
+        out.selectedFormatId = "";
+        std::string wStr = jsonNumber(json, "width");
+        std::string hStr = jsonNumber(json, "height");
+        out.width  = wStr.empty() ? 0 : std::stoi(wStr);
+        out.height = hStr.empty() ? 0 : std::stoi(hStr);
 
-    if (!out.isDash) {
-        // 单一流：直接取顶层 url
         out.videoUrl = jsonString(json, "url");
         out.audioUrl = "";
         out.isDash   = false;

@@ -2,54 +2,123 @@
  * @file Downloader.cpp
  * @brief 视频下载器实现
  *
- * POSIX（macOS/Linux）：fork+pipe 启动 yt-dlp，SIGSTOP/SIGCONT 暂停/恢复。
- * Windows：CreateProcess+pipe 启动 yt-dlp，SuspendThread/ResumeThread 暂停/恢复。
+ * 用 FFmpeg API 直接读取网络流写入文件，支持 DASH 分离流合并。
+ * 不依赖 ffmpeg.exe CLI 工具，复用项目已集成的 FFmpeg 库。
  *
- * yt-dlp 进度行格式：[download]  45.3% of  123.45MiB at  1.23MiB/s ETA 00:30
+ * 流程：
+ * 1. StreamExtractor::extract() 获取流 URL
+ * 2. avformat_open_input() 打开视频/音频流
+ * 3. avformat_alloc_output_context2() + avio_open() 创建输出文件
+ * 4. 逐 packet 读取并写入，通过 PTS 计算进度
  */
 
 #include "FluxPlayer/utils/Downloader.h"
-#include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 
+#include <chrono>
+#include <thread>
 #include <cstdio>
-#include <array>
-#include <vector>
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavutil/opt.h>
+#include <libavutil/error.h>
+}
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <tlhelp32.h>
-#include <io.h>
-#include <fcntl.h>
-
-// 暂停或恢复进程的所有线程（Windows 无 SIGSTOP，需枚举线程逐一操作）
-static void suspendResumeAllThreads(HANDLE hProcess, bool suspend) {
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
-    DWORD pid = GetProcessId(hProcess);
-    THREADENTRY32 te{sizeof(te)};
-    if (Thread32First(snap, &te)) {
-        do {
-            if (te.th32OwnerProcessID == pid) {
-                HANDLE ht = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-                if (ht) {
-                    suspend ? SuspendThread(ht) : ResumeThread(ht);
-                    CloseHandle(ht);
-                }
-            }
-        } while (Thread32Next(snap, &te));
-    }
-    CloseHandle(snap);
-}
-#else
-#include <unistd.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <fcntl.h>
 #endif
 
 namespace FluxPlayer {
+
+// 超时秒数：网络操作（打开流、读取 packet）的最大等待时间
+static constexpr int kNetworkTimeoutSecs = 20;
+// 进度回调最小间隔（秒）
+static constexpr double kProgressIntervalSecs = 0.5;
+// 暂停时轮询间隔（毫秒）
+static constexpr int kPausePollMs = 100;
+// ETA 超过一天视为无效（网络断开等异常情况）
+static constexpr double kMaxEtaSecs = 86400.0;
+// 无法从流获取码率时的默认估算值（2 Mbps）
+static constexpr int64_t kDefaultBitrate = 2000000;
+
+// interrupt_callback 上下文：支持取消和超时
+struct DlInterruptCtx {
+    std::chrono::steady_clock::time_point deadline;
+    std::atomic<bool>* cancelled;
+};
+
+static int dlInterruptCb(void* opaque) {
+    auto* ctx = static_cast<DlInterruptCtx*>(opaque);
+    if (ctx->cancelled->load()) return 1;
+    return std::chrono::steady_clock::now() > ctx->deadline ? 1 : 0;
+}
+
+// 打开网络流，注入 headers 和代理
+static AVFormatContext* openStream(const std::string& url,
+                                   const std::string& headers,
+                                   DlInterruptCtx& intCtx) {
+    AVFormatContext* ctx = avformat_alloc_context();
+    if (!ctx) return nullptr;
+    ctx->interrupt_callback = {dlInterruptCb, &intCtx};
+
+    AVDictionary* opts = nullptr;
+    if (!headers.empty())
+        av_dict_set(&opts, "headers", headers.c_str(), 0);
+
+    const auto& cfg = Config::getInstance().get();
+    if (cfg.proxyEnabled && !cfg.httpProxy.empty())
+        av_dict_set(&opts, "http_proxy", cfg.httpProxy.c_str(), 0);
+
+    av_dict_set(&opts, "reconnect", "1", 0);
+    av_dict_set(&opts, "reconnect_streamed", "1", 0);
+
+    intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
+    int ret = avformat_open_input(&ctx, url.c_str(), nullptr, &opts);
+    av_dict_free(&opts);
+
+    if (ret < 0) {
+        char errbuf[128];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        LOG_ERROR("Downloader: 打开流失败 " + url.substr(0, 80) + " - " + errbuf);
+        avformat_free_context(ctx);
+        return nullptr;
+    }
+    avformat_find_stream_info(ctx, nullptr);
+    return ctx;
+}
+
+// 从标题生成合法文件名（去除非法字符）
+static std::string sanitizeFilename(const std::string& title) {
+    std::string result;
+    for (char c : title) {
+        if (c == '/' || c == '\\' || c == ':' || c == '*' ||
+            c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+            result += '_';
+        else
+            result += c;
+    }
+    return result.empty() ? "video" : result;
+}
+
+// 格式化字节数为可读字符串
+static std::string formatBytes(int64_t bytes) {
+    if (bytes < 1024 * 1024)
+        return std::to_string(bytes / 1024) + "KiB";
+    return std::to_string(bytes / (1024 * 1024)) + "MiB";
+}
+
+// 格式化秒数为 MM:SS
+static std::string formatEta(double secs) {
+    if (secs <= 0 || secs > kMaxEtaSecs) return "--:--";
+    int s = static_cast<int>(secs);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", s / 60, s % 60);
+    return buf;
+}
 
 void Downloader::start(const std::string& pageUrl,
                        const std::string& outputDir,
@@ -59,14 +128,6 @@ void Downloader::start(const std::string& pageUrl,
     if (running_.load()) return;
     cancelled_.store(false);
     paused_.store(false);
-    {
-        std::lock_guard<std::mutex> lk(pidMutex_);
-#ifdef _WIN32
-        childProcessHandle_ = nullptr;
-#else
-        childPid_ = 0;
-#endif
-    }
     running_.store(true);
     thread_ = std::thread(&Downloader::downloadLoop, this,
                           pageUrl, outputDir, formatId,
@@ -74,307 +135,333 @@ void Downloader::start(const std::string& pageUrl,
 }
 
 void Downloader::pause() {
-    if (!running_.load() || paused_.load()) return;
-    std::lock_guard<std::mutex> lk(pidMutex_);
-#ifdef _WIN32
-    if (childProcessHandle_)
-        suspendResumeAllThreads((HANDLE)childProcessHandle_, true);
-#else
-    if (childPid_ > 0) ::kill(-childPid_, SIGSTOP);
-#endif
     paused_.store(true);
     LOG_INFO("Downloader: paused");
 }
 
 void Downloader::resume() {
-    if (!paused_.load()) return;
-    std::lock_guard<std::mutex> lk(pidMutex_);
-#ifdef _WIN32
-    if (childProcessHandle_)
-        suspendResumeAllThreads((HANDLE)childProcessHandle_, false);
-#else
-    if (childPid_ > 0) ::kill(-childPid_, SIGCONT);
-#endif
     paused_.store(false);
     LOG_INFO("Downloader: resumed");
 }
 
 void Downloader::cancel() {
     cancelled_.store(true);
-    // 暂停中需先恢复，否则进程无法响应终止信号
-    if (paused_.load()) {
-        std::lock_guard<std::mutex> lk(pidMutex_);
-#ifdef _WIN32
-        if (childProcessHandle_)
-            suspendResumeAllThreads((HANDLE)childProcessHandle_, false);
-#else
-        if (childPid_ > 0) ::kill(-childPid_, SIGCONT);
-#endif
-        paused_.store(false);
-    }
-    {
-        std::lock_guard<std::mutex> lk(pidMutex_);
-#ifdef _WIN32
-        if (childProcessHandle_)
-            TerminateProcess((HANDLE)childProcessHandle_, 1);
-#else
-        if (childPid_ > 0) ::kill(-childPid_, SIGTERM);
-#endif
-    }
+    paused_.store(false);
     if (thread_.joinable()) thread_.join();
 }
 
-/**
- * @brief 下载线程主循环
- *
- * 通过 fork+exec 启动 yt-dlp 子进程，逐行解析其 stdout 输出，
- * 提取下载进度、速度、ETA 和文件大小，通过回调通知 UI。
- * 取消时向子进程组发送 SIGTERM 并清理未完成的临时文件。
- *
- * @param pageUrl    网页 URL
- * @param outputDir  输出目录
- * @param onProgress 进度回调（在下载线程调用）
- * @param onFinish   完成回调（在下载线程调用）
- */
+// ── 辅助：提取流 URL，按目标高度选择最佳画质 ──
+static bool extractStream(const std::string& pageUrl,
+                           const std::string& heightStr,
+                           ExtractedStream& out) {
+    std::string error;
+    if (!StreamExtractor::extract(pageUrl, "", out, error)) {
+        LOG_ERROR("Downloader: 提取流失败: " + error);
+        return false;
+    }
+    if (heightStr.empty() || out.qualities.empty()) return true;
+
+    int targetHeight = 0;
+    try { targetHeight = std::stoi(heightStr); } catch (...) {}
+    if (targetHeight <= 0) return true;
+
+    // 找最接近目标高度的画质
+    std::string bestFmtId;
+    int bestDiff = INT_MAX;
+    for (const auto& q : out.qualities) {
+        int diff = std::abs(q.height - targetHeight);
+        if (diff < bestDiff) { bestDiff = diff; bestFmtId = q.formatId; }
+    }
+    if (bestFmtId.empty() || bestFmtId == out.selectedFormatId) return true;
+
+    ExtractedStream refined;
+    if (StreamExtractor::extract(pageUrl, bestFmtId, refined, error)) {
+        out = refined;
+    } else {
+        LOG_WARN("Downloader: 指定画质提取失败，使用默认画质: " + error);
+    }
+    return true;
+}
+
+// ── 辅助：创建输出上下文并打开文件 ──
+static AVFormatContext* createOutputContext(const std::string& outputPath) {
+    AVFormatContext* outCtx = nullptr;
+    if (avformat_alloc_output_context2(&outCtx, nullptr, nullptr, outputPath.c_str()) < 0) {
+        LOG_ERROR("Downloader: 创建输出上下文失败");
+        return nullptr;
+    }
+    if (!(outCtx->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open(&outCtx->pb, outputPath.c_str(), AVIO_FLAG_WRITE) < 0) {
+            LOG_ERROR("Downloader: 无法创建输出文件: " + outputPath);
+            avformat_free_context(outCtx);
+            return nullptr;
+        }
+    }
+    return outCtx;
+}
+
+// ── 辅助：添加输出流并复制编解码参数 ──
+struct OutputStreams {
+    AVStream* video = nullptr;
+    AVStream* audio = nullptr;
+    int audioIdx    = -1;
+};
+
+static OutputStreams addOutputStreams(AVFormatContext* outCtx,
+                                      AVFormatContext* videoCtx, int videoStreamIn,
+                                      AVFormatContext* audioSrcCtx, int audioStreamIn) {
+    OutputStreams s;
+    s.video = avformat_new_stream(outCtx, nullptr);
+    avcodec_parameters_copy(s.video->codecpar, videoCtx->streams[videoStreamIn]->codecpar);
+    s.video->codecpar->codec_tag = 0;
+    s.video->time_base = videoCtx->streams[videoStreamIn]->time_base;
+
+    if (audioStreamIn >= 0 && audioSrcCtx) {
+        s.audio = avformat_new_stream(outCtx, nullptr);
+        s.audioIdx = s.audio->index;
+        avcodec_parameters_copy(s.audio->codecpar, audioSrcCtx->streams[audioStreamIn]->codecpar);
+        s.audio->codecpar->codec_tag = 0;
+        s.audio->time_base = audioSrcCtx->streams[audioStreamIn]->time_base;
+    }
+    return s;
+}
+
+// ── 辅助：写入单流 packet（HLS 等音视频已合并的格式）──
+static void writeSingleStreamPacket(AVPacket* pkt,
+                                     AVFormatContext* videoCtx,
+                                     int videoStreamIn, int audioStreamIn,
+                                     const OutputStreams& out,
+                                     AVFormatContext* outCtx,
+                                     int64_t& bytesWritten) {
+    if (pkt->stream_index == videoStreamIn) {
+        av_packet_rescale_ts(pkt, videoCtx->streams[videoStreamIn]->time_base,
+                             out.video->time_base);
+        pkt->stream_index = 0;
+        bytesWritten += pkt->size;
+        av_interleaved_write_frame(outCtx, pkt);
+    } else if (out.audioIdx >= 0 && pkt->stream_index == audioStreamIn) {
+        av_packet_rescale_ts(pkt, videoCtx->streams[audioStreamIn]->time_base,
+                             out.audio->time_base);
+        pkt->stream_index = out.audioIdx;
+        bytesWritten += pkt->size;
+        av_interleaved_write_frame(outCtx, pkt);
+    }
+}
+
+// ── 辅助：DASH 双流交织写入一步 ──
+static void writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
+                           int videoStreamIn, int audioStreamIn,
+                           const OutputStreams& streams, AVFormatContext* outCtx,
+                           AVPacket* videoPkt, AVPacket* audioPkt,
+                           bool& videoEof, bool& audioEof,
+                           bool& videoReady, bool& audioReady,
+                           int64_t& bytesWritten) {
+    if (!videoReady && !videoEof) {
+        int ret = av_read_frame(videoCtx, videoPkt);
+        if (ret < 0) { videoEof = true; }
+        else if (videoPkt->stream_index == videoStreamIn) {
+            av_packet_rescale_ts(videoPkt, videoCtx->streams[videoStreamIn]->time_base,
+                                 streams.video->time_base);
+            videoPkt->stream_index = 0;
+            videoReady = true;
+        } else { av_packet_unref(videoPkt); }
+    }
+    if (!audioReady && !audioEof) {
+        int ret = av_read_frame(audioCtx, audioPkt);
+        if (ret < 0) { audioEof = true; }
+        else if (audioPkt->stream_index == audioStreamIn) {
+            av_packet_rescale_ts(audioPkt, audioCtx->streams[audioStreamIn]->time_base,
+                                 streams.audio->time_base);
+            audioPkt->stream_index = streams.audioIdx;
+            audioReady = true;
+        } else { av_packet_unref(audioPkt); }
+    }
+    if (!videoReady && !audioReady) return;
+
+    bool writeVideo = videoReady && (!audioReady ||
+        av_compare_ts(videoPkt->dts, streams.video->time_base,
+                      audioPkt->dts, streams.audio->time_base) <= 0);
+    if (writeVideo) {
+        bytesWritten += videoPkt->size;
+        av_interleaved_write_frame(outCtx, videoPkt);
+        av_packet_unref(videoPkt); videoReady = false;
+    } else {
+        bytesWritten += audioPkt->size;
+        av_interleaved_write_frame(outCtx, audioPkt);
+        av_packet_unref(audioPkt); audioReady = false;
+    }
+}
+
+// ── 辅助：打开输入流、创建输出文件、写入循环的上下文 ──
+struct WriteContext {
+    AVFormatContext* videoCtx;
+    AVFormatContext* audioCtx;
+    AVFormatContext* outCtx;
+    int videoStreamIn;
+    int audioStreamIn;
+    OutputStreams streams;
+    std::string outputPath;
+};
+
+// 写入循环：逐 packet 读取并写入，定期回调进度
+using ProgressCb = std::function<void(float, const std::string&, const std::string&, const std::string&)>;
+
+static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
+                          DlInterruptCtx& intCtx,
+                          std::atomic<bool>& running, std::atomic<bool>& cancelled,
+                          std::atomic<bool>& paused, ProgressCb& onProgress) {
+    int64_t bytesWritten = 0;
+    auto startTime = std::chrono::steady_clock::now();
+    auto lastProgressTime = startTime;
+    AVPacket* videoPkt = av_packet_alloc();
+    AVPacket* audioPkt = av_packet_alloc();
+    bool videoEof = false, audioEof = false;
+    bool videoReady = false, audioReady = false;
+    bool singleStream = (wc.audioCtx == nullptr);
+
+    while (running.load() && !cancelled.load()) {
+        if (paused.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPausePollMs));
+            intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
+            continue;
+        }
+        intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
+
+        if (singleStream) {
+            AVPacket* pkt = av_packet_alloc();
+            if (av_read_frame(wc.videoCtx, pkt) < 0) { av_packet_free(&pkt); break; }
+            writeSingleStreamPacket(pkt, wc.videoCtx, wc.videoStreamIn, wc.audioStreamIn,
+                                    wc.streams, wc.outCtx, bytesWritten);
+            av_packet_free(&pkt);
+        } else {
+            writeDashStep(wc.videoCtx, wc.audioCtx, wc.videoStreamIn, wc.audioStreamIn,
+                          wc.streams, wc.outCtx, videoPkt, audioPkt,
+                          videoEof, audioEof, videoReady, audioReady, bytesWritten);
+            if (videoEof && audioEof) break;
+            if (!videoReady && !audioReady && !videoEof && !audioEof) break;
+        }
+
+        // 定期回调进度（用码率估算总大小）
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - lastProgressTime).count() >= kProgressIntervalSecs
+            && onProgress && info.duration > 0) {
+            int64_t bitrate = wc.videoCtx->bit_rate + (wc.audioCtx ? wc.audioCtx->bit_rate : 0);
+            if (bitrate <= 0) bitrate = kDefaultBitrate;
+            int64_t estimatedTotal = static_cast<int64_t>(info.duration * bitrate / 8);
+            float progress = estimatedTotal > 0
+                ? std::min(1.0f, static_cast<float>(bytesWritten) / estimatedTotal) : 0.0f;
+            double elapsed = std::chrono::duration<double>(now - startTime).count();
+            double speed = elapsed > 0 ? bytesWritten / elapsed : 0;
+            double eta = (speed > 0 && progress < 1.0f) ? (estimatedTotal - bytesWritten) / speed : 0;
+            onProgress(progress, formatBytes(static_cast<int64_t>(speed)) + "/s",
+                       formatEta(eta), formatBytes(bytesWritten));
+            lastProgressTime = now;
+        }
+    }
+
+    if (videoReady) { av_interleaved_write_frame(wc.outCtx, videoPkt); av_packet_unref(videoPkt); }
+    if (audioReady) { av_interleaved_write_frame(wc.outCtx, audioPkt); av_packet_unref(audioPkt); }
+    av_packet_free(&videoPkt);
+    av_packet_free(&audioPkt);
+}
+
 void Downloader::downloadLoop(const std::string& pageUrl,
                                const std::string& outputDir,
                                const std::string& formatId,
                                ProgressCallback onProgress,
                                FinishCallback   onFinish) {
-    std::string cookieArg = StreamExtractor::prepareCookieArg();
-    std::string fmtArg = formatId.empty()
-        ? "bestvideo+bestaudio/best"
-        : formatId + "+bestaudio/" + formatId;
-
-    const auto& cfg = Config::getInstance().get();
-    std::string proxyArg = (cfg.proxyEnabled && !cfg.httpProxy.empty())
-        ? " --proxy \"" + cfg.httpProxy + "\""
-        : "";
-
-    std::string outputTemplate = outputDir + "/%(title)s.%(ext)s";
-#ifdef _WIN32
-    SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
-    std::string cmd = "\"" + StreamExtractor::getExecutablePath() + "\" -f \"" + fmtArg + "\""
-#else
-    std::string cmd = "PYTHONUNBUFFERED=1 \"" + StreamExtractor::getExecutablePath() + "\" -f \"" + fmtArg + "\""
-#endif
-                    + cookieArg
-                    + proxyArg
-                    + " --merge-output-format mp4"
-                    + " --newline"
-                    + " --progress"
-                    + " --continue"
-                    + " -o \"" + outputTemplate + "\""
-                    + " \"" + pageUrl + "\""
-                    + " 2>&1";
-
-    LOG_INFO("Downloader: " + cmd);
-
-#ifdef _WIN32
-    // Windows：CreateProcess + 匿名管道，获取 HANDLE 以便暂停/恢复/终止
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    HANDLE hRead, hWrite;
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+    // ── 第一步：提取流 URL ──
+    ExtractedStream info;
+    if (!extractStream(pageUrl, formatId, info)) {
         running_.store(false);
-        if (onFinish) onFinish(false, "", "CreatePipe failed");
+        if (onFinish) onFinish(false, "", "提取流失败");
         return;
     }
-    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);  // 读端不继承给子进程
-
-    STARTUPINFOA si{sizeof(si)};
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdOutput = hWrite;
-    si.hStdError  = hWrite;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-
-    PROCESS_INFORMATION pi{};
-    std::string fullCmd = "cmd /c \"" + cmd + "\"";
-    if (!CreateProcessA(nullptr, &fullCmd[0], nullptr, nullptr, TRUE,
-                        CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(hRead); CloseHandle(hWrite);
-        running_.store(false);
-        if (onFinish) onFinish(false, "", "CreateProcess failed");
-        return;
-    }
-    CloseHandle(hWrite);   // 父进程不写，关闭写端
-    CloseHandle(pi.hThread);
-    { std::lock_guard<std::mutex> lk(pidMutex_); childProcessHandle_ = pi.hProcess; }
-
-    FILE* fp = _fdopen(_open_osfhandle((intptr_t)hRead, _O_RDONLY | _O_TEXT), "r");
-    if (!fp) {
-        CloseHandle(hRead);
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        CloseHandle(pi.hProcess);
-        running_.store(false);
-        if (onFinish) onFinish(false, "", "_fdopen failed");
-        return;
-    }
-#else
-    // POSIX：pipe + fork，子进程创建新进程组以便整组发信号
-    int pipefd[2];
-    if (::pipe(pipefd) != 0) {
-        running_.store(false);
-        if (onFinish) onFinish(false, "", "pipe() failed");
-        return;
-    }
-
-    pid_t pid = ::fork();
-    if (pid < 0) {
-        ::close(pipefd[0]); ::close(pipefd[1]);
-        running_.store(false);
-        if (onFinish) onFinish(false, "", "fork() failed");
-        return;
-    }
-
-    if (pid == 0) {
-        // 子进程：创建新进程组，以便父进程通过 kill(-pid) 向整个组发信号
-        ::setpgid(0, 0);
-        ::setenv("PYTHONUNBUFFERED", "1", 1);
-        ::close(pipefd[0]);
-        ::dup2(pipefd[1], STDOUT_FILENO);
-        ::dup2(pipefd[1], STDERR_FILENO);
-        ::close(pipefd[1]);
-        ::execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
-        ::_exit(127);
-    }
-
-    ::close(pipefd[1]);
-    { std::lock_guard<std::mutex> lk(pidMutex_); childPid_ = pid; }
-
-    FILE* fp = ::fdopen(pipefd[0], "r");
-    if (!fp) {
-        ::close(pipefd[0]);
-        ::kill(-pid, SIGTERM);
-        ::waitpid(pid, nullptr, 0);
-        running_.store(false);
-        if (onFinish) onFinish(false, "", "fdopen() failed");
-        return;
-    }
-#endif
-
-    // 逐行解析 yt-dlp 输出
-    std::string lastOutputFile;
-    std::vector<std::string> tempFiles;   // 收集所有 Destination 路径，取消时清理
-    std::array<char, 512> buf;
-
-    while (std::fgets(buf.data(), buf.size(), fp)) {
-        if (cancelled_.load()) break;
-
-        std::string line(buf.data());
-        LOG_DEBUG("yt-dlp: " + line);
-
-        // 提取输出文件路径
-        if (line.find("[Merger]") != std::string::npos ||
-            line.find("Destination:") != std::string::npos) {
-            size_t pos = line.rfind(' ');
-            if (pos != std::string::npos) {
-                lastOutputFile = line.substr(pos + 1);
-                // 去除换行
-                while (!lastOutputFile.empty() &&
-                       (lastOutputFile.back() == '\n' || lastOutputFile.back() == '\r'))
-                    lastOutputFile.pop_back();
-                if (!lastOutputFile.empty())
-                    tempFiles.push_back(lastOutputFile);
-            }
-        }
-
-        // 解析进度行：[download]  45.3% of 123.45MiB at  1.23MiB/s ETA 00:30
-        if (line.find("[download]") != std::string::npos &&
-            line.find('%') != std::string::npos && onProgress) {
-
-            float progress = 0.0f;
-            std::string speed, eta, fileSize;
-
-            // 提取百分比
-            size_t pctPos = line.find('%');
-            if (pctPos != std::string::npos) {
-                size_t start = pctPos;
-                while (start > 0 && (std::isdigit(line[start-1]) || line[start-1] == '.'))
-                    --start;
-                try { progress = std::stof(line.substr(start, pctPos - start)) / 100.0f; }
-                catch (...) {}
-            }
-
-            // 提取文件大小（"of 123.45MiB" 或 "of ~123.45MiB"）
-            size_t ofPos = line.find(" of ");
-            if (ofPos != std::string::npos) {
-                size_t fStart = ofPos + 4;
-                while (fStart < line.size() && (line[fStart] == ' ' || line[fStart] == '~'))
-                    ++fStart;
-                size_t fEnd = line.find(' ', fStart);
-                if (fEnd == std::string::npos) fEnd = line.size();
-                fileSize = line.substr(fStart, fEnd - fStart);
-                while (!fileSize.empty() && (fileSize.back() == '\n' || fileSize.back() == '\r'))
-                    fileSize.pop_back();
-            }
-
-            // 提取速度（"at X.XXMiB/s" 或 "at ~X.XXKB/s"）
-            size_t atPos = line.find(" at ");
-            if (atPos != std::string::npos) {
-                size_t sStart = atPos + 4;
-                // 跳过前导空格和 ~
-                while (sStart < line.size() && (line[sStart] == ' ' || line[sStart] == '~'))
-                    ++sStart;
-                size_t sEnd = line.find(' ', sStart);
-                if (sEnd == std::string::npos) sEnd = line.size();
-                speed = line.substr(sStart, sEnd - sStart);
-                // 去除尾部换行
-                while (!speed.empty() && (speed.back() == '\n' || speed.back() == '\r'))
-                    speed.pop_back();
-            }
-
-            // 提取 ETA（"ETA XX:XX"）
-            size_t etaPos = line.find("ETA ");
-            if (etaPos != std::string::npos) {
-                size_t eStart = etaPos + 4;
-                size_t eEnd = line.find_first_of(" \n\r", eStart);
-                if (eEnd == std::string::npos) eEnd = line.size();
-                eta = line.substr(eStart, eEnd - eStart);
-            }
-
-            onProgress(progress, speed, eta, fileSize);
-        }
-    }
-
-    std::fclose(fp);
-
-#ifdef _WIN32
-    // Windows：等待进程退出，获取退出码，释放 HANDLE
-    DWORD exitCode = 0;
-    WaitForSingleObject((HANDLE)childProcessHandle_, INFINITE);
-    GetExitCodeProcess((HANDLE)childProcessHandle_, &exitCode);
-    { std::lock_guard<std::mutex> lk(pidMutex_);
-      CloseHandle((HANDLE)childProcessHandle_);
-      childProcessHandle_ = nullptr; }
-    running_.store(false);
-#else
-    // POSIX：取消时补发 SIGTERM（fclose 后进程可能仍在运行），再 waitpid 回收
-    if (cancelled_.load()) ::kill(-pid, SIGTERM);
-    int status = 0;
-    ::waitpid(pid, &status, 0);
-    { std::lock_guard<std::mutex> lk(pidMutex_); childPid_ = 0; }
-    running_.store(false);
-#endif
-
     if (cancelled_.load()) {
-        // 清理未完成的临时文件（Destination 路径及其 .part 变体）
-        for (const auto& f : tempFiles) {
-            std::remove(f.c_str());
-            std::remove((f + ".part").c_str());
-        }
+        running_.store(false);
         if (onFinish) onFinish(false, "", "已取消");
         return;
     }
 
-#ifdef _WIN32
-    bool ok = (exitCode == 0);
-#else
-    bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-#endif
-    if (onFinish) onFinish(ok, lastOutputFile, ok ? "" : "yt-dlp 下载失败");
-    LOG_INFO("Downloader: done ok=" + std::string(ok ? "true" : "false")
-           + " file=" + lastOutputFile);
+    // ── 第二步：打开输入流 ──
+    avformat_network_init();
+    DlInterruptCtx intCtx{std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs), &cancelled_};
+
+    WriteContext wc{};
+    wc.videoCtx = openStream(info.videoUrl, info.headers, intCtx);
+    if (!wc.videoCtx) {
+        running_.store(false);
+        if (onFinish) onFinish(false, "", "无法打开视频流");
+        return;
+    }
+    if (info.isDash && !info.audioUrl.empty()) {
+        wc.audioCtx = openStream(info.audioUrl, info.headers, intCtx);
+        if (!wc.audioCtx) {
+            avformat_close_input(&wc.videoCtx);
+            running_.store(false);
+            if (onFinish) onFinish(false, "", "无法打开音频流");
+            return;
+        }
+    }
+
+    // ── 第三步：创建输出文件 ──
+    wc.outputPath = outputDir + "/" + sanitizeFilename(info.title) + (info.isDash ? ".mkv" : ".mp4");
+    wc.outCtx = createOutputContext(wc.outputPath);
+    if (!wc.outCtx) {
+        avformat_close_input(&wc.videoCtx);
+        if (wc.audioCtx) avformat_close_input(&wc.audioCtx);
+        running_.store(false);
+        if (onFinish) onFinish(false, "", "创建输出文件失败: " + wc.outputPath);
+        return;
+    }
+
+    wc.videoStreamIn = av_find_best_stream(wc.videoCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (wc.videoStreamIn < 0)
+        wc.videoStreamIn = av_find_best_stream(wc.videoCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    wc.audioStreamIn = wc.audioCtx
+        ? av_find_best_stream(wc.audioCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0)
+        : av_find_best_stream(wc.videoCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+
+    if (wc.videoStreamIn < 0) {
+        avformat_close_input(&wc.videoCtx);
+        if (wc.audioCtx) avformat_close_input(&wc.audioCtx);
+        avio_closep(&wc.outCtx->pb); avformat_free_context(wc.outCtx);
+        running_.store(false);
+        if (onFinish) onFinish(false, "", "找不到视频流");
+        return;
+    }
+
+    AVFormatContext* audioSrcCtx = wc.audioCtx ? wc.audioCtx : wc.videoCtx;
+    wc.streams = addOutputStreams(wc.outCtx, wc.videoCtx, wc.videoStreamIn,
+                                  audioSrcCtx, wc.audioStreamIn);
+
+    if (avformat_write_header(wc.outCtx, nullptr) < 0) {
+        avformat_close_input(&wc.videoCtx);
+        if (wc.audioCtx) avformat_close_input(&wc.audioCtx);
+        avio_closep(&wc.outCtx->pb); avformat_free_context(wc.outCtx);
+        running_.store(false);
+        if (onFinish) onFinish(false, "", "写入文件头失败");
+        return;
+    }
+    LOG_INFO("Downloader: 开始下载 -> " + wc.outputPath);
+
+    // ── 第四步：写入循环 ──
+    runWriteLoop(wc, info, intCtx, running_, cancelled_, paused_, onProgress);
+
+    av_write_trailer(wc.outCtx);
+    avformat_close_input(&wc.videoCtx);
+    if (wc.audioCtx) avformat_close_input(&wc.audioCtx);
+    if (!(wc.outCtx->oformat->flags & AVFMT_NOFILE)) avio_closep(&wc.outCtx->pb);
+    avformat_free_context(wc.outCtx);
+    running_.store(false);
+
+    if (cancelled_.load()) {
+        std::remove(wc.outputPath.c_str());
+        if (onFinish) onFinish(false, "", "已取消");
+        return;
+    }
+    LOG_INFO("Downloader: 下载完成 -> " + wc.outputPath);
+    if (onFinish) onFinish(true, wc.outputPath, "");
 }
 
 } // namespace FluxPlayer
