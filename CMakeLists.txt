@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.2.0 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.3.0 LANGUAGES C CXX)
 
 # 要求使用 C++17 标准，且不允许降级
 set(CMAKE_CXX_STANDARD 17)
@@ -315,4 +315,60 @@ if(APPLE)
             COMMENT "Copying FFmpeg dylibs..."
         )
     endif()
+endif()
+
+# Windows + MinGW：把 3 个 GCC 运行时 DLL 拷到 exe 旁边，方便直接从 build 目录启动调试
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(_dll libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
+        if(EXISTS "${_MINGW_BIN_DIR}/${_dll}")
+            add_custom_command(TARGET FluxPlayer POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_MINGW_BIN_DIR}/${_dll}"
+                    $<TARGET_FILE_DIR:FluxPlayer>
+            )
+        endif()
+    endforeach()
+endif()
+
+# ========================
+# 6. 安装规则（用于打包）
+# ========================
+# 用法：cmake --install <build> --prefix <staging>
+#   把 exe、shaders、fonts 装到 <staging>，再用 file(GET_RUNTIME_DEPENDENCIES)
+#   按 PE 导入表递归解析 DLL 依赖闭包（FFmpeg + 其 codec 子依赖 + MinGW 运行时），
+#   排除 Windows 系统 DLL。两台机器装出来的内容一致，Inno Setup 只需抓 staging。
+install(TARGETS FluxPlayer RUNTIME DESTINATION .)
+install(DIRECTORY assets/shaders/ DESTINATION shaders)
+install(DIRECTORY assets/fonts/   DESTINATION fonts)
+
+if(WIN32)
+    get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    install(CODE "
+        file(GET_RUNTIME_DEPENDENCIES
+            EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/FluxPlayer.exe\"
+            RESOLVED_DEPENDENCIES_VAR   _r_deps
+            UNRESOLVED_DEPENDENCIES_VAR _u_deps
+            DIRECTORIES
+                \"${FFMPEG_ROOT}/bin\"
+                \"${_MINGW_BIN_DIR}\"
+            PRE_EXCLUDE_REGEXES
+                \"api-ms-.*\"
+                \"ext-ms-.*\"
+            POST_EXCLUDE_REGEXES
+                \".*[Ss]ystem32.*\"
+                \".*SysWOW64.*\"
+        )
+        foreach(_dep \${_r_deps})
+            file(INSTALL
+                DESTINATION \"\${CMAKE_INSTALL_PREFIX}\"
+                TYPE SHARED_LIBRARY
+                FOLLOW_SYMLINK_CHAIN
+                FILES \"\${_dep}\"
+            )
+        endforeach()
+        foreach(_dep \${_u_deps})
+            message(STATUS \"[install] Skipped unresolved: \${_dep}\")
+        endforeach()
+    ")
 endif()

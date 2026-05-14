@@ -24,13 +24,13 @@ WizardStyle=modern
 
 [Files]
 ; 主程序
-Source: "..\build\FluxPlayer.exe"; DestDir: "{app}"; Flags: ignoreversion
-; FFmpeg DLL 及 MinGW 运行时（*.dll）
-Source: "..\build\*.dll";          DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "..\dist\staging\FluxPlayer.exe"; DestDir: "{app}"; Flags: ignoreversion
+; 运行时 DLL（由 cmake --install + file(GET_RUNTIME_DEPENDENCIES) 精确收集）
+Source: "..\dist\staging\*.dll";          DestDir: "{app}"; Flags: ignoreversion
 ; GLSL 着色器（运行时从可执行文件目录相对路径加载）
-Source: "..\build\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
+Source: "..\dist\staging\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
 ; 字体文件（ImGui 渲染字幕和 UI 使用）
-Source: "..\build\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
+Source: "..\dist\staging\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
 
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件

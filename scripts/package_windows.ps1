@@ -45,17 +45,11 @@ if (-not (Test-Path $ico)) {
 cmake -S $root -B $build -DCMAKE_BUILD_TYPE=Release
 cmake --build $build --config Release
 
-# ── 3. 创建输出目录 ───────────────────────────────────────────────────────────
-New-Item -ItemType Directory -Force "$root\dist" | Out-Null
-
-# ── 3.5 复制 MinGW 运行时 DLL ─────────────────────────────────────────────────
-$mingwDlls = @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")
-$mingwBin = Split-Path (Get-Command gcc -ErrorAction Stop).Source -Parent
-foreach ($dll in $mingwDlls) {
-    $src = Join-Path $mingwBin $dll
-    if (Test-Path $src) { Copy-Item $src $build -Force }
-    else { Write-Warning "Not found: $src" }
-}
+# ── 3. cmake --install 到干净的 staging 目录 ─────────────────────────────────
+# staging 与 build 完全隔离，不受 xmake 或其他工具残留 DLL 的影响
+$stage = "$root\dist\staging"
+if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+cmake --install $build --config Release --prefix $stage
 
 # ── 4. Inno Setup 打包 ────────────────────────────────────────────────────────
 # package_windows.iss 定义了安装包内容、快捷方式、卸载程序等
