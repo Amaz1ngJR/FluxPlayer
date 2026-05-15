@@ -185,7 +185,11 @@ set(FLUXPLAYER_SOURCES
 )
 
 # add_executable：将源文件编译并链接为可执行程序
-add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
+if(WIN32)
+    add_executable(FluxPlayer WIN32 ${FLUXPLAYER_SOURCES})
+else()
+    add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
+endif()
 
 # yt-dlp 打包路径：编译时固定，避免运行时路径推算失败
 if(APPLE)
