@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 -- 项目基本信息
 set_project("FluxPlayer")
-set_version("0.2.0")
+set_version("0.3.1")
 set_languages("cxx17")  -- 要求 C++17 标准
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
@@ -240,6 +240,14 @@ target("FluxPlayer")
 
     -- 构建完成后自动执行的脚本
     after_build(function (target)
+        -- 增量复制辅助函数：源文件与目标 hash 相同则跳过
+        local function cp_if_changed(src, dst_dir)
+            local dst = path.join(dst_dir, path.filename(src))
+            if not os.isfile(dst) or hash.md5(src) ~= hash.md5(dst) then
+                os.cp(src, dst_dir)
+            end
+        end
+
         -- 把着色器文件复制到可执行文件旁边（运行时需要读取）
         os.cp("assets/shaders", path.join(target:targetdir(), "shaders"))
         -- 把字体文件复制到可执行文件旁边（主界面 TTF 字体运行时加载）
@@ -247,10 +255,22 @@ target("FluxPlayer")
         -- 把 source/ 目录复制到可执行文件旁边（封面兜底图等资源）
         os.cp("source", path.join(target:targetdir(), "source"))
         if is_plat("windows") then
-            -- Windows：把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
+            -- Windows：把 FFmpeg 的 DLL 增量复制到可执行文件旁边，否则运行时找不到
             local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")
             if os.isdir(ffmpeg_bin) then
-                os.cp(path.join(ffmpeg_bin, "*.dll"), target:targetdir())
+                for _, dll in ipairs(os.files(path.join(ffmpeg_bin, "*.dll"))) do
+                    cp_if_changed(dll, target:targetdir())
+                end
+            end
+            -- MinGW 运行时 DLL：从编译器同目录拷贝，方便直接从 build 目录启动调试
+            -- （与 CMakeLists.txt 的 POST_BUILD 逻辑保持一致）
+            local mingw_dlls = {"libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll"}
+            local mingw_bin = path.directory(target:tool("cxx"))
+            for _, dll in ipairs(mingw_dlls) do
+                local src = path.join(mingw_bin, dll)
+                if os.isfile(src) then
+                    cp_if_changed(src, target:targetdir())
+                end
             end
         elseif is_plat("macosx") then
             -- macOS：把 FFmpeg 的 dylib 复制到可执行文件旁边（与 Windows 对称）

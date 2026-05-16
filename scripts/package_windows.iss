@@ -31,10 +31,14 @@ Source: "..\dist\staging\*.dll";          DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\staging\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
 ; 字体文件（ImGui 渲染字幕和 UI 使用）
 Source: "..\dist\staging\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
+; 资源图片（纯音频模式兜底封面等）
+Source: "..\dist\staging\source\*";       DestDir: "{app}\source";  Flags: ignoreversion recursesubdirs
 
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件
-Type: files; Name: "{app}\imgui.ini"
+Type: files;          Name: "{app}\imgui.ini"
+; 强制清理整个安装目录（处理程序运行时生成的残留文件）
+Type: filesandordirs; Name: "{app}"
 
 [Icons]
 ; 开始菜单快捷方式

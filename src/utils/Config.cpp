@@ -91,8 +91,11 @@ std::string Config::getResourcePath(const std::string& filename) {
     std::string dir(exePath);
     auto pos = dir.rfind('\\');
     if (pos != std::string::npos) {
-        std::string resPath = dir.substr(0, pos) + "\\resources\\" + filename;
+        std::string base = dir.substr(0, pos);
+        std::string resPath = base + "\\resources\\" + filename;
         if (GetFileAttributesA(resPath.c_str()) != INVALID_FILE_ATTRIBUTES) return resPath;
+        std::string srcPath = base + "\\source\\" + filename;
+        if (GetFileAttributesA(srcPath.c_str()) != INVALID_FILE_ATTRIBUTES) return srcPath;
     }
 #else
     char exePath[PATH_MAX];

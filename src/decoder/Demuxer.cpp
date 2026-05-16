@@ -49,7 +49,10 @@ bool Demuxer::open(const std::string& filename) {
     LOG_DEBUG("Input opened successfully");
 
     // 步骤3：探测流信息（读取文件头若干包，解析每条流的编解码器参数）
-    ret = avformat_find_stream_info(m_formatCtx, nullptr);
+    // 网络流复用 open 时的选项限制探测量，避免默认 5 秒等待
+    AVDictionary* probeOptions = configureNetworkOptions(filename);
+    ret = avformat_find_stream_info(m_formatCtx, probeOptions ? &probeOptions : nullptr);
+    if (probeOptions) av_dict_free(&probeOptions);
     if (ret < 0) {
         LOG_ERROR("Failed to find stream information");
         close();

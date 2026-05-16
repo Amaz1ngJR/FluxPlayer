@@ -23,8 +23,18 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
 $root  = Split-Path $PSScriptRoot -Parent
 $build = "$root\build"
+$t0 = Get-Date
+
+function Step($name, $block) {
+    $t = Get-Date
+    & $block
+    Write-Host ("[{0}s] {1}" -f [math]::Round(((Get-Date) - $t).TotalSeconds, 1), $name)
+}
 
 # 从 CMakeLists.txt 读取版本号，发版只需改那一处
 $version = (Select-String -Path "$root\CMakeLists.txt" -Pattern 'project\(FluxPlayer VERSION ([0-9]+\.[0-9]+\.[0-9]+)').Matches[0].Groups[1].Value
@@ -32,28 +42,31 @@ $version = (Select-String -Path "$root\CMakeLists.txt" -Pattern 'project\(FluxPl
 # ── 1. 图标处理 ───────────────────────────────────────────────────────────────
 $png = "$root\source\pic.png"
 $ico = "$root\source\pic.ico"
-if (-not (Test-Path $ico)) {
-    # pic.ico 不存在时尝试用 ImageMagick 从 pic.png 转换
-    if (Get-Command magick -ErrorAction SilentlyContinue) {
-        magick convert $png -define icon:auto-resize="256,128,64,48,32,16" $ico
-    } else {
-        Write-Warning "ImageMagick not found. Place source\pic.ico manually to use a custom icon."
+Step "icon" {
+    if (-not (Test-Path $ico)) {
+        if (Get-Command magick -ErrorAction SilentlyContinue) {
+            magick convert $png -define icon:auto-resize="256,128,64,48,32,16" $ico
+        } else {
+            Write-Warning "ImageMagick not found. Place source\pic.ico manually to use a custom icon."
+        }
     }
 }
 
 # ── 2. CMake 构建（Release 模式）──────────────────────────────────────────────
-cmake -S $root -B $build -DCMAKE_BUILD_TYPE=Release
-cmake --build $build --config Release
+Step "CMake configure" { cmake -S $root -B $build -DCMAKE_BUILD_TYPE=Release }
+Step "CMake build" { cmake --build $build --config Release }
 
 # ── 3. cmake --install 到干净的 staging 目录 ─────────────────────────────────
 # staging 与 build 完全隔离，不受 xmake 或其他工具残留 DLL 的影响
 $stage = "$root\dist\staging"
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-cmake --install $build --config Release --prefix $stage
+Step "cmake install (staging)" {
+    cmake --install $build --config Release --prefix $stage
+}
 
 # ── 4. Inno Setup 打包 ────────────────────────────────────────────────────────
 # package_windows.iss 定义了安装包内容、快捷方式、卸载程序等
 # 通过 /DAppVersion 将版本号注入 .iss，避免在两处维护
-& $InnoSetup "/DAppVersion=$version" "$PSScriptRoot\package_windows.iss"
+Step "inno setup" { & $InnoSetup "/DAppVersion=$version" "$PSScriptRoot\package_windows.iss" }
 
+Write-Host ("Total: {0}s" -f [math]::Round(((Get-Date) - $t0).TotalSeconds, 1))
 Write-Host "Done: $root\dist\FluxPlayer-$version-Setup.exe"
