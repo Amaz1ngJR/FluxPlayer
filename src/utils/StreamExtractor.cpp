@@ -61,6 +61,31 @@ static std::string getYtDlpPath() {
     return "yt-dlp";
 }
 
+// 根据系统默认浏览器返回 yt-dlp --impersonate 参数
+// Windows 读注册表；其他平台直接返回空字符串（让 yt-dlp 自选）
+static std::string getImpersonateArg() {
+#ifdef _WIN32
+    HKEY hKey;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER,
+            "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice",
+            0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return " --impersonate \"\"";
+
+    char progId[256] = {};
+    DWORD size = sizeof(progId);
+    RegQueryValueExA(hKey, "ProgId", nullptr, nullptr, (LPBYTE)progId, &size);
+    RegCloseKey(hKey);
+
+    std::string id(progId);
+    if (id.find("Edge") != std::string::npos)   return " --impersonate edge";
+    if (id.find("Firefox") != std::string::npos) return " --impersonate firefox";
+    if (id.find("Chrome") != std::string::npos)  return " --impersonate chrome";
+    return " --impersonate \"\"";
+#else
+    return " --impersonate \"\"";
+#endif
+}
+
 // 公开接口，供 Downloader 等模块使用
 std::string StreamExtractor::getExecutablePath() {
     return getYtDlpPath();
@@ -579,7 +604,7 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         : "";
 
     std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
-                    + fmtPart + cookieArg + proxyArg
+                    + getImpersonateArg() + fmtPart + cookieArg + proxyArg
                     + " \"" + pageUrl + "\" 2>&1";
 
     LOG_INFO("StreamExtractor: " + cmd);
@@ -592,7 +617,7 @@ bool StreamExtractor::extract(const std::string& pageUrl,
                  "如需播放登录内容，请关闭浏览器所有窗口和后台进程后重试，"
                  "或在配置中设置 cookiesFile。原始输出: " + json.substr(0, 200));
         std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
-                        + fmtPart + proxyArg + " \"" + pageUrl + "\" 2>&1";
+                        + getImpersonateArg() + fmtPart + proxyArg + " \"" + pageUrl + "\" 2>&1";
         json = runCommand(cmdNoCookie, 30);
     }
 

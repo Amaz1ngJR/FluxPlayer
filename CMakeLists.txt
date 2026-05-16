@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.3.0 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.3.1 LANGUAGES C CXX)
 
 # 要求使用 C++17 标准，且不允许降级
 set(CMAKE_CXX_STANDARD 17)
@@ -188,7 +188,7 @@ set(FLUXPLAYER_SOURCES
 if(WIN32)
     add_executable(FluxPlayer WIN32 ${FLUXPLAYER_SOURCES})
 else()
-    add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
+add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
 endif()
 
 # yt-dlp 打包路径：编译时固定，避免运行时路径推算失败
@@ -345,6 +345,7 @@ endif()
 install(TARGETS FluxPlayer RUNTIME DESTINATION .)
 install(DIRECTORY assets/shaders/ DESTINATION shaders)
 install(DIRECTORY assets/fonts/   DESTINATION fonts)
+install(DIRECTORY source/         DESTINATION source)
 
 if(WIN32)
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
@@ -364,12 +365,19 @@ if(WIN32)
                 \".*SysWOW64.*\"
         )
         foreach(_dep \${_r_deps})
-            file(INSTALL
-                DESTINATION \"\${CMAKE_INSTALL_PREFIX}\"
-                TYPE SHARED_LIBRARY
-                FOLLOW_SYMLINK_CHAIN
-                FILES \"\${_dep}\"
-            )
+            get_filename_component(_dep_name \"\${_dep}\" NAME)
+            set(_dep_dst \"\${CMAKE_INSTALL_PREFIX}/\${_dep_name}\")
+            # 找原始源文件（跳过 build/ 中转，避免 POST_BUILD copy 刷新时间戳导致误判）
+            set(_dep_src \"\${_dep}\")
+            foreach(_src_dir \"${FFMPEG_ROOT}/bin\" \"${_MINGW_BIN_DIR}\")
+                if(EXISTS \"\${_src_dir}/\${_dep_name}\")
+                    set(_dep_src \"\${_src_dir}/\${_dep_name}\")
+                    break()
+                endif()
+            endforeach()
+            if(NOT EXISTS \"\${_dep_dst}\" OR \"\${_dep_src}\" IS_NEWER_THAN \"\${_dep_dst}\")
+                file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}\" TYPE SHARED_LIBRARY FILES \"\${_dep}\")
+            endif()
         endforeach()
         foreach(_dep \${_u_deps})
             message(STATUS \"[install] Skipped unresolved: \${_dep}\")

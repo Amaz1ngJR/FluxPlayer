@@ -31,10 +31,14 @@ Source: "..\dist\staging\*.dll";          DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\staging\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
 ; 字体文件（ImGui 渲染字幕和 UI 使用）
 Source: "..\dist\staging\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
+; 资源图片（纯音频模式兜底封面等）
+Source: "..\dist\staging\source\*";       DestDir: "{app}\source";  Flags: ignoreversion recursesubdirs
 
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件
-Type: files; Name: "{app}\imgui.ini"
+Type: files;          Name: "{app}\imgui.ini"
+; 强制清理整个安装目录（处理程序运行时生成的残留文件）
+Type: filesandordirs; Name: "{app}"
 
 [Icons]
 ; 开始菜单快捷方式
@@ -52,16 +56,26 @@ Name: desktopicon; Description: "创建桌面快捷方式"; GroupDescription: "�
 Filename: "{app}\FluxPlayer.exe"; Description: "启动 FluxPlayer"; Flags: nowait postinstall skipifsilent
 
 [Code]
-// 卸载时清理平台缓存目录（%LOCALAPPDATA%\FluxPlayer）
+procedure KillRunningProcess();
+var
+  ResultCode: Integer;
+begin
+  // 卸载前强制终止正在运行的 FluxPlayer 进程，避免文件被占用导致残留
+  Exec('taskkill.exe', '/F /IM FluxPlayer.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-    if CurUninstallStep = usPostUninstall then
+  if CurUninstallStep = usUninstall then
+    KillRunningProcess();
+
+  if CurUninstallStep = usPostUninstall then
+  begin
+    if MsgBox('是否同时删除配置文件、日志和录制文件？' + #13#10 +
+              '(' + ExpandConstant('{localappdata}\FluxPlayer') + ')',
+              mbConfirmation, MB_YESNO) = IDYES then
     begin
-        if MsgBox('是否同时删除配置文件、日志和录制文件？' + #13#10 +
-                  '(' + ExpandConstant('{localappdata}\FluxPlayer') + ')',
-                  mbConfirmation, MB_YESNO) = IDYES then
-        begin
-            DelTree(ExpandConstant('{localappdata}\FluxPlayer'), True, True, True);
-        end;
+      DelTree(ExpandConstant('{localappdata}\FluxPlayer'), True, True, True);
     end;
+  end;
 end;
