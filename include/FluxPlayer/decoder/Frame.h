@@ -71,6 +71,18 @@ public:
     void setPTS(double pts) { m_pts = pts; }
 
     /**
+     * @brief 该帧 PTS 是否为估算值（非真实 PTS）
+     *
+     * 实时流场景下，部分视频帧因 RTP 包乱序、解码器无 PTS 输出等原因没有有效 PTS，
+     * Player::normalizeVideoPTS 会用"上一帧 PTS + 帧间隔"估算填补。这类帧不应再驱动主时钟更新，
+     * 避免估算误差累积或与真实 PTS 交替导致时钟跳变。
+     */
+    bool isPTSEstimated() const { return m_ptsEstimated; }
+
+    /** @brief 标记该帧 PTS 是否为估算值，详见 isPTSEstimated() */
+    void setPTSEstimated(bool v) { m_ptsEstimated = v; }
+
+    /**
      * @brief 获取帧持续时间
      * @return 持续时间（秒）
      */
@@ -164,6 +176,7 @@ private:
     double m_pts;           ///< 显示时间戳（秒）
     double m_duration;      ///< 帧持续时间（秒）
     FrameType m_type;       ///< 帧类型（视频/音频）
+    bool m_ptsEstimated = false;  ///< PTS 是否为帧间隔估算值（不应用于驱动主时钟）
 };
 
 } // namespace FluxPlayer

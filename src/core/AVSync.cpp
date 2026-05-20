@@ -184,6 +184,16 @@ void AVSync::reset() {
     averageFrameDelay_.store(0.04);
 }
 
+/**
+ * 仅重置外部时钟基准，不动音视频时钟。
+ * prebuffer 期间 external clock 已按系统时间走了若干毫秒，恢复播放时如果不重置，
+ * 视频帧 PTS（从 0 开始归一化）会立刻满足 "PTS <= masterClock"，导致渲染线程一次性消化掉所有缓冲帧。
+ */
+void AVSync::resetExternalClock() {
+    externalClockBase_ = std::chrono::steady_clock::now();
+    externalClockOffset_.store(0.0);
+}
+
 void AVSync::pause() {
     if (!paused_.load()) {
         LOG_INFO("AVSync paused");

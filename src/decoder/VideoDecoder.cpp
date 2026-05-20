@@ -255,10 +255,10 @@ bool VideoDecoder::receiveFrame(Frame& frame) {
     }
 
     // 计算 PTS（Presentation Time Stamp，显示时间戳）
-    // PTS 用于音视频同步，单位转换为秒
+    // best_effort_timestamp 内部按 pts → dts → 推断的优先级取值，能减少 NOPTS 概率
     AVFrame* avFrame = frame.getAVFrame();
-    if (avFrame->pts != AV_NOPTS_VALUE) {
-        double pts = avFrame->pts * av_q2d(m_timeBase);
+    if (avFrame->best_effort_timestamp != AV_NOPTS_VALUE) {
+        double pts = avFrame->best_effort_timestamp * av_q2d(m_timeBase);
         frame.setPTS(pts);
         LOG_DEBUG("Frame received, PTS: " + std::to_string(pts) + "s");
     } else {

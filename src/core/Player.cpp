@@ -355,14 +355,14 @@ bool Player::open(const std::string& filePath) {
         LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
     }
 
-    // 创建帧队列：本地文件用小队列降低内存占用，网络流用大队列应对抖动
+    // 创建帧队列：本地文件用小队列降低内存占用，网络流参考 ffplay 默认值
     // 视频队列启用 keep-last（暂停/截图时保留最后帧）
-    // 队列容量来源：参考 ffplay VIDEO_PICTURE_QUEUE_SIZE=3、SAMPLE_QUEUE_SIZE=9，
-    // 网络流双倍以应对抖动；过大会浪费内存且增加 seek 后的解码追赶时间
+    // 实时流：浅队列降低延迟（队列深度 = 端到端延迟下限），与 VLC live 模式对齐；
+    // 点播流：稍深队列应对网络抖动
     constexpr int kLocalVideoQueueSize = 4;
     constexpr int kLocalAudioQueueSize = 10;
-    constexpr int kLiveVideoQueueSize  = 8;
-    constexpr int kLiveAudioQueueSize  = 20;
+    constexpr int kLiveVideoQueueSize  = 3;   // 3 帧≈120ms@25fps，与 ffplay 默认对齐
+    constexpr int kLiveAudioQueueSize  = 8;
     int videoQueueSize = isLiveStream_ ? kLiveVideoQueueSize : kLocalVideoQueueSize;
     int audioQueueSize = isLiveStream_ ? kLiveAudioQueueSize : kLocalAudioQueueSize;
     // 纯音频模式不需要视频队列
@@ -504,6 +504,8 @@ bool Player::play() {
         videoFrameCount_.store(0);
         audioFrameCount_.store(0);
         liveStreamStartTime_.store(0.0);
+        lastEnqueuedVideoPTS_.store(0.0);
+        sawFirstKeyframe_.store(false);
         // 启动预缓冲：等待队列填充到安全水位再开始渲染
         prebuffering_.store(true);
         LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
@@ -728,11 +730,22 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 if (nextPTS <= masterClock + 0.005) {
                     frame = peeked;
                     videoQueue_->next();  // 推进读索引（keep-last 首次只标记 shown）
-                    // keep-last 机制：next() 释��旧帧后 peek() 可能返回同一帧
+                    // keep-last 机制：next() 释放旧帧后 peek() 可能返回同一帧
                     // 需要再次 next() 标记为 shown，才能在下次迭代中正确获取新帧
                     Frame* dup = videoQueue_->peek();
                     if (dup == frame) {
                         videoQueue_->next();
+                    }
+                } else {
+                    // 还没到显示时间：短暂 sleep 避免主循环空转把 FPS 推到 100+
+                    // sleep 时长取剩余时间的 80%，留出 swapBuffers/UI 的余量；
+                    // 上限 20ms 防止个别异常 PTS 导致长时间卡顿
+                    double waitSec = nextPTS - masterClock - 0.002;
+                    if (waitSec > 0.001) {
+                        int waitMs = static_cast<int>(std::min(waitSec * 800.0, 20.0));
+                        if (waitMs > 0) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                        }
                     }
                 }
             }
@@ -742,6 +755,23 @@ void Player::renderVideoFrame(double& lastFrameTime) {
         if (frame) {
             double framePTS = frame->getPTS();
             double rate = playbackRate_.load();
+
+            // 第一帧到来时，如果分辨率从 demux 阶段的 0x0 变为实际值，resize 窗口
+            AVFrame* avFrameCheck = frame->getAVFrame();
+            if (avFrameCheck && avFrameCheck->width > 0 && avFrameCheck->height > 0 &&
+                (videoWidth_ != avFrameCheck->width || videoHeight_ != avFrameCheck->height)) {
+                videoWidth_ = avFrameCheck->width;
+                videoHeight_ = avFrameCheck->height;
+                auto [cw, ch] = Window::clampToPrimaryMonitor(videoWidth_, videoHeight_);
+                if (cw != videoWidth_ || ch != videoHeight_) {
+                    double s = std::min(static_cast<double>(cw) / videoWidth_,
+                                        static_cast<double>(ch) / videoHeight_);
+                    cw = static_cast<int>(videoWidth_ * s);
+                    ch = static_cast<int>(videoHeight_ * s);
+                }
+                glfwSetWindowSize(window_->getGLFWWindow(), cw, ch);
+                LOG_INFO("Window resized to match video: " + std::to_string(cw) + "x" + std::to_string(ch));
+            }
 
             // 快放（>1.0x）：智能丢帧，保留 I 帧，优先丢 B 帧
             if (rate > 1.0 && shouldDropFrameForSpeed(frame->getAVFrame(), rate)) {
@@ -754,7 +784,7 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 return;
             }
 
-            // 检查 PTS 有效性，无效时仍渲染帧但不更新时钟
+            // 检查 PTS 有效性，无效时不更新时钟。估算帧 PTS 单调累加，仍可驱动时钟
             bool validPTS = (std::isfinite(framePTS) &&
                             framePTS > -1e15 && framePTS < 1e15);
             if (validPTS) {
@@ -917,6 +947,11 @@ double Player::getCurrentTime() const {
     if (audioOnly_ && avSync_) {
         return avSync_->getAudioClock();
     }
+    // 实时流：用音频时钟驱动进度条。视频帧 PTS 抖动 + 主循环偶尔卡顿
+    // 会让 lastRenderedPTS_ 非匀速增长导致进度条跳变；音频时钟由音频回调按真实采样率推进，平滑稳定。
+    if (isLiveStream_ && avSync_) {
+        return avSync_->getAudioClock();
+    }
     // 返回最后实际渲染的帧的 PTS，而不是 AVSync 的时钟
     // 这样可以避免 seek 时时钟立即更新导致的连续 seek 问题
     return lastRenderedPTS_.load();
@@ -1073,6 +1108,29 @@ void Player::decodingThread() {
                 totalBytesRead_.fetch_add(packet->size);
 
                 if (packet->stream_index == demuxer_->getVideoStreamIndex()) {
+                    // 实时流起播追赶：丢弃首个关键帧之前的视频包。
+                    // 服务端 PLAY 后常推 GOP 中间帧（非关键帧），这些帧没有参考帧解码必然失败
+                    // （日志中 "Could not find ref with POC"），还会让画面延迟一整个 GOP。
+                    // 等到首个 IDR 起播，画面与服务端最新关键帧对齐，端到端延迟显著降低。
+                    if (isLiveStream_ && !sawFirstKeyframe_.load()) {
+                        if (packet->flags & AV_PKT_FLAG_KEY) {
+                            sawFirstKeyframe_.store(true);
+                            LOG_INFO("Live stream: first keyframe received, starting decode");
+                        } else {
+                            av_packet_unref(packet);
+                            continue;
+                        }
+                    }
+                    // 实时流 prebuffer 期间若再次收到 IDR，重置到新 IDR 起播：
+                    // 起播延迟最多 = 网络握手 + 1 个 GOP，避免抓到旧 GOP 的 IDR 多一整段延迟
+                    else if (isLiveStream_ && prebuffering_.load() &&
+                             (packet->flags & AV_PKT_FLAG_KEY)) {
+                        if (videoQueue_) videoQueue_->flush();
+                        if (videoDecoder_) videoDecoder_->flush();
+                        firstVideoFrameReceived_.store(false);
+                        lastEnqueuedVideoPTS_.store(0.0);
+                        LOG_INFO("Live stream: newer keyframe arrived during prebuffer, restart from latest IDR");
+                    }
                     // 录像：写入视频 packet
                     if (videoRecorder_ && videoRecorder_->isRecording()) {
                         videoRecorder_->writePacket(packet, packet->stream_index);
@@ -1270,7 +1328,7 @@ void Player::restartDashMerger(double seekTime) {
 
 /**
  * 解码线程辅助函数：检查网络流预缓冲是否完成
- * 等待视频队列积累到 5 帧后再允许渲染线程取帧
+ * 实时流低延迟优先，2 帧即可起播；点播流 5 帧抗抖
  */
 void Player::checkPrebufferComplete() {
     if (!prebuffering_.load()) {
@@ -1278,8 +1336,11 @@ void Player::checkPrebufferComplete() {
     }
 
     size_t buffered = videoQueue_ ? videoQueue_->size() : audioQueue_->size();
-    if (buffered >= 5) {
+    const size_t threshold = isLiveStream_ ? 2 : 5;
+    if (buffered >= threshold) {
         prebuffering_.store(false);
+        // external clock 在 prebuffering 期间一直在跑，重置让视频从 0 开始同步
+        if (avSync_) avSync_->resetExternalClock();
         LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
     }
 }
@@ -1308,9 +1369,8 @@ bool Player::normalizeVideoPTS(Frame& rawFrame) {
         if (liveStreamBaseCalibrated_.load()) {
             double estimatedPTS = lastValidVideoPTS_.load() + videoFrameInterval_;
             lastValidVideoPTS_.store(estimatedPTS);
-            framePTS = estimatedPTS;
             rawFrame.setPTS(estimatedPTS);
-            // 跳过后续的归一化逻辑（已经是归一化后的值）
+            rawFrame.setPTSEstimated(true);
             return true;
         } else {
             // 校准期间的无效帧：直接丢弃
@@ -1354,6 +1414,22 @@ bool Player::normalizeVideoPTS(Frame& rawFrame) {
             // 暂时跳过这一帧，避免负数 PTS 进入队列
             rawFrame.unreference();
             return false;
+        }
+
+        // 检测 PTS 异常跳变（乱序、RTP 解包错误、AV_NOPTS 残留等），用估算值代替
+        // 倒退 > 0.5s 或前跳 > 30s 都视为脏数据；估算帧不影响进度条（音频时钟驱动）
+        double lastPTS = lastValidVideoPTS_.load();
+        if (lastPTS > 0.0) {
+            double diff = normalizedPTS - lastPTS;
+            if (diff < -0.5 || diff > 30.0) {
+                double estimatedPTS = lastPTS + videoFrameInterval_;
+                LOG_WARN("Live stream: Video PTS anomaly (diff=" + std::to_string(diff) +
+                        "s), using estimated: " + std::to_string(estimatedPTS));
+                rawFrame.setPTS(estimatedPTS);
+                rawFrame.setPTSEstimated(true);
+                lastValidVideoPTS_.store(estimatedPTS);
+                return true;
+            }
         }
 
         framePTS = normalizedPTS;
@@ -1521,6 +1597,17 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
         }
     }
 
+    // 强制入队 PTS 单调递增：估算累加与真实 PTS 交替到达时小幅回退（< 0.5s）会绕过倒退检测，
+    // 队列内出现非单调 PTS 会让 lastRenderedPTS_ 跳回，进度条抖动。夹紧到 lastEnqueued + 1ms。
+    if (isLiveStream_) {
+        double lastEnq = lastEnqueuedVideoPTS_.load();
+        if (lastEnq > 0.0 && framePTS < lastEnq + 0.001) {
+            framePTS = lastEnq + 0.001;
+            rawFrame.setPTS(framePTS);
+        }
+        lastEnqueuedVideoPTS_.store(framePTS);
+    }
+
     // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
     // 先将 rawFrame 数据移到队列槽位，立即释放解码器内部 buffer 引用
     // 避免 peekWritable 阻塞期间解码器 buffer pool 无法回收导致内存膨胀
@@ -1528,6 +1615,10 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
     if (writable) {
         // 快速路径：队列有空位，直接写入
         if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
+            // prepareFrame 内部根据 AVFrame::pts 重置 PTS，会覆盖 normalizeVideoPTS 的归一化结果，
+            // 此处把归一化后的 PTS 和 estimated 标记重新覆盖回 writable
+            writable->setPTS(framePTS);
+            writable->setPTSEstimated(rawFrame.isPTSEstimated());
             videoQueue_->push();
         } else {
             writable->unreference();
@@ -1545,6 +1636,8 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
             return false;  // abort
         }
         if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
+            writable->setPTS(framePTS);
+            writable->setPTSEstimated(rawFrame.isPTSEstimated());
             videoQueue_->push();
         } else {
             writable->unreference();
@@ -1709,6 +1802,12 @@ bool Player::initWindowAndRenderer() {
     if (audioOnly_) {
         videoWidth_ = 480;
         videoHeight_ = 480;
+    }
+
+    // 实时流在 demux 阶段分辨率未知（0x0），用默认值先建窗口，收到第一帧后 resize
+    if (videoWidth_ <= 0 || videoHeight_ <= 0) {
+        videoWidth_ = 1280;
+        videoHeight_ = 720;
     }
 
     // 将视频原始分辨率限制在屏幕 80% 以内，保持宽高比

@@ -49,10 +49,9 @@ bool Demuxer::open(const std::string& filename) {
     LOG_DEBUG("Input opened successfully");
 
     // 步骤3：探测流信息（读取文件头若干包，解析每条流的编解码器参数）
-    // 网络流复用 open 时的选项限制探测量，避免默认 5 秒等待
-    AVDictionary* probeOptions = configureNetworkOptions(filename);
-    ret = avformat_find_stream_info(m_formatCtx, probeOptions ? &probeOptions : nullptr);
-    if (probeOptions) av_dict_free(&probeOptions);
+    // probesize/analyzeduration 已通过 avformat_open_input 的 options 写入 format context，
+    // find_stream_info 会自动使用，无需再传（且其第二参数是 per-stream 数组，传单个会越界）
+    ret = avformat_find_stream_info(m_formatCtx, nullptr);
     if (ret < 0) {
         LOG_ERROR("Failed to find stream information");
         close();
@@ -105,10 +104,14 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
 
     // === RTSP 专用选项 ===
     if (filename.find("rtsp://") == 0) {
-        av_dict_set(&options, "rtsp_transport", "tcp", 0);    // TCP 更稳定，UDP 延迟更低
-        av_dict_set(&options, "stimeout", "5000000", 0);      // 连接超时 5 秒
-        av_dict_set(&options, "buffer_size", "1048576", 0);   // 1MB 接收缓冲区，减少丢包
-        LOG_DEBUG("RTSP options: tcp, stimeout=5s, buffer_size=1MB");
+        av_dict_set(&options, "rtsp_transport", "tcp", 0);     // TCP 更稳定
+        av_dict_set(&options, "stimeout", "5000000", 0);       // 连接超时 5 秒
+        av_dict_set(&options, "buffer_size", "1048576", 0);    // 1MB 接收缓冲区，减少丢包
+        // 起播加速：仅缩短探测期，不影响解码正确性。其他低延迟选项（low_delay/nobuffer/
+        // reorder_queue_size=0）会引发 RTP 包乱序丢失或 H.265 重排失败导致灰屏，不可启用
+        av_dict_set(&options, "probesize", "262144", 0);       // 256 KB（默认 5 MB）
+        av_dict_set(&options, "analyzeduration", "500000", 0); // 500ms（默认 5s），起播节省 ~4.5s
+        LOG_DEBUG("RTSP options: tcp, fast probe (probesize=256KB, analyze=500ms)");
     }
 
     // === 代理设置 ===
@@ -160,6 +163,18 @@ bool Demuxer::findStreams() {
                   ", AUDIO=" + std::to_string(AVMEDIA_TYPE_AUDIO) + ")");
 
         if (codecType == AVMEDIA_TYPE_VIDEO && m_videoStreamIndex == -1) {
+            // Enhanced/非标准 FLV 中的 H.265：FFmpeg 4.x 的 flvdec 不识别时 codec_id=NONE，
+            // 但 codec_tag 仍保留 "HEVC"/"hvc1" 等标识或 FLV CodecID=12，可手动修正
+            if (stream->codecpar->codec_id == AV_CODEC_ID_NONE) {
+                const uint32_t tag = stream->codecpar->codec_tag;
+                if (tag == MKTAG('H','E','V','C') || tag == MKTAG('h','e','v','c') ||
+                    tag == MKTAG('h','v','c','1') || tag == MKTAG('h','e','v','1') || tag == 12) {
+                    stream->codecpar->codec_id = AV_CODEC_ID_HEVC;
+                    char tagBuf[16];
+                    snprintf(tagBuf, sizeof(tagBuf), "0x%x", tag);
+                    LOG_INFO("Patched FLV H.265 stream codec_id (tag=" + std::string(tagBuf) + ")");
+                }
+            }
             m_videoStreamIndex = i;
             LOG_INFO("Found video stream at index " + std::to_string(i) +
                     " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));

@@ -118,6 +118,13 @@ public:
     void reset();
 
     /**
+     * 仅重置外部时钟（系统时钟基准），保留音频/视频时钟。
+     * 用途：网络流 prebuffer 完成后，把外部时钟从 0 重新计时，让视频帧 PTS 与系统时钟对齐，
+     * 避免 prebuffer 期间累积的几百毫秒导致 master clock 超前队列首帧造成"立即渲染所有帧"的失控。
+     */
+    void resetExternalClock();
+
+    /**
      * 暂停时钟
      */
     void pause();

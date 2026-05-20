@@ -453,6 +453,8 @@ private:
     std::atomic<double> liveStreamStartTime_;     // 实时流开始播放的系统时间
     std::atomic<double> lastValidVideoPTS_;         // 最后一个有效的归一化视频 PTS
     std::atomic<double> lastValidAudioPTS_;         // 最后一个有效的归一化音频 PTS
+    std::atomic<double> lastEnqueuedVideoPTS_{0.0}; // 最后一个入队视频帧的 PTS，强制队列内单调递增防止进度条跳变
+    std::atomic<bool> sawFirstKeyframe_{false};     // 实时流：是否已收到第一个关键帧（IDR），起播阶段丢弃 IDR 之前的视频包以追到最新画面
 
     // 播放速率控制
     std::atomic<double> playbackRate_{1.0};     // 当前播放速率（0.5 ~ 2.0）
