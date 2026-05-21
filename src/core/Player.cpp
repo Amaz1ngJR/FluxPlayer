@@ -310,6 +310,10 @@ bool Player::open(const std::string& filePath) {
 
     setState(PlayerState::OPENING);
     filePath_ = filePath;
+    // 保存实时流重连参数：连接断开后用于完整重开 demuxer
+    liveReopenPath_ = actualPath;
+    liveReopenHeaders_ = httpHeaders;
+    liveReopenDuration_ = knownDuration;
 
     // 创建并打开解复用器
     demuxer_ = std::make_unique<Demuxer>();
@@ -1155,16 +1159,19 @@ void Player::decodingThread() {
                 av_packet_unref(packet);
             } else {
                 if (isLiveStream_) {
-                    // ===== 实时流网络重试机制（指数退避） =====
-                    // RTSP 流在网络抖动、服务端短暂断开等情况下，readPacket 会返回失败。
-                    // 与本地文件不同，这不代表真正的 EOF，应该重试恢复。
+                    // ===== 实时流网络重试机制（指数退避 + 周期性完整重连） =====
+                    // RTSP/RTMP/HTTP 流在网络抖动、服务端短暂断开等情况下，readPacket 会返回失败。
+                    // 单纯重试 readPacket 在 TCP 连接已死的情况下永远恢复不了（典型 RTMP 服务端踢连接），
+                    // 必须周期性 close + open 整个 demuxer 才能重建 TCP 会话。
                     //
                     // 退避策略：
                     //   初始间隔 100ms，每次失败翻倍，上限 3000ms
-                    //   最多重试 30 次（总等待约 30~60 秒），超过后放弃
+                    //   每 3 次普通重试做一次完整重连（reopen）
+                    //   最多重试 30 次（含重连），超过后放弃
                     //   一旦读取成功，计数器和间隔自动重置
                     const int MAX_READ_RETRIES = 30;         // 最大重试次数
                     const int MAX_RETRY_DELAY_MS = 3000;     // 退避间隔上限（ms）
+                    const int REOPEN_EVERY_N_RETRIES = 3;    // 每 N 次普通重试做一次完整重连
 
                     readRetryCount++;
                     if (readRetryCount <= MAX_READ_RETRIES) {
@@ -1175,6 +1182,32 @@ void Player::decodingThread() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(retryDelayMs));
                         // 指数退避：每次翻倍，但不超过上限
                         retryDelayMs = std::min(retryDelayMs * 2, MAX_RETRY_DELAY_MS);
+
+                        // 周期性完整重连：close + open demuxer，flush 解码器和队列
+                        if (readRetryCount % REOPEN_EVERY_N_RETRIES == 0 && !liveReopenPath_.empty()) {
+                            LOG_INFO("Live stream: attempting full reopen (retry=" +
+                                     std::to_string(readRetryCount) + ")");
+                            demuxer_->close();
+                            bool reopened = liveReopenHeaders_.empty() && liveReopenDuration_ == 0.0
+                                ? demuxer_->open(liveReopenPath_)
+                                : demuxer_->open(liveReopenPath_, liveReopenHeaders_, liveReopenDuration_);
+                            if (reopened) {
+                                LOG_INFO("Live stream: reopen succeeded, resuming playback");
+                                if (videoDecoder_) videoDecoder_->flush();
+                                if (audioDecoder_) audioDecoder_->flush();
+                                if (videoQueue_) videoQueue_->flush();
+                                if (audioQueue_) audioQueue_->flush();
+                                // 重置起播追赶状态：等待下一个 IDR 重新对齐
+                                sawFirstKeyframe_.store(false);
+                                lastEnqueuedVideoPTS_.store(0.0);
+                                // 不重置 PTS 基准（liveStreamBaseCalibrated_ 保持），
+                                // 短暂断流不应让进度条跳回 0
+                                readRetryCount = 0;
+                                retryDelayMs = 100;
+                            } else {
+                                LOG_WARN("Live stream: reopen failed, will keep retrying");
+                            }
+                        }
                     } else {
                         LOG_ERROR("Live stream: readPacket failed after " +
                                  std::to_string(MAX_READ_RETRIES) + " retries, giving up");
@@ -1784,6 +1817,9 @@ void Player::cleanup() {
     if (audioQueue_) audioQueue_->flush();
 
     filePath_.clear();
+    liveReopenPath_.clear();
+    liveReopenHeaders_.clear();
+    liveReopenDuration_ = 0.0;
     duration_ = 0.0;
     lastRenderedPTS_.store(0.0);
     droppedFrames_.store(0);

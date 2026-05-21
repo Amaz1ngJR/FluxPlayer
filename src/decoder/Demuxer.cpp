@@ -163,18 +163,6 @@ bool Demuxer::findStreams() {
                   ", AUDIO=" + std::to_string(AVMEDIA_TYPE_AUDIO) + ")");
 
         if (codecType == AVMEDIA_TYPE_VIDEO && m_videoStreamIndex == -1) {
-            // Enhanced/非标准 FLV 中的 H.265：FFmpeg 4.x 的 flvdec 不识别时 codec_id=NONE，
-            // 但 codec_tag 仍保留 "HEVC"/"hvc1" 等标识或 FLV CodecID=12，可手动修正
-            if (stream->codecpar->codec_id == AV_CODEC_ID_NONE) {
-                const uint32_t tag = stream->codecpar->codec_tag;
-                if (tag == MKTAG('H','E','V','C') || tag == MKTAG('h','e','v','c') ||
-                    tag == MKTAG('h','v','c','1') || tag == MKTAG('h','e','v','1') || tag == 12) {
-                    stream->codecpar->codec_id = AV_CODEC_ID_HEVC;
-                    char tagBuf[16];
-                    snprintf(tagBuf, sizeof(tagBuf), "0x%x", tag);
-                    LOG_INFO("Patched FLV H.265 stream codec_id (tag=" + std::string(tagBuf) + ")");
-                }
-            }
             m_videoStreamIndex = i;
             LOG_INFO("Found video stream at index " + std::to_string(i) +
                     " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));

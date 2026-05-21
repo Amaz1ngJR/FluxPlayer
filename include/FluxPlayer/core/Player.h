@@ -435,6 +435,9 @@ private:
 
     // 媒体信息
     std::string filePath_;
+    std::string liveReopenPath_;     ///< 实时流重连用：实际打开 demuxer 的 URL（可能来自 yt-dlp 提取）
+    std::string liveReopenHeaders_;  ///< 实时流重连用：HTTP 头
+    double liveReopenDuration_{0.0}; ///< 实时流重连用：已知时长，0 表示无
     double duration_;
     int videoWidth_;
     int videoHeight_;
