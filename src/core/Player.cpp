@@ -397,7 +397,12 @@ bool Player::open(const std::string& filePath) {
     }
 
     // 初始化音频输出（如果有音频流）
-    ClockType clockType = ClockType::VIDEO_CLOCK;
+    // 主时钟选择：
+    //   有音频且输出初始化成功 → AUDIO_CLOCK，由音频回调按真实采样率推进，视频追随，最稳
+    //   无音频或音频输出失败   → EXTERNAL_CLOCK，由墙钟自动推进
+    // 不能用 VIDEO_CLOCK：videoClock_ 仅在帧渲染时推进，而 renderVideoFrame 又用
+    // "PTS <= masterClock" 判断是否取帧，会自循环卡在首帧
+    ClockType clockType = ClockType::EXTERNAL_CLOCK;
     if (audioDecoder_) {
         audioOutput_ = std::make_unique<AudioOutput>();
         AudioOutput::AudioFormat audioFormat;
@@ -418,10 +423,11 @@ bool Player::open(const std::string& filePath) {
         if (audioOutput_->init(audioFormat, audioCallback)) {
             LOG_INFO("Audio output initialized successfully");
             audioOutput_->setVolume(volume_.load());  // 应用配置的音量
-            clockType = ClockType::EXTERNAL_CLOCK;  // 使用系统时钟驱动视频
+            clockType = ClockType::AUDIO_CLOCK;       //优先用音频时钟做主时钟
         } else {
             LOG_WARN("Failed to initialize audio output, audio will be disabled");
             audioOutput_.reset();
+            // clockType 保持 EXTERNAL_CLOCK
         }
     }
 
@@ -951,10 +957,11 @@ double Player::getCurrentTime() const {
     if (audioOnly_ && avSync_) {
         return avSync_->getAudioClock();
     }
-    // 实时流：用音频时钟驱动进度条。视频帧 PTS 抖动 + 主循环偶尔卡顿
-    // 会让 lastRenderedPTS_ 非匀速增长导致进度条跳变；音频时钟由音频回调按真实采样率推进，平滑稳定。
+    // 实时流：优先用音频时钟驱动进度条（按真实采样率推进，平滑稳定）；
+    // 无音频时降级到外部时钟（墙钟推进），否则进度条会一直停在 0。
+    // 不能直接用 lastRenderedPTS_：视频帧 PTS 抖动 + 主循环偶尔卡顿会让其非匀速增长，进度条跳变。
     if (isLiveStream_ && avSync_) {
-        return avSync_->getAudioClock();
+        return audioOutput_ ? avSync_->getAudioClock() : avSync_->getExternalClock();
     }
     // 返回最后实际渲染的帧的 PTS，而不是 AVSync 的时钟
     // 这样可以避免 seek 时时钟立即更新导致的连续 seek 问题
