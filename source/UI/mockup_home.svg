@@ -1,0 +1,140 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="edgeRail" x1="0" y1="0" x2="1440" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#00E8FF"/>
+      <stop offset="0.52" stop-color="#2DA7FF"/>
+      <stop offset="0.8" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cyanViolet" x1="122" y1="572" x2="1318" y2="768" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF"/>
+      <stop offset="0.48" stop-color="#1689FF"/>
+      <stop offset="0.54" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#FF3DF2"/>
+    </linearGradient>
+    <linearGradient id="cardCyan" x1="112" y1="572" x2="670" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF" stop-opacity="0.95"/>
+      <stop offset="0.68" stop-color="#00A8DC" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#00E8FF" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="cardViolet" x1="770" y1="572" x2="1328" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A855FF" stop-opacity="0.16"/>
+      <stop offset="0.35" stop-color="#A855FF" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#FF3DF2"/>
+    </linearGradient>
+    <linearGradient id="energy" x1="584" y1="0" x2="856" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.22" stop-color="#00E8FF"/>
+      <stop offset="0.5" stop-color="#EAF8FF"/>
+      <stop offset="0.78" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#A855FF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="coreGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(720 355) scale(310 260)">
+      <stop stop-color="#00E8FF" stop-opacity="0.22"/>
+      <stop offset="0.42" stop-color="#1265B2" stop-opacity="0.12"/>
+      <stop offset="0.7" stop-color="#A855FF" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#030511" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="backgroundGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(720 370) rotate(90) scale(620 880)">
+      <stop stop-color="#071B31"/>
+      <stop offset="0.5" stop-color="#050A18"/>
+      <stop offset="1" stop-color="#02040E"/>
+    </radialGradient>
+    <pattern id="scan" width="8" height="8" patternUnits="userSpaceOnUse">
+      <path d="M0 7.5H8" stroke="#00E8FF" stroke-opacity="0.025"/>
+    </pattern>
+    <pattern id="floorGrid" width="64" height="36" patternUnits="userSpaceOnUse">
+      <path d="M64 0H0V36" stroke="#136C8F" stroke-opacity="0.18"/>
+    </pattern>
+    <filter id="strongGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="4.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="url(#backgroundGlow)"/>
+  <rect width="1440" height="900" fill="url(#scan)"/>
+  <rect y="520" width="1440" height="380" fill="url(#floorGrid)" opacity="0.6"/>
+  <path d="M0 2H1440M0 898H1440" stroke="url(#edgeRail)" stroke-width="3"/>
+
+  <g opacity="0.75">
+    <path d="M44 82H270L298 54H450M990 54H1142L1170 82H1396" stroke="#136C8F" stroke-width="1.5"/>
+    <path d="M44 114H204M1236 114H1396" stroke="#00E8FF" stroke-opacity="0.55" stroke-width="2"/>
+    <path d="M44 808H250L282 840H430M1010 840H1158L1190 808H1396" stroke="#136C8F" stroke-width="1.5"/>
+    <path d="M44 786H194M1246 786H1396" stroke="#A855FF" stroke-opacity="0.62" stroke-width="2"/>
+  </g>
+
+  <text x="64" y="57" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#53708E" letter-spacing="2">FLUX / LAUNCH CONSOLE</text>
+  <text x="1376" y="57" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#53708E" letter-spacing="2">SOURCE LINK // READY</text>
+
+  <text x="720" y="139" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="54" fill="#A855FF" fill-opacity="0.28" letter-spacing="9">FLUX // PLAYER</text>
+  <text x="716" y="135" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="54" fill="#00E8FF" fill-opacity="0.22" letter-spacing="9">FLUX // PLAYER</text>
+  <text x="718" y="137" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="54" fill="#EAF8FF" letter-spacing="9">FLUX // PLAYER</text>
+  <text x="720" y="172" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#7792B2" letter-spacing="5">CHOOSE YOUR MEDIA SOURCE</text>
+  <path d="M482 191H610M830 191H958" stroke="url(#energy)" stroke-width="2"/>
+  <circle cx="720" cy="191" r="3" fill="#00E8FF"/>
+
+  <rect x="0" y="0" width="1440" height="900" fill="url(#coreGlow)"/>
+  <g opacity="0.35">
+    <path d="M354 366L486 366M954 366H1086M397 306L506 322M934 322L1043 306M397 426L506 410M934 410L1043 426"
+          stroke="#00E8FF"/>
+    <path d="M720 222V256M720 478V514M560 366H524M880 366H916" stroke="#A855FF"/>
+  </g>
+  <g filter="url(#softGlow)">
+    <circle cx="720" cy="366" r="122" stroke="#136C8F" stroke-width="1.5" stroke-dasharray="2 10"/>
+    <circle cx="720" cy="366" r="104" stroke="#00E8FF" stroke-opacity="0.28"/>
+    <path d="M720 262A104 104 0 0 1 812 318" stroke="#00E8FF" stroke-width="3"/>
+    <path d="M812 414A104 104 0 0 1 720 470" stroke="#A855FF" stroke-width="3"/>
+    <path d="M720 286L789 326V406L720 446L651 406V326L720 286Z" stroke="#136C8F" stroke-width="2"/>
+    <path d="M720 309L769 338V394L720 423L671 394V338L720 309Z" fill="#050D20" stroke="url(#energy)" stroke-width="2"/>
+  </g>
+  <g filter="url(#strongGlow)">
+    <path d="M694 365H707L716 346L726 383L736 357L744 365H759" stroke="#00E8FF" stroke-width="3"/>
+    <circle cx="720" cy="366" r="45" stroke="#00E8FF" stroke-opacity="0.34"/>
+  </g>
+  <text x="720" y="493" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#53708E" letter-spacing="3">MEDIA SOURCE MATRIX // STANDBY</text>
+
+  <path d="M126 570H640L672 602V746L648 770H126L102 746V594L126 570Z"
+        fill="#050A1A" fill-opacity="0.96" stroke="url(#cardCyan)" stroke-width="2"/>
+  <path d="M140 584H626L658 614V730L634 754H140L116 730V608L140 584Z"
+        stroke="#136C8F" stroke-opacity="0.7"/>
+  <path d="M140 584H324M116 618V665" stroke="#00E8FF" stroke-width="2"/>
+  <text x="148" y="619" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#00E8FF" letter-spacing="3">01 / LOCAL FILE</text>
+  <text x="148" y="647" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#91ADCC">Play media stored on this device</text>
+  <g filter="url(#softGlow)">
+    <rect x="148" y="679" width="472" height="48" rx="3" fill="#061329" stroke="#00E8FF" stroke-width="1.5"/>
+  </g>
+  <path d="M170 694H188L196 701H218V715H170V694Z" stroke="#00E8FF" stroke-width="1.8"/>
+  <text x="245" y="709" font-family="Share Tech Mono, Consolas, monospace" font-size="14" fill="#EAF8FF" letter-spacing="2">OPEN LOCAL FILE</text>
+  <path d="M583 696H595L607 703L595 710H583" stroke="#00E8FF" stroke-width="1.5"/>
+
+  <path d="M800 570H1314L1338 594V746L1314 770H792L768 746V602L800 570Z"
+        fill="#050A1A" fill-opacity="0.96" stroke="url(#cardViolet)" stroke-width="2"/>
+  <path d="M814 584H1300L1324 608V730L1300 754H806L782 730V614L814 584Z"
+        stroke="#35235A" stroke-opacity="0.95"/>
+  <path d="M1116 584H1300M1324 618V665" stroke="#A855FF" stroke-width="2"/>
+  <text x="814" y="619" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#A855FF" letter-spacing="3">02 / NETWORK URL</text>
+  <text x="814" y="647" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#91ADCC">Open a live stream or web video address</text>
+  <rect x="814" y="679" width="332" height="48" rx="3" fill="#030817" stroke="#6336A4" stroke-width="1.5"/>
+  <path d="M834 703H840M848 703H854M862 703H868" stroke="#A855FF" stroke-width="2.5"/>
+  <text x="886" y="708" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#6F89A8">https:// or rtsp://</text>
+  <g filter="url(#softGlow)">
+    <rect x="1158" y="679" width="140" height="48" rx="3" fill="#140B2D" stroke="#FF3DF2" stroke-width="1.5"/>
+  </g>
+  <text x="1228" y="709" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#EAF8FF" letter-spacing="2">OPEN URL</text>
+
+  <path d="M102 792H1338" stroke="url(#edgeRail)" stroke-width="1"/>
+  <text x="112" y="820" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#53708E" letter-spacing="2">LOCAL MEDIA</text>
+  <text x="1328" y="820" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#53708E" letter-spacing="2">NETWORK STREAM / WEB VIDEO</text>
+</svg>
