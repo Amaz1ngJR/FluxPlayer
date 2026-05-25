@@ -1,4 +1,8 @@
 # setup_env.ps1 — Windows MinGW + xmake 环境配置脚本
+# 安装xmake : 
+#Invoke-WebRequest `
+#  -Uri "https://github.com/xmake-io/xmake/releases/download/v3.0.9/xmake-bundle-v3.0.9.win64.exe" `
+#  -OutFile "D:\tools\xmake.exe"
 # 使用方式：在 PowerShell 中运行 D:\tools\setup_env.ps1
 # 首次使用需执行：Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 

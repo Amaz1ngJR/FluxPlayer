@@ -218,11 +218,14 @@ target("FluxPlayer")
         add_rpathdirs("@executable_path")
     elseif is_plat("windows") then
         -- add_syslinks：链接系统库（等价于 -l xxx 或 xxx.lib）
-        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32", "d3d11", "dxgi")
+        -- uuid：MinGW 下 IID_IUnknown 等 COM IID 常量定义在 libuuid.a 中，
+        -- WebView2 回调对象 QueryInterface 用到 IID_IUnknown 必须链上
+        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32", "d3d11", "dxgi", "uuid")
 
         -- WebView2 SDK 检测：third_party/webview2/include/WebView2.h 存在时启用内置登录
-        -- 不需要 .lib：运行时通过 LoadLibraryW 动态加载 WebView2Loader.dll，
-        -- DLL 由系统 WebView2 Runtime 提供
+        -- 不需要 .lib：运行时通过 LoadLibraryW 动态加载 WebView2Loader.dll；
+        -- 该 DLL 来自 Microsoft.Web.WebView2 NuGet 包，不随 Runtime 分发，
+        -- 由 after_build 阶段从 third_party/webview2/runtimes/win-x64/ 拷到 exe 旁
         local webview2_header = path.join(os.projectdir(), "third_party/webview2/include/WebView2.h")
         if os.isfile(webview2_header) then
             print("WebView2 SDK header 已检测到: " .. webview2_header)
@@ -289,6 +292,13 @@ target("FluxPlayer")
                 for _, dll in ipairs(os.files(path.join(ffmpeg_bin, "*.dll"))) do
                     cp_if_changed(dll, target:targetdir())
                 end
+            end
+            -- WebView2Loader.dll：来自 Microsoft.Web.WebView2 NuGet 包的 redistributable，
+            -- 不随 WebView2 Runtime 分发，必须自带在 exe 旁边
+            local webview2_loader = path.join(os.projectdir(),
+                "third_party", "webview2", "runtimes", "win-x64", "WebView2Loader.dll")
+            if os.isfile(webview2_loader) then
+                cp_if_changed(webview2_loader, target:targetdir())
             end
             -- MinGW 运行时 DLL：从编译器同目录拷贝，方便直接从 build 目录启动调试
             -- （与 CMakeLists.txt 的 POST_BUILD 逻辑保持一致）

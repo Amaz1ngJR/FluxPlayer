@@ -271,14 +271,34 @@ elseif(WIN32)
     )
 
     # WebView2 SDK 检测：放在 third_party/webview2/ 下时自动启用内置登录窗口
-    # 期望文件：third_party/webview2/include/WebView2.h（微软官方单头文件，MIT/Apache-2.0）
-    # 不需要 .lib：运行时通过 LoadLibraryW 动态加载 WebView2Loader.dll，
-    # DLL 由系统 WebView2 Runtime 提供（与 macOS 调用系统 WebKit.framework 等价）。
+    # 期望文件：
+    #   - third_party/webview2/include/WebView2.h
+    #     （微软官方单头文件，MIT/Apache-2.0）
+    #   - third_party/webview2/runtimes/win-x64/WebView2Loader.dll
+    #     （来自 Microsoft.Web.WebView2 NuGet 包；不需要 .lib，运行时通过
+    #      LoadLibraryW 动态加载，但该 DLL 不随 WebView2 Runtime 分发，
+    #      必须由应用自带——构建时拷到 exe 旁边）
     set(WEBVIEW2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2")
     if(EXISTS "${WEBVIEW2_ROOT}/include/WebView2.h")
         message(STATUS "WebView2 SDK header detected: ${WEBVIEW2_ROOT}/include/WebView2.h")
         target_compile_definitions(FluxPlayer PRIVATE FLUXPLAYER_HAVE_WEBVIEW2)
         target_include_directories(FluxPlayer PRIVATE "${WEBVIEW2_ROOT}/include")
+
+        set(WEBVIEW2_LOADER_DLL "${WEBVIEW2_ROOT}/runtimes/win-x64/WebView2Loader.dll")
+        if(EXISTS "${WEBVIEW2_LOADER_DLL}")
+            message(STATUS "WebView2Loader.dll detected: ${WEBVIEW2_LOADER_DLL}")
+            add_custom_command(TARGET FluxPlayer POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${WEBVIEW2_LOADER_DLL}"
+                    $<TARGET_FILE_DIR:FluxPlayer>
+                COMMENT "Copying WebView2Loader.dll"
+            )
+        else()
+            message(WARNING "WebView2Loader.dll 未找到: ${WEBVIEW2_LOADER_DLL}\n"
+                            "请从 Microsoft.Web.WebView2 NuGet 包提取 runtimes/win-x64/native/WebView2Loader.dll，\n"
+                            "放到 third_party/webview2/runtimes/win-x64/ 下后重新构建；\n"
+                            "否则运行时会报『加载 WebView2Loader.dll 失败』。")
+        endif()
     else()
         message(STATUS "WebView2 SDK header 未检测到（third_party/webview2/include/WebView2.h 缺失），"
                        "内置登录窗口将编译为占位实现，运行时返回 Unsupported")

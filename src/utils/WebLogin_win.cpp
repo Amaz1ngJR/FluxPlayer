@@ -13,8 +13,10 @@
  *   Unsupported 的占位实现）
  *
  * 设计要点：
- * - 不依赖第三方库 wil/wrl，仅使用 Windows SDK 自带的 <wrl/client.h> +
- *   <wrl/event.h> 提供的 Microsoft::WRL::ComPtr / Callback；
+ * - 仅依赖 Windows SDK 自带的 <wrl/client.h>（Microsoft::WRL::ComPtr）；
+ *   MinGW 不提供 <wrl/event.h>/<wrl/implements.h>（Callback 模板），
+ *   因此本文件手写 COM 回调对象 LambdaCallback<I, T>，实现三个 WebView2
+ *   异步接口需要的 IUnknown + Invoke；
  * - 不链接 WebView2LoaderStatic.lib：运行时通过 LoadLibraryW 动态加载
  *   WebView2Loader.dll，DLL 由 WebView2 Runtime 提供；
  * - 异步流程通过私有消息泵驱动：模态期间持续 PeekMessage/DispatchMessage，
@@ -29,22 +31,69 @@
 
 #include <Windows.h>
 #include <wrl/client.h>
-#include <wrl/event.h>
-#include <wrl/implements.h>
 #include "WebView2.h"
 
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <functional>
 #include <string>
 #include <vector>
 
-using Microsoft::WRL::Callback;
 using Microsoft::WRL::ComPtr;
 
 namespace FluxPlayer {
 
 namespace {
+
+// 手写的轻量 COM 回调对象：用 lambda 实现 WebView2 的 *CompletedHandler
+// 接口（每个接口形如 IUnknown + HRESULT Invoke(HRESULT, T*)）。
+// MinGW 的 <wrl/> 不提供 Callback<>/RuntimeClass，因此这里自己实现，
+// 同一份代码 MSVC 也能编译通过。MinGW 不支持对 WebView2.h 中以
+// MIDL_INTERFACE 声明的接口使用 __uuidof，所以这里显式传入 IID。
+template <typename Interface, typename Arg>
+class LambdaCallback : public Interface {
+public:
+    using Fn = std::function<HRESULT(HRESULT, Arg*)>;
+    LambdaCallback(REFIID iid, Fn fn) : iid_(iid), fn_(std::move(fn)) {}
+
+    // IUnknown
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == iid_) {
+            *ppv = static_cast<Interface*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return static_cast<ULONG>(InterlockedIncrement(&ref_));
+    }
+    ULONG STDMETHODCALLTYPE Release() override {
+        LONG r = InterlockedDecrement(&ref_);
+        if (r == 0) delete this;
+        return static_cast<ULONG>(r);
+    }
+
+    // *CompletedHandler::Invoke
+    HRESULT STDMETHODCALLTYPE Invoke(HRESULT errorCode, Arg* result) override {
+        return fn_ ? fn_(errorCode, result) : S_OK;
+    }
+
+private:
+    LONG ref_ = 1;
+    IID iid_;
+    Fn fn_;
+};
+
+template <typename Interface, typename Arg>
+ComPtr<Interface> MakeCallback(REFIID iid, std::function<HRESULT(HRESULT, Arg*)> fn) {
+    ComPtr<Interface> cb;
+    cb.Attach(new LambdaCallback<Interface, Arg>(iid, std::move(fn)));
+    return cb;
+}
 
 // 模态退出原因
 enum class ModalResult { None, Cancel, Complete, Failed };
@@ -178,14 +227,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     switch (msg) {
     case WM_SIZE: {
-        if (ctx && ctx->controller) {
+        if (ctx) {
             RECT rc; GetClientRect(hwnd, &rc);
             const int btnH = 36;
-            RECT webRc{ rc.left, rc.top, rc.right, rc.bottom - btnH };
-            ctx->controller->put_Bounds(webRc);
-            // 重新摆放按钮
+            // 按钮位置不依赖 WebView2 controller（异步创建）：
+            // 第一次 WM_SIZE 触发时 controller 仍为 null，但按钮必须立即可见，
+            // 否则用户只能点窗口右上角红叉关闭，相当于取消，不会读到 cookie。
             if (ctx->completeBtn) MoveWindow(ctx->completeBtn, rc.right - 130, rc.bottom - btnH + 4, 120, 28, TRUE);
             if (ctx->cancelBtn)   MoveWindow(ctx->cancelBtn,   rc.right - 250, rc.bottom - btnH + 4, 100, 28, TRUE);
+            // WebView 区域只在 controller 就绪后才有效
+            if (ctx->controller) {
+                RECT webRc{ rc.left, rc.top, rc.right, rc.bottom - btnH };
+                ctx->controller->put_Bounds(webRc);
+            }
         }
         return 0;
     }
@@ -204,7 +258,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             // 异步读取所有 cookies
             ComPtr<ICoreWebView2_2> webView2;
-            if (FAILED(ctx->webView.As(&webView2))) {
+            if (FAILED(ctx->webView.CopyTo(IID_ICoreWebView2_2,
+                    reinterpret_cast<void**>(webView2.ReleaseAndGetAddressOf())))) {
                 ctx->error = "WebView2 接口版本过低，无法读取 cookies";
                 ctx->modalResult = ModalResult::Failed;
                 PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
@@ -221,7 +276,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // 不指定 URI：拿到所有可读 cookies；FluxPlayer 自己按 host 过滤
             HRESULT hr = cookieMgr->GetCookies(
                 nullptr,
-                Callback<ICoreWebView2GetCookiesCompletedHandler>(
+                MakeCallback<ICoreWebView2GetCookiesCompletedHandler, ICoreWebView2CookieList>(
+                    IID_ICoreWebView2GetCookiesCompletedHandler,
                     [ctx](HRESULT errorCode, ICoreWebView2CookieList* list) -> HRESULT {
                         if (FAILED(errorCode) || !list) {
                             ctx->error = "GetCookies 调用失败";
@@ -329,9 +385,11 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     SendMessageW(hwnd, WM_SIZE, 0, 0);
 
     // ── 动态加载 WebView2Loader.dll ──
-    // 不链接 WebView2LoaderStatic.lib，运行时由 WebView2 Runtime 提供 DLL。
-    // 这样 Windows 端唯一的"额外文件"只剩 WebView2.h 头文件，性质等同于 macOS
-    // 引入系统 WebKit.framework。
+    // 不链接静态库，运行时由应用自带的 WebView2Loader.dll 提供入口。
+    // 注意：WebView2Loader.dll 来自 Microsoft.Web.WebView2 NuGet 包
+    // （runtimes/win-x64/native/WebView2Loader.dll），并不随系统的
+    // WebView2 Runtime 分发——CMake 会把它拷到 FluxPlayer.exe 旁边，
+    // 缺失则在此处返回明确错误。
     using PFnCreateWebView2Env = HRESULT(STDMETHODCALLTYPE*)(
         PCWSTR, PCWSTR,
         ICoreWebView2EnvironmentOptions*,
@@ -340,7 +398,9 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     if (!loaderDll) {
         DestroyWindow(hwnd);
         outcome.result = WebLoginResult::Failed;
-        outcome.error = "加载 WebView2Loader.dll 失败，请确认已安装 WebView2 Runtime";
+        outcome.error = "加载 WebView2Loader.dll 失败：请将 Microsoft.Web.WebView2 NuGet 包中"
+                        " runtimes/win-x64/native/WebView2Loader.dll 拷到 FluxPlayer.exe 同目录"
+                        "（CMake 检测到 third_party/webview2/runtimes/win-x64/WebView2Loader.dll 时会自动拷贝）";
         return outcome;
     }
     auto pfnCreateEnv = reinterpret_cast<PFnCreateWebView2Env>(
@@ -356,7 +416,8 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     // ── 创建 WebView2 环境（异步） ──
     ComPtr<ICoreWebView2Environment> envHolder;
     HRESULT hr = pfnCreateEnv(nullptr, nullptr, nullptr,
-        Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+        MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler, ICoreWebView2Environment>(
+            IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
             [&](HRESULT errorCode, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(errorCode) || !env) {
                     ctx.error = "创建 WebView2 环境失败，请确认已安装 WebView2 Runtime";
@@ -366,7 +427,8 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                 }
                 envHolder = env;
                 env->CreateCoreWebView2Controller(hwnd,
-                    Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                    MakeCallback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, ICoreWebView2Controller>(
+                        IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
                         [&](HRESULT err2, ICoreWebView2Controller* controller) -> HRESULT {
                             if (FAILED(err2) || !controller) {
                                 ctx.error = "创建 WebView2 控制器失败";
