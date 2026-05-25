@@ -11,6 +11,9 @@
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/CookieStore.h"
+#include "FluxPlayer/utils/WebLogin.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>      // 需要 ImGui 内部 API（GetBackgroundDrawList 等）
@@ -22,6 +25,8 @@
 
 #include <cstring>
 #include <cmath>
+#include <fstream>
+#include <vector>
 
 namespace FluxPlayer {
 
@@ -43,6 +48,8 @@ static HomeScreen* g_homeScreenInstance = nullptr;
 HomeScreen::HomeScreen()
     : fileSelected_(false)
     , dropReceived_(false)
+    , loginPromptOpen_(false)
+    , loginPromptHasCookie_(false)
     , titleFont_(nullptr)
     , defaultFont_(nullptr) {
     // 清零 URL 输入缓冲区
@@ -153,9 +160,44 @@ bool HomeScreen::init() {
     io.IniFilename = imguiIniPath.c_str();
 
     // 加载字体：
-    // - defaultFont_: ImGui 内置默认字体（13px），用于正文、按钮等
-    // - titleFont_:   同样基于内置字体但放大到 36px，用于 "FluxPlayer" 大标题
-    defaultFont_ = io.Fonts->AddFontDefault();
+    // - defaultFont_: 优先按平台探测系统 CJK 字体（16px），让登录询问等中文 UI 正常显示；
+    //                找不到则回退到 ImGui 内置默认字体（13px，仅 ASCII）
+    // - titleFont_:   "FluxPlayer" 大标题，使用项目内 ShareTechMono 字体
+    {
+        std::vector<std::string> cjkCandidates;
+#if defined(__APPLE__)
+        cjkCandidates.push_back("/System/Library/Fonts/PingFang.ttc");
+        cjkCandidates.push_back("/System/Library/Fonts/STHeiti Medium.ttc");
+        cjkCandidates.push_back("/System/Library/Fonts/Hiragino Sans GB.ttc");
+#elif defined(_WIN32)
+        cjkCandidates.push_back("C:/Windows/Fonts/msyh.ttc");
+        cjkCandidates.push_back("C:/Windows/Fonts/msyh.ttf");
+        cjkCandidates.push_back("C:/Windows/Fonts/simhei.ttf");
+#else
+        cjkCandidates.push_back("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc");
+        cjkCandidates.push_back("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc");
+        cjkCandidates.push_back("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc");
+#endif
+        // 先建一个本地探测函数，避免引入 <filesystem>
+        auto fileExists = [](const std::string& p) {
+            std::ifstream f(p);
+            return f.good();
+        };
+        for (const auto& path : cjkCandidates) {
+            if (!fileExists(path)) continue;
+            // GetGlyphRangesChineseSimplifiedCommon ≈ 2500 常用字，纹理体积可控
+            defaultFont_ = io.Fonts->AddFontFromFileTTF(
+                path.c_str(), 16.0f, nullptr,
+                io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+            if (defaultFont_) {
+                LOG_INFO("HomeScreen CJK font loaded: " + path);
+                break;
+            }
+        }
+        if (!defaultFont_) {
+            defaultFont_ = io.Fonts->AddFontDefault();
+        }
+    }
     titleFont_ = io.Fonts->AddFontFromFileTTF("fonts/ShareTechMono-Regular.ttf", 36.0f);
     if (!titleFont_) {
         ImFontConfig fontCfg;
@@ -656,10 +698,20 @@ void HomeScreen::renderUI() {
         ImGui::PopStyleColor(5);
 
         if ((enterPressed || playClicked) && urlBuffer_[0] != '\0') {
-            selectedFile_ = urlBuffer_;
-            fileSelected_ = true;
-            errorMessage_.clear();
-            LOG_INFO("URL entered: " + selectedFile_);
+            std::string url = urlBuffer_;
+            // 网页 URL（需要 yt-dlp 提取）：弹出登录询问；
+            // 直链 / RTSP / RTMP / 本地路径等：直接进入播放流程
+            if (StreamExtractor::needsExtraction(url)) {
+                loginPromptUrl_ = url;
+                loginPromptHasCookie_ = CookieStore::hasCookiesForUrl(url);
+                loginPromptOpen_ = true;
+                errorMessage_.clear();
+            } else {
+                selectedFile_ = url;
+                fileSelected_ = true;
+                errorMessage_.clear();
+                LOG_INFO("URL entered: " + selectedFile_);
+            }
         }
     }
 
@@ -688,6 +740,97 @@ void HomeScreen::renderUI() {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.15f, 0.35f, 0.50f, 1.0f));
         ImGui::TextUnformatted(hint);
         ImGui::PopStyleColor();
+    }
+
+    // ── 登录询问弹窗 ──
+    // 当用户提交网页 URL 后弹出，根据 CookieStore 是否命中给出不同选项。
+    // 弹窗按钮逻辑：
+    //   不登录打开    → 直接进入播放，yt-dlp 不带 cookie
+    //   登录并继续    → 调用 WebLogin 弹原生 WebView，登录后写 CookieStore
+    //   使用已保存登录 → 直接进入播放，yt-dlp 带 --cookies
+    //   重新登录     → 同「登录并继续」（覆盖旧 cookie）
+    if (loginPromptOpen_) {
+        ImGui::OpenPopup("WebLoginPrompt");
+        loginPromptOpen_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_Always);
+    if (ImGui::BeginPopupModal("WebLoginPrompt", nullptr,
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        if (loginPromptHasCookie_) {
+            ImGui::TextWrapped("检测到已保存该站点登录信息，是否使用？");
+        } else {
+            ImGui::TextWrapped("该网页可能需要登录后播放，是否登录？");
+        }
+        ImGui::TextDisabled("%s", loginPromptUrl_.c_str());
+        ImGui::Separator();
+
+        const float btnH = 30.0f;
+        bool doLogin = false;
+        bool useStored = false;
+        bool noLogin = false;
+
+        if (loginPromptHasCookie_) {
+            // 横向三按钮
+            if (ImGui::Button("使用已保存登录", ImVec2(140, btnH))) useStored = true;
+            ImGui::SameLine();
+            if (ImGui::Button("重新登录",     ImVec2(110, btnH))) doLogin = true;
+            ImGui::SameLine();
+            if (ImGui::Button("不登录打开",   ImVec2(120, btnH))) noLogin = true;
+        } else {
+            if (ImGui::Button("登录并继续", ImVec2(150, btnH))) doLogin = true;
+            ImGui::SameLine();
+            if (ImGui::Button("不登录打开", ImVec2(150, btnH))) noLogin = true;
+        }
+
+        if (useStored) {
+            selectedFile_ = loginPromptUrl_;
+            fileSelected_ = true;
+            LOG_INFO("WebLogin: 使用已保存登录，url=" + loginPromptUrl_);
+            ImGui::CloseCurrentPopup();
+        } else if (noLogin) {
+            selectedFile_ = loginPromptUrl_;
+            fileSelected_ = true;
+            LOG_INFO("WebLogin: 用户选择不登录，url=" + loginPromptUrl_);
+            ImGui::CloseCurrentPopup();
+        } else if (doLogin) {
+            ImGui::CloseCurrentPopup();
+            // 注意：WebLogin::showLoginDialog 是阻塞模态调用，在它返回前 ImGui 不再绘制
+            if (!WebLogin::isSupported()) {
+                errorMessage_ = "当前平台未启用内置登录";
+                LOG_WARN(errorMessage_);
+            } else {
+                LOG_INFO("WebLogin: 打开登录窗口 url=" + loginPromptUrl_);
+                WebLoginOutcome out = WebLogin::showLoginDialog(loginPromptUrl_);
+                switch (out.result) {
+                    case WebLoginResult::Completed: {
+                        if (out.cookies.empty()) {
+                            errorMessage_ = "未检测到该站点登录 cookie，将使用未登录方式打开。";
+                            LOG_WARN(errorMessage_);
+                        } else {
+                            std::string err;
+                            if (!CookieStore::mergeCookies(out.cookies, &err)) {
+                                errorMessage_ = "保存登录信息失败: " + err;
+                                LOG_ERROR(errorMessage_);
+                            }
+                        }
+                        selectedFile_ = loginPromptUrl_;
+                        fileSelected_ = true;
+                        break;
+                    }
+                    case WebLoginResult::Cancelled:
+                        // 用户取消，不进入播放，留在 HomeScreen
+                        break;
+                    case WebLoginResult::Unsupported:
+                    case WebLoginResult::Failed:
+                    default:
+                        errorMessage_ = out.error.empty() ? "登录失败" : out.error;
+                        LOG_ERROR("WebLogin failed: " + errorMessage_);
+                        break;
+                }
+            }
+        }
+
+        ImGui::EndPopup();
     }
 
     ImGui::End();

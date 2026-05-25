@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 -- 项目基本信息
 set_project("FluxPlayer")
-set_version("0.3.1")
+set_version("0.3.2")
 set_languages("cxx17")  -- 要求 C++17 标准
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
@@ -168,6 +168,16 @@ target("FluxPlayer")
     add_files("src/*.cpp")
     add_files("src/**/*.cpp")
 
+    -- 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)
+    if is_plat("macosx") then
+        -- Objective-C++ 源文件，禁用 ARC 与项目内其他原生代码风格一致
+        add_files("src/utils/WebLogin_mac.mm", {mxxflags = "-fno-objc-arc"})
+    end
+    -- 注意：WebLogin_win.cpp 已被 src/**/*.cpp 通配匹配；非 Windows 平台需排除
+    if not is_plat("windows") then
+        remove_files("src/utils/WebLogin_win.cpp")
+    end
+
     -- 声明依赖的静态库（会自动传递头文件路径）
     add_deps("glfw_local", "glad_local", "imgui_local", "tinyfiledialogs_local")
 
@@ -185,6 +195,10 @@ target("FluxPlayer")
     add_files("src/renderer/Shader.cpp", {unity_ignored = true})
     add_files("src/ui/Window.cpp", {unity_ignored = true})
     add_files("src/ui/HomeScreen.cpp", {unity_ignored = true})
+    -- WebView2 头依赖大量 Windows COM 宏，与其他 .cpp 合并会触发宏冲突
+    if is_plat("windows") then
+        add_files("src/utils/WebLogin_win.cpp", {unity_ignored = true})
+    end
 
     -- 项目头文件搜索路径
     add_includedirs("include")          -- 项目自身头文件
@@ -198,12 +212,26 @@ target("FluxPlayer")
     -- 平台相关的系统库
     if is_plat("macosx") then
         -- add_frameworks：链接 macOS 系统框架（等价于 -framework xxx）
-        add_frameworks("OpenGL", "Cocoa", "CoreVideo", "IOKit", "CoreFoundation", "AudioToolbox")
+        -- WebKit：WKWebView 内置登录窗口
+        add_frameworks("OpenGL", "Cocoa", "CoreVideo", "IOKit", "CoreFoundation", "AudioToolbox", "WebKit")
         -- 设置 rpath，让可执行文件在构建目录和安装后都能找到 dylib
         add_rpathdirs("@executable_path")
     elseif is_plat("windows") then
         -- add_syslinks：链接系统库（等价于 -l xxx 或 xxx.lib）
         add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32", "d3d11", "dxgi")
+
+        -- WebView2 SDK 检测：third_party/webview2/include/WebView2.h 存在时启用内置登录
+        -- 不需要 .lib：运行时通过 LoadLibraryW 动态加载 WebView2Loader.dll，
+        -- DLL 由系统 WebView2 Runtime 提供
+        local webview2_header = path.join(os.projectdir(), "third_party/webview2/include/WebView2.h")
+        if os.isfile(webview2_header) then
+            print("WebView2 SDK header 已检测到: " .. webview2_header)
+            add_defines("FLUXPLAYER_HAVE_WEBVIEW2")
+            add_includedirs(path.join(os.projectdir(), "third_party/webview2/include"))
+        else
+            print("WebView2 SDK header 未检测到（third_party/webview2/include/WebView2.h 缺失），"
+                  .. "内置登录窗口将编译为占位实现，运行时返回 Unsupported")
+        end
     elseif is_plat("linux") then
         add_syslinks("GL", "X11", "pthread", "dl", "asound")  -- asound = ALSA 音频
     end

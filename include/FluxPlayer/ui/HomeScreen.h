@@ -142,6 +142,15 @@ private:
     bool dropReceived_;                ///< 标记：是否收到了 GLFW 拖放事件
     std::string droppedFile_;          ///< 拖放回调中接收到的文件路径
 
+    // ── 内置登录询问对话框状态 ──
+    // 用户输入网页 URL 后弹出 ImGui 模态弹窗，询问登录策略：
+    //   1. 不登录打开
+    //   2. 登录并继续（打开内置 WebView 登录窗口，登录后写 CookieStore）
+    //   3. 已有 cookie 时多一项「使用已保存登录」
+    bool   loginPromptOpen_;           ///< 是否需要在下一帧打开询问弹窗
+    bool   loginPromptHasCookie_;      ///< 缓存：当前 URL 在 CookieStore 中是否已有 cookie
+    std::string loginPromptUrl_;       ///< 待处理的网页 URL
+
     ImFont* titleFont_;                ///< 大号标题字体（36px），用于 "FluxPlayer" 标题
     ImFont* defaultFont_;              ///< 默认字体（13px），用于正文和按钮
 };

@@ -156,6 +156,10 @@ void DashMerger::stop() {
         pipeHandle_ = nullptr;
     }
 #else
+    // 关闭 pipe 写端：让 mergeLoop 内阻塞中的 write/读端 EOF 立即返回。
+    // 注意：close 后 fd 编号可能被内核立刻复用为另一个 socket；mergeLoop
+    // 若再 write 到这个 fd，可能写到无关 socket 并触发 SIGPIPE（已在 main
+    // 中屏蔽 SIGPIPE，避免进程被杀）。
     if (writeFd_ >= 0) {
         close(writeFd_);
         writeFd_ = -1;
@@ -168,10 +172,11 @@ void DashMerger::stop() {
         stopEvent_ = nullptr;
     }
 #else
-    if (readFd_ >= 0) {
-        close(readFd_);
-        readFd_ = -1;
-    }
+    // readFd_ 不在此处 close：所有权已通过 "pipe:N" URL 转移给 Demuxer
+    // 内部的 AVFormatContext，由 avformat_close_input 关闭。
+    // 若 DashMerger 也 close 同一 fd，第二次 close 会作用到已被内核
+    // 复用的无关 fd（macOS 上 .app 启动时尤其容易发生），导致不可预测崩溃。
+    readFd_ = -1;
 #endif
     LOG_INFO("DashMerger: 已停止");
 }

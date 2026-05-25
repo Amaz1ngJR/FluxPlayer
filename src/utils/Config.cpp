@@ -193,8 +193,6 @@ bool Config::load() {
                     } catch (...) {}
                 }
                 else if (key == "frameInterpolation") settings_.frameInterpolation = (value == "true" || value == "1");
-                else if (key == "cookiesBrowser") settings_.cookiesBrowser = value;
-                else if (key == "cookiesFile") settings_.cookiesFile = value;
                 else if (key == "proxyEnabled") settings_.proxyEnabled = (value == "true" || value == "1");
                 else if (key == "httpProxy") settings_.httpProxy = value;
                 else if (key == "socksProxy") settings_.socksProxy = value;
@@ -285,16 +283,6 @@ bool Config::save() {
     file << "# 取值：true / false\n";
     file << "# 默认：true\n";
     file << "frameInterpolation=" << (settings_.frameInterpolation ? "true" : "false") << "\n";
-
-    file << "\n[Stream]\n";
-    file << "# 说明：从指定浏览器读取 cookies，用于播放需要登录的内容（如会员视频）\n";
-    file << "# 取值：chrome / safari / firefox / edge / auto（自动检测默认浏览器）/ off（禁用）\n";
-    file << "# 默认：auto\n";
-    file << "cookiesBrowser=" << settings_.cookiesBrowser << "\n";
-    file << "# 说明：cookies.txt 文件路径（Netscape 格式），cookiesBrowser = off 时生效\n";
-    file << "# 取值：绝对路径，留空则不使用\n";
-    file << "# 默认：（空）\n";
-    file << "cookiesFile=" << settings_.cookiesFile << "\n";
 
     file << "\n[Proxy]\n";
     file << "# 说明：是否启用网络代理（用于访问需要代理的流媒体）\n";

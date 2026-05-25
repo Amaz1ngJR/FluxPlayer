@@ -2,7 +2,12 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.3.1 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.3.2 LANGUAGES C CXX)
+
+# macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 # 要求使用 C++17 标准，且不允许降级
 set(CMAKE_CXX_STANDARD 17)
@@ -178,11 +183,22 @@ set(FLUXPLAYER_SOURCES
     src/utils/Screenshot.cpp
     src/utils/Timer.cpp
     src/utils/StreamExtractor.cpp
+    src/utils/CookieStore.cpp
     src/utils/DashMerger.cpp
     src/utils/Downloader.cpp
     src/recorder/Recorder.cpp
     src/video/FrameInterpolator.cpp
 )
+
+# 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)
+if(APPLE)
+    list(APPEND FLUXPLAYER_SOURCES src/utils/WebLogin_mac.mm)
+    # Objective-C++ 文件禁用 ARC，与项目内其他原生代码风格一致
+    set_source_files_properties(src/utils/WebLogin_mac.mm
+        PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+elseif(WIN32)
+    list(APPEND FLUXPLAYER_SOURCES src/utils/WebLogin_win.cpp)
+endif()
 
 # add_executable：将源文件编译并链接为可执行程序
 if(WIN32)
@@ -232,6 +248,7 @@ if(APPLE)
     find_library(IOKIT_FRAMEWORK IOKit)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
     find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox)  # 音频输出
+    find_library(WEBKIT_FRAMEWORK WebKit)              # WKWebView 内置登录窗口
     target_link_libraries(FluxPlayer PRIVATE
         ${OPENGL_FRAMEWORK}
         ${COCOA_FRAMEWORK}
@@ -239,6 +256,7 @@ if(APPLE)
         ${IOKIT_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
         ${AUDIOTOOLBOX_FRAMEWORK}
+        ${WEBKIT_FRAMEWORK}
     )
 elseif(WIN32)
     target_link_libraries(FluxPlayer PRIVATE
@@ -251,6 +269,20 @@ elseif(WIN32)
         dxgi        # DXGI 设备枚举
         shell32     # SHGetFolderPath（应用数据目录）
     )
+
+    # WebView2 SDK 检测：放在 third_party/webview2/ 下时自动启用内置登录窗口
+    # 期望文件：third_party/webview2/include/WebView2.h（微软官方单头文件，MIT/Apache-2.0）
+    # 不需要 .lib：运行时通过 LoadLibraryW 动态加载 WebView2Loader.dll，
+    # DLL 由系统 WebView2 Runtime 提供（与 macOS 调用系统 WebKit.framework 等价）。
+    set(WEBVIEW2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2")
+    if(EXISTS "${WEBVIEW2_ROOT}/include/WebView2.h")
+        message(STATUS "WebView2 SDK header detected: ${WEBVIEW2_ROOT}/include/WebView2.h")
+        target_compile_definitions(FluxPlayer PRIVATE FLUXPLAYER_HAVE_WEBVIEW2)
+        target_include_directories(FluxPlayer PRIVATE "${WEBVIEW2_ROOT}/include")
+    else()
+        message(STATUS "WebView2 SDK header 未检测到（third_party/webview2/include/WebView2.h 缺失），"
+                       "内置登录窗口将编译为占位实现，运行时返回 Unsupported")
+    endif()
 elseif(UNIX)
     target_link_libraries(FluxPlayer PRIVATE
         GL          # OpenGL

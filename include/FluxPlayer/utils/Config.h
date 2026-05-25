@@ -31,12 +31,6 @@ public:
         float subtitleFontScale = 1.4f;       ///< 字幕字体缩放比例（1.0 ~ 2.5）
         std::string subtitleFontPath = "";    ///< 自定义字体路径（留空按平台自动探测 CJK 字体）
 
-        // ==================== 网页流提取设置 ====================
-        /// cookies 来源浏览器：auto / chrome / safari / firefox / edge / off
-        std::string cookiesBrowser = "auto";
-        /// cookies.txt 文件路径（cookiesBrowser = off 时生效）
-        std::string cookiesFile;
-
         // ==================== 网络代理设置 ====================
         std::string httpProxy = "http://127.0.0.1:7890";    ///< HTTP/HTTPS 代理
         std::string socksProxy = "socks5://127.0.0.1:7890"; ///< SOCKS5 代理（备用）

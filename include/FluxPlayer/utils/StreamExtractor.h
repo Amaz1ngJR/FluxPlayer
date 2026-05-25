@@ -76,19 +76,14 @@ public:
     /// 获取 yt-dlp 可执行文件路径（优先打包版本，回退到系统 PATH）
     static std::string getExecutablePath();
 
-    /// 检测系统默认浏览器名称（返回 yt-dlp 接受的名称：chrome/safari/firefox/edge）
-    static std::string detectDefaultBrowser();
-
     /**
-     * @brief 构建 yt-dlp cookie 参数字符串
+     * @brief 根据 URL 构建 yt-dlp cookie 参数
      *
-     * 根据 Config 中的 cookiesBrowser / cookiesFile 配置，生成 yt-dlp 的 cookie 参数。
-     * Windows + Chromium 系浏览器（chrome/edge）时，自动复制被锁的 cookie 数据库到
-     * 应用缓存目录，返回带 profile 路径的参数以绕过文件锁。
-     *
-     * @return cookie 参数字符串（如 " --cookies-from-browser edge:..."），无 cookie 时返回空
+     * 当 CookieStore 中已有该 URL 主机的可用 cookie 时返回
+     * " --cookies \"<专用 cookie 文件路径>\""，否则返回空字符串。
+     * 不再访问系统浏览器的 cookie 数据库。
      */
-    static std::string prepareCookieArg();
+    static std::string prepareCookieArgForUrl(const std::string& pageUrl);
 
 private:
     /// 将 yt-dlp JSON 的 http_headers 对象转为 "Key: Value\r\n" 格式

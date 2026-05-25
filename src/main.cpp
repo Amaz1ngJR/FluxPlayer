@@ -26,6 +26,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <signal.h>
 #endif
 
 extern "C" {
@@ -182,6 +184,13 @@ static std::string playMedia(const std::string& mediaPath) {
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(65001);
+#else
+    // 屏蔽 SIGPIPE：DashMerger 在 stop 时 close pipe 写端后，mergeLoop
+    // 内的 write 可能写入已被内核回收并复用为 socket 的 fd（macOS 上 .app
+    // 启动时尤其常见）。若该 socket 对端已关闭，write 会返回 EPIPE 并发
+    // SIGPIPE 信号，默认行为是终止进程。改为忽略后 write 返回 -1/EPIPE
+    // 由 FFmpeg 自行处理为读写错误。FFmpeg / curl / Python 等均采用此做法。
+    signal(SIGPIPE, SIG_IGN);
 #endif
     // 加载配置
     Config::getInstance().load();

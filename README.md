@@ -34,7 +34,7 @@
 - ⏩ 播放速度控制（0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x），音频最近邻重采样变速
 - 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
 - 🌍 网页视频播放（B站、YouTube 等 1000+ 平台），自动提取真实流地址，支持 DASH 分离流合并
-- 🍪 浏览器 Cookie 自动读取，支持会员内容播放（自动检测系统默认浏览器）
+- 🍪 内置浏览器登录窗口（WebView2 / WKWebView），Cookie 由程序自动维护，无需读取系统浏览器
 - 📥 视频下载功能，支持进度/速度/文件大小/ETA 显示，可暂停/恢复/取消；网络中断自动指数退避重连续传，下载中使用 `.part` 临时文件，完成后重命名，取消/失败/崩溃自动清理
 - 🎯 画质切换（360P / 480P / 720P / 1080P），切换时保持播放位置
 - 🔒 网络代理支持（HTTP/SOCKS5），默认 127.0.0.1:7890，可配置开关
@@ -71,7 +71,7 @@ FluxPlayer/
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
 │   ├── ui/               # 界面 (Window, Controller, HomeScreen)
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, DashMerger, Downloader)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, Downloader)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档
@@ -277,13 +277,10 @@ https://www.youtube.com/watch?v=...
 
 **依赖：** 需要 `yt-dlp`（已内置在 `third_party/yt-dlp/` 中，无需手动安装）
 
-**Cookie 支持：** 播放会员内容时，程序自动读取系统默认浏览器的 Cookie。可在配置文件 `[Stream]` 节中调整：
-
-```ini
-[Stream]
-# auto=自动检测默认浏览器 / chrome / safari / firefox / edge / off
-cookiesBrowser=auto
-```
+**Cookie 支持：** 播放需要登录的网页视频时，程序在主界面输入 URL 后弹出登录询问，
+点击「登录并继续」会打开内置浏览器登录窗口（macOS：WKWebView，Windows：WebView2），
+登录完成后 Cookie 由 FluxPlayer 自动写入 `cookies/web_cookies.txt`，下次播放同站点
+可直接「使用已保存登录」。Cookie 文件路径不暴露给用户，无需手动配置。
 
 播放网页视频时，工具栏会出现：
 - **画质按钮**：切换 360P / 480P / 720P / 1080P，切换后自动 seek 到原位置
@@ -503,16 +500,6 @@ subtitleFontScale=1.4
 # subtitleFontPath: 自定义字幕字体路径 (留空则按平台自动探测系统 CJK 字体)
 # 推荐字体：macOS=PingFang.ttc, Windows=msyh.ttc, Linux=NotoSansCJK-Regular.ttc
 subtitleFontPath=
-
-[Stream]
-# 说明：从指定浏览器读取 cookies，用于播放需要登录的内容（如会员视频）
-# 取值：chrome / safari / firefox / edge / auto（自动检测系统默认浏览器）/ off（禁用）
-# 默认：auto
-cookiesBrowser=auto
-# 说明：cookies.txt 文件路径（Netscape 格式），cookiesBrowser = off 时生效
-# 取值：绝对路径，留空则不使用
-# 默认：（空）
-cookiesFile=
 
 [Proxy]
 # 说明：是否启用网络代理（用于访问需要代理的流媒体，如 YouTube）
