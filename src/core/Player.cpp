@@ -203,16 +203,29 @@ bool Player::open(const std::string& filePath) {
     std::string httpHeaders;
     double knownDuration = 0.0;
 
-    if (StreamExtractor::needsExtraction(filePath)) {
+    // 调用方（如 OpeningScreen）可能已在工作线程上跑完 yt-dlp 并注入了 info；
+    // 此分支跳过同步阻塞的 extract，直接消费 preExtractedInfo_。
+    bool consumePreExtracted = hasPreExtracted_ && (preExtractedPageUrl_ == filePath);
+
+    if (StreamExtractor::needsExtraction(filePath) || consumePreExtracted) {
         setState(PlayerState::EXTRACTING);
         lastPageUrl_ = filePath;
 
         ExtractedStream info;
-        std::string error;
-        if (!StreamExtractor::extract(filePath, "", info, error)) {
-            triggerError("流提取失败: " + error);
-            setState(PlayerState::ERRORED);
-            return false;
+        if (consumePreExtracted) {
+            info = preExtractedInfo_;
+            // 一次性消费，下次 open 仍走标准路径
+            hasPreExtracted_ = false;
+            preExtractedInfo_ = ExtractedStream{};
+            preExtractedPageUrl_.clear();
+            LOG_INFO("Player::open: 使用预先提取的流信息（来自 OpeningScreen）");
+        } else {
+            std::string error;
+            if (!StreamExtractor::extract(filePath, "", info, error)) {
+                triggerError("流提取失败: " + error);
+                setState(PlayerState::ERRORED);
+                return false;
+            }
         }
 
         // ==================== 输出视频信息到日志 ====================
@@ -470,6 +483,26 @@ bool Player::open(const std::string& filePath) {
     setState(PlayerState::STOPPED);
     LOG_INFO("File opened successfully");
     return true;
+}
+
+bool Player::open(const std::string& filePath, Window* externalWindow) {
+    // 外部窗口模式：标记不拥有窗口，然后委托给标准 open()
+    // initWindowAndRenderer 会检测 ownsWindow_==false 并跳过窗口创建
+    ownsWindow_ = false;
+    window_.reset(externalWindow); // 借用指针，不拥有所有权
+    bool ok = open(filePath);
+    if (!ok) {
+        // 失败时释放借用指针，避免 cleanup 销毁外部窗口
+        window_.release();
+        ownsWindow_ = true;
+    }
+    return ok;
+}
+
+void Player::setPreExtractedInfo(const std::string& pageUrl, const ExtractedStream& info) {
+    preExtractedPageUrl_ = pageUrl;
+    preExtractedInfo_    = info;
+    hasPreExtracted_     = true;
 }
 
 bool Player::play() {
@@ -947,7 +980,10 @@ void Player::quit() {
     LOG_INFO("Quit requested");
     shouldQuit_.store(true);
 
-    if (window_) {
+    // 仅在 Player 拥有窗口时才让窗口 shouldClose=true（CLI 模式行为不变）。
+    // 共享 UiContext 模式下，窗口归 main 持有，关闭它会让整个程序退出，
+    // 而 Player::run 已经通过 shouldQuit_ 自行退出循环。
+    if (window_ && ownsWindow_) {
         glfwSetWindowShouldClose(window_->getGLFWWindow(), true);
     }
 }
@@ -1165,7 +1201,13 @@ void Player::decodingThread() {
                 }
                 av_packet_unref(packet);
             } else {
-                if (isLiveStream_) {
+                // DASH 流 seek 时会重建上游管道，过渡瞬间 readPacket 可能短暂返回 false；
+                // HTTP Range seek（如 Bilibili 普通 mp4）也存在「seek 完成但下一次 read
+                // 立刻返回 0 字节」的过渡——CDN 需要 reseat 连接。任何「刚 seek 完、还
+                // 没解到目标 PTS」的状态下 readPacket 失败都不应误判为 EOF。
+                const bool isStreamingPipe = isLiveStream_ || (dashMerger_ != nullptr);
+                const bool postSeekTransient = decodingToTarget_.load();
+                if (isStreamingPipe || postSeekTransient) {
                     // ===== 实时流网络重试机制（指数退避 + 周期性完整重连） =====
                     // RTSP/RTMP/HTTP 流在网络抖动、服务端短暂断开等情况下，readPacket 会返回失败。
                     // 单纯重试 readPacket 在 TCP 连接已死的情况下永远恢复不了（典型 RTMP 服务端踢连接），
@@ -1191,7 +1233,11 @@ void Player::decodingThread() {
                         retryDelayMs = std::min(retryDelayMs * 2, MAX_RETRY_DELAY_MS);
 
                         // 周期性完整重连：close + open demuxer，flush 解码器和队列
-                        if (readRetryCount % REOPEN_EVERY_N_RETRIES == 0 && !liveReopenPath_.empty()) {
+                        // DASH 流的 reopen 路径已在 restartDashMerger 内处理（seek 时），
+                        // 此处仅为实时流（RTSP/RTMP/HLS-live）做完整重连，避免误用过期的 liveReopenPath_
+                        if (isLiveStream_ &&
+                            readRetryCount % REOPEN_EVERY_N_RETRIES == 0 &&
+                            !liveReopenPath_.empty()) {
                             LOG_INFO("Live stream: attempting full reopen (retry=" +
                                      std::to_string(readRetryCount) + ")");
                             demuxer_->close();
@@ -1216,10 +1262,17 @@ void Player::decodingThread() {
                             }
                         }
                     } else {
-                        LOG_ERROR("Live stream: readPacket failed after " +
-                                 std::to_string(MAX_READ_RETRIES) + " retries, giving up");
-                        shouldQuit_.store(true);
-                        break;
+                        if (isLiveStream_) {
+                            LOG_ERROR("Live stream: readPacket failed after " +
+                                     std::to_string(MAX_READ_RETRIES) + " retries, giving up");
+                            shouldQuit_.store(true);
+                            break;
+                        } else {
+                            // DASH 点播流：上游管道在重试上限后仍读不到包，认为流真正结束
+                            LOG_INFO("DASH stream: readPacket failed after retries, treating as EOF");
+                            decodingFinished_.store(true);
+                            break;
+                        }
                     }
                 } else {
                     // 本地文件：readPacket 返回 false 即为真正的文件结束
@@ -1660,6 +1713,10 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
             writable->setPTS(framePTS);
             writable->setPTSEstimated(rawFrame.isPTSEstimated());
             videoQueue_->push();
+            // 首帧回调：仅触发一次，供 OpeningScreen 等异步 UI 判断 BUFFER FIRST FRAME 完成
+            if (!firstFrameSignaled_.exchange(true, std::memory_order_acq_rel)) {
+                if (firstFrameCallback_) firstFrameCallback_();
+            }
         } else {
             writable->unreference();
         }
@@ -1803,7 +1860,13 @@ void Player::cleanup() {
     // 清理组件
     avSync_.reset();
     renderer_.reset();
-    window_.reset();
+    // 外部窗口模式：不销毁窗口，仅释放借用指针
+    if (ownsWindow_) {
+        window_.reset();
+    } else {
+        window_.release();
+        ownsWindow_ = true; // 重置，下次 open 默认自建
+    }
     audioDecoder_.reset();
     videoDecoder_.reset();
     // 字幕模块必须在 demuxer_ 之前释放（SubtitleDecoder 不直接依赖 demuxer，
@@ -1864,12 +1927,14 @@ bool Player::initWindowAndRenderer() {
         LOG_INFO("Window size clamped to screen: " + std::to_string(clampedW) + "x" + std::to_string(clampedH));
     }
 
-    // 创建窗口
-    window_ = std::make_unique<Window>(clampedW, clampedH,
-                                       "FluxPlayer - " + filePath_);
-    if (!window_->init()) {
-        LOG_ERROR("Failed to initialize window");
-        return false;
+    // 创建窗口（外部窗口模式下跳过，window_ 已由调用方设置）
+    if (ownsWindow_) {
+        window_ = std::make_unique<Window>(clampedW, clampedH,
+                                           "FluxPlayer - " + filePath_);
+        if (!window_->init()) {
+            LOG_ERROR("Failed to initialize window");
+            return false;
+        }
     }
 
     // 设置键盘回调

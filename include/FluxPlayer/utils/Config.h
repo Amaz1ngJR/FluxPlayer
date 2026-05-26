@@ -39,6 +39,12 @@ public:
         // ==================== 播放速度设置 ====================
         double playbackSpeed = 1.0;           ///< 默认播放速度（0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0）
         bool frameInterpolation = true;       ///< 慢放时是否启用帧插值（关闭则使用简单重复帧）
+
+        // ==================== 皮肤系统 ====================
+        /// 当前激活皮肤 id（皮肤包目录名）。无效时回退到内置 cyberpunk-neon。
+        std::string skinId = "cyberpunk-neon";
+        /// 是否监听激活皮肤目录变更并热加载。
+        bool skinHotReload = true;
     };
 
     static Config& getInstance();

@@ -177,6 +177,10 @@ set(FLUXPLAYER_SOURCES
     src/subtitle/SubtitleManager.cpp
     src/ui/Controller.cpp
     src/ui/HomeScreen.cpp
+    src/ui/OpeningScreen.cpp
+    src/ui/SkinManager.cpp
+    src/ui/SkinRenderer.cpp
+    src/ui/UiContext.cpp
     src/ui/Window.cpp
     src/utils/Config.cpp
     src/utils/Logger.cpp
@@ -227,8 +231,9 @@ target_precompile_headers(FluxPlayer PRIVATE "include/FluxPlayer/pch.h")
 
 # 项目自身的头文件搜索路径（PRIVATE：只对 FluxPlayer 自身生效）
 target_include_directories(FluxPlayer PRIVATE
-    include           # 项目头文件根目录
-    third_party/glm   # 数学库（仅头文件）
+    include              # 项目头文件根目录
+    third_party/glm      # 数学库（仅头文件）
+    third_party          # nlohmann/json 等仅头文件库的根目录（include 形式 <nlohmann/json.hpp>）
 )
 
 # 链接第三方静态库
@@ -344,6 +349,11 @@ add_custom_command(TARGET FluxPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/source
         $<TARGET_FILE_DIR:FluxPlayer>/source
+    # 皮肤包内置回退路径：与开发期 source/UI/skins 解耦，
+    # 让发布版即便缺失开发目录也能从 resources/skins 加载到内置 cyberpunk-neon
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins
+        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins
     COMMENT "Copying shader files..."
 )
 
@@ -398,6 +408,9 @@ install(TARGETS FluxPlayer RUNTIME DESTINATION .)
 install(DIRECTORY assets/shaders/ DESTINATION shaders)
 install(DIRECTORY assets/fonts/   DESTINATION fonts)
 install(DIRECTORY source/         DESTINATION source)
+# 安装阶段同步把皮肤包当作只读资源放到 resources/skins，
+# 与运行期 Config::getResourcePath("skins") 的解析路径对齐
+install(DIRECTORY source/UI/skins/ DESTINATION resources/skins)
 
 if(WIN32)
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)

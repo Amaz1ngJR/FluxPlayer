@@ -61,7 +61,7 @@
       "dockPaddingY": 8,
       "panelPadding": 18,
       "controlGap": 8,
-      "rowGap": 8
+      "rowGap": 4
     },
     "size": {
       "bottomDockHeight": 82,

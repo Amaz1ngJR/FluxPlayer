@@ -195,14 +195,20 @@ target("FluxPlayer")
     add_files("src/renderer/Shader.cpp", {unity_ignored = true})
     add_files("src/ui/Window.cpp", {unity_ignored = true})
     add_files("src/ui/HomeScreen.cpp", {unity_ignored = true})
+    -- UiContext 与 OpeningScreen 直接 include <glad/glad.h> + GLFW，跟 Controller 等其他 GL TU 不能合并
+    add_files("src/ui/UiContext.cpp", {unity_ignored = true})
+    add_files("src/ui/OpeningScreen.cpp", {unity_ignored = true})
+    -- nlohmann/json.hpp 接近 1MB，单独编译避免污染其他 TU 的编译时间
+    add_files("src/ui/SkinManager.cpp", {unity_ignored = true})
     -- WebView2 头依赖大量 Windows COM 宏，与其他 .cpp 合并会触发宏冲突
     if is_plat("windows") then
         add_files("src/utils/WebLogin_win.cpp", {unity_ignored = true})
     end
 
     -- 项目头文件搜索路径
-    add_includedirs("include")          -- 项目自身头文件
-    add_includedirs("third_party/glm")  -- GLM 数学库（仅头文件）
+    add_includedirs("include")              -- 项目自身头文件
+    add_includedirs("third_party/glm")      -- GLM 数学库（仅头文件）
+    add_includedirs("third_party")          -- nlohmann/json 等仅头文件库的根目录（include 形式 <nlohmann/json.hpp>）
 
     -- FFmpeg：添加头文件路径、库搜索路径，然后链接各模块
     add_includedirs(ffmpeg_root .. "/include")
@@ -283,8 +289,10 @@ target("FluxPlayer")
         os.cp("assets/shaders", path.join(target:targetdir(), "shaders"))
         -- 把字体文件复制到可执行文件旁边（主界面 TTF 字体运行时加载）
         os.cp("assets/fonts", path.join(target:targetdir(), "fonts"))
-        -- 把 source/ 目录复制到可执行文件旁边（封面兜底图等资源）
+        -- 把 source/ 目录复制到可执行文件旁边（封面兜底图、开发期皮肤源）
         os.cp("source", path.join(target:targetdir(), "source"))
+        -- 皮肤包内置回退：与 source/UI/skins 解耦，发布版从 resources/skins 加载
+        os.cp("source/UI/skins", path.join(target:targetdir(), "resources/skins"))
         if is_plat("windows") then
             -- Windows：把 FFmpeg 的 DLL 增量复制到可执行文件旁边，否则运行时找不到
             local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")

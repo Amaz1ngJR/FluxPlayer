@@ -3,20 +3,20 @@
  * @brief FluxPlayer 主程序入口
  *
  * 程序启动流程：
- * - 有命令行参数：直接播放指定文件，播放结束后退出（向后兼容模式）
- * - 无命令行参数：显示主界面（HomeScreen），用户选择文件/URL 后播放，
- *   播放结束返回主界面，循环往复直到用户关闭窗口
- *
- * 架构设计：
- * HomeScreen 和 Player 各自拥有独立的 GLFW 窗口和 ImGui 上下文，
- * 通过外层 while 循环串行切换：HomeScreen → playMedia() → HomeScreen → ...
- * glfwInit() 在 main() 开头调用一次，glfwTerminate() 在 main() 结尾调用一次。
+ * - 命令行模式（提供文件路径参数）：直接走 playMediaCli()，老路径不变。
+ * - GUI 模式（无参数）：创建一个共享 UiContext（GLFW 窗口 + ImGui 上下文 + 字体 atlas），
+ *   然后在 HomeScreen → OpeningScreen → playMediaShared() 之间循环切换；这三层都使用
+ *   同一个窗口与 ImGui 上下文，避免「关一个窗口再开一个新窗口」的可视空窗。
  */
 
 #include "FluxPlayer/core/Player.h"
 #include "FluxPlayer/core/MediaInfo.h"
 #include "FluxPlayer/ui/Controller.h"
 #include "FluxPlayer/ui/HomeScreen.h"
+#include "FluxPlayer/ui/OpeningScreen.h"
+#include "FluxPlayer/ui/UiContext.h"
+#include "FluxPlayer/ui/Window.h"
+#include "FluxPlayer/ui/SkinManager.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
@@ -36,93 +36,72 @@ extern "C" {
 
 using namespace FluxPlayer;
 
+namespace {
+
+/// 把状态名翻译成可读字符串（仅用于日志）
+const char* stateName(PlayerState s) {
+    switch (s) {
+        case PlayerState::IDLE:       return "IDLE";
+        case PlayerState::EXTRACTING: return "EXTRACTING";
+        case PlayerState::OPENING:    return "OPENING";
+        case PlayerState::PLAYING:    return "PLAYING";
+        case PlayerState::PAUSED:     return "PAUSED";
+        case PlayerState::STOPPED:    return "STOPPED";
+        case PlayerState::ERRORED:    return "ERROR";
+    }
+    return "UNKNOWN";
+}
+
+} // anonymous namespace
+
 /**
- * @brief 播放指定的媒体文件或网络流
+ * @brief 共享窗口模式下，对已通过 OpeningScreen 打开的 Player 启动 Controller 主循环
  *
- * 将原 main() 中的播放逻辑提取为独立函数，包含完整的播放生命周期：
- * 创建 Player → 设置回调 → 打开媒体 → 提取媒体信息 → 启动播放 →
- * 创建 Controller UI → 进入渲染主循环 → 清理资源。
+ * 与历史 playMedia() 的差异：
+ * - Player 已经通过 OpeningScreen 调用 open(path, externalWindow) 打开过；
+ * - Controller 用 init(UiContext&) 适配共享上下文；
+ * - 窗口关闭由共享窗口的 should-close 决定，而不是 Player 自己创建的窗口。
  *
- * @param mediaPath 本地文件路径或网络 URL（支持 RTSP/RTMP/HTTP/HLS 等）
- * @return 错误信息字符串，空字符串表示播放正常结束（无错误）
+ * @return 错误信息（空表示正常结束）
  */
-static std::string playMedia(const std::string& mediaPath) {
-    // 进入播放前重新加载配置
-    Config::getInstance().checkAndReload();
+static std::string playMediaShared(UiContext& ui, Player& player, const std::string& mediaPath) {
+    LOG_INFO("Starting shared playback for: " + mediaPath);
 
-    LOG_INFO("Playing media: " + mediaPath);
-
-    // 创建播放器实例（每次播放创建新实例，确保状态干净）
-    Player player;
-
-    // 设置状态变更回调 — 记录播放器状态转换到日志
-    player.setStateChangeCallback([](PlayerState state) {
-        std::string stateName;
-        switch (state) {
-            case PlayerState::IDLE:       stateName = "IDLE"; break;
-            case PlayerState::EXTRACTING: stateName = "EXTRACTING"; break;
-            case PlayerState::OPENING:    stateName = "OPENING"; break;
-            case PlayerState::PLAYING:    stateName = "PLAYING"; break;
-            case PlayerState::PAUSED:     stateName = "PAUSED"; break;
-            case PlayerState::STOPPED:    stateName = "STOPPED"; break;
-            case PlayerState::ERRORED:    stateName = "ERROR"; break;
-        }
-        LOG_INFO("Player state changed to: " + stateName);
-    });
-
-    // 设置错误回调 — 捕获错误信息，播放结束后可传递给 HomeScreen 显示
     std::string errorMsg;
-    player.setErrorCallback([&errorMsg](const std::string& error) {
-        LOG_ERROR("Player error: " + error);
-        errorMsg = error;
+    player.setStateChangeCallback([](PlayerState s) {
+        LOG_INFO(std::string("Player state -> ") + stateName(s));
     });
-
-    // 设置播放完成回调
+    player.setErrorCallback([&errorMsg](const std::string& err) {
+        LOG_ERROR("Player error: " + err);
+        if (errorMsg.empty()) errorMsg = err;
+    });
     player.setPlaybackFinishedCallback([]() {
         LOG_INFO("Playback finished");
     });
 
-    // 打开媒体文件（FFmpeg 解封装、探测流信息）
-    if (!player.open(mediaPath)) {
-        LOG_ERROR("Failed to open media: " + mediaPath);
-        return "Failed to open: " + mediaPath;
-    }
-
-    // 提取媒体信息（编码格式、分辨率、时长等），用于 UI 显示
-    // 网页 URL 无法直接提取，跳过（Player 内部已通过 yt-dlp 获取信息）
-    LOG_INFO("Extracting media information...");
+    // 媒体信息（仅本地文件可探测；网页流交给 Player 内部 yt-dlp 流程）
     MediaInfo mediaInfo;
     if (!StreamExtractor::needsExtraction(mediaPath)) {
         if (!mediaInfo.extractFromFile(mediaPath)) {
-            LOG_WARN("Failed to extract media info, UI may have incomplete information");
+            LOG_WARN("Failed to extract media info; UI may show incomplete fields");
         }
     }
 
-    // 启动播放（开始解码和音视频输出）
     if (!player.play()) {
-        LOG_ERROR("Failed to start playback");
         return "Failed to start playback";
     }
-
-    // 从配置加载循环播放设置
     player.setLoopPlayback(Config::getInstance().get().loopPlayback);
 
-    // 获取 Player 内部创建的窗口，用于初始化 Controller UI
-    LOG_INFO("Creating UI controller...");
     Window* window = player.getWindow();
     if (!window) {
-        LOG_ERROR("Failed to get window from player");
-        return "Failed to create player window";
+        return "Player has no window";
     }
 
-    // 创建 UI 控制器（管理 ImGui 的播放控制面板、进度条、媒体信息等）
     auto controller = std::make_unique<Controller>(player, *window);
-    if (!controller->init()) {
-        LOG_ERROR("Failed to initialize UI controller");
+    if (!controller->init(ui)) {
         return "Failed to initialize UI";
     }
 
-    // 将媒体信息传递给 Controller，用于显示详细的媒体信息面板
     StreamInfo videoInfo = mediaInfo.getVideoStreamInfo(0);
     StreamInfo audioInfo = mediaInfo.getAudioStreamInfo(0);
     controller->setMediaInfo(
@@ -134,156 +113,193 @@ static std::string playMedia(const std::string& mediaPath) {
         videoInfo.codecName,
         audioInfo.codecName,
         audioInfo.sampleRate,
-        audioInfo.channels
-    );
+        audioInfo.channels);
 
-    // 将 Controller 注册到 Player（用于键盘快捷键转发）
+    // 网页视频的 qualities / uploader / platform 等字段由 Controller::render 的
+    // 「lazy pull」分支按需从 player.getLastExtractedInfo() 拉取（首帧命中），
+    // 共享模式下 Player::open 末尾的 setQualities 钩子（controller_ 当时还是 null）
+    // 因此被跳过；不需要在这里手动同步。
+
     player.setController(controller.get());
-
-    // 设置渲染回调：Player 每帧渲染视频后，调用此回调叠加绘制 UI
     player.setRenderCallback([&controller]() {
-        controller->processInput();  // 处理 ImGui 输入（开始新帧）
-        controller->render();        // 渲染控制面板、进度条等 UI 组件
+        controller->processInput();
+        controller->render();
     });
 
     LOG_INFO("========================================");
-    LOG_INFO("Playback started successfully!");
-    LOG_INFO("Keyboard controls:");
-    LOG_INFO("  SPACE       - Pause/Resume playback");
-    LOG_INFO("  LEFT/RIGHT  - Seek backward/forward 10 seconds");
-    LOG_INFO("  F           - Toggle fullscreen mode");
-    LOG_INFO("  ESC         - Quit player");
-    LOG_INFO("  I           - Toggle media info panel");
-    LOG_INFO("  S           - Toggle statistics panel");
-    LOG_INFO("  H           - Force toggle UI (auto show/hide on mouse move)");
-    LOG_INFO("  P           - Save screenshot of current frame");
+    LOG_INFO("Playback started. Keyboard: SPACE pause / LEFT-RIGHT seek / F fullscreen / ESC return / I info / S stats / H ui-toggle / P screenshot");
     LOG_INFO("========================================");
 
-    // 进入播放主循环（阻塞，直到播放结束或用户按 ESC 退出）
+    // 主循环：注意 ESC 仅退出当前播放（Player::quit 不会关共享窗口），返回 HomeScreen
     player.run();
 
-    // 清理资源（顺序：先销毁 UI，再关闭播放器）
+    controller->destroy();   // 共享模式：仅清状态，不拆 ImGui 后端
+    player.close();          // 共享模式：cleanup 不销毁外部窗口
+
+    return errorMsg;
+}
+
+/**
+ * @brief 老 CLI 路径：Player 自建窗口；保留以兼容 ./FluxPlayer <file>
+ *
+ * 这条路径不经过 UiContext / HomeScreen / OpeningScreen，行为与重构前一致。
+ */
+static std::string playMediaCli(const std::string& mediaPath) {
+    Config::getInstance().checkAndReload();
+    LOG_INFO("[CLI] Playing media: " + mediaPath);
+
+    Player player;
+    std::string errorMsg;
+    player.setStateChangeCallback([](PlayerState s) {
+        LOG_INFO(std::string("Player state -> ") + stateName(s));
+    });
+    player.setErrorCallback([&errorMsg](const std::string& err) {
+        LOG_ERROR("Player error: " + err);
+        errorMsg = err;
+    });
+    player.setPlaybackFinishedCallback([]() { LOG_INFO("Playback finished"); });
+
+    if (!player.open(mediaPath)) {
+        return "Failed to open: " + mediaPath;
+    }
+
+    MediaInfo mediaInfo;
+    if (!StreamExtractor::needsExtraction(mediaPath)) {
+        mediaInfo.extractFromFile(mediaPath);
+    }
+
+    if (!player.play()) return "Failed to start playback";
+    player.setLoopPlayback(Config::getInstance().get().loopPlayback);
+
+    Window* window = player.getWindow();
+    if (!window) return "Failed to create player window";
+
+    auto controller = std::make_unique<Controller>(player, *window);
+    if (!controller->init()) return "Failed to initialize UI";
+
+    StreamInfo videoInfo = mediaInfo.getVideoStreamInfo(0);
+    StreamInfo audioInfo = mediaInfo.getAudioStreamInfo(0);
+    controller->setMediaInfo(
+        mediaPath,
+        videoInfo.width, videoInfo.height,
+        mediaInfo.getDuration(), videoInfo.fps,
+        videoInfo.codecName, audioInfo.codecName,
+        audioInfo.sampleRate, audioInfo.channels);
+
+    player.setController(controller.get());
+    player.setRenderCallback([&controller]() {
+        controller->processInput();
+        controller->render();
+    });
+
+    player.run();
     controller->destroy();
     player.close();
-
-    // 返回错误信息（空字符串表示正常结束）
     return errorMsg;
 }
 
 /**
  * @brief 程序主入口
- *
- * 支持两种启动模式：
- * 1. 命令行模式：./FluxPlayer <video_file>  — 直接播放，播放完退出
- * 2. GUI 模式：  ./FluxPlayer               — 显示主界面，循环选择播放
- *
- * GLFW 生命周期管理：
- * - glfwInit() 在此处调用一次（Window::init 中重复调用 glfwInit 是安全的）
- * - glfwTerminate() 在程序退出前调用一次（已从 Window::destroy 中移除）
  */
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(65001);
 #else
-    // 屏蔽 SIGPIPE：DashMerger 在 stop 时 close pipe 写端后，mergeLoop
-    // 内的 write 可能写入已被内核回收并复用为 socket 的 fd（macOS 上 .app
-    // 启动时尤其常见）。若该 socket 对端已关闭，write 会返回 EPIPE 并发
-    // SIGPIPE 信号，默认行为是终止进程。改为忽略后 write 返回 -1/EPIPE
-    // 由 FFmpeg 自行处理为读写错误。FFmpeg / curl / Python 等均采用此做法。
+    // 屏蔽 SIGPIPE：DashMerger 在 stop 时 close pipe 写端后，mergeLoop 内的
+    // write 可能发 SIGPIPE 默认杀进程；忽略后由 FFmpeg / curl 自行按 EPIPE 处理。
     signal(SIGPIPE, SIG_IGN);
 #endif
-    // 加载配置
     Config::getInstance().load();
 
-    // 初始化日志系统，使用配置中的日志级别
     auto& cfg = Config::getInstance().get();
     LogLevel logLevel = LogLevel::LOG_INFO;
-    if (cfg.logLevel == "DEBUG") logLevel = LogLevel::LOG_DEBUG;
-    else if (cfg.logLevel == "INFO") logLevel = LogLevel::LOG_INFO;
-    else if (cfg.logLevel == "WARN") logLevel = LogLevel::LOG_WARN;
+    if      (cfg.logLevel == "DEBUG") logLevel = LogLevel::LOG_DEBUG;
+    else if (cfg.logLevel == "INFO")  logLevel = LogLevel::LOG_INFO;
+    else if (cfg.logLevel == "WARN")  logLevel = LogLevel::LOG_WARN;
     else if (cfg.logLevel == "ERROR") logLevel = LogLevel::LOG_ERROR;
-
     Logger::getInstance().setLogLevel(logLevel);
 #ifdef ENABLE_TCP_LOG
     Logger::getInstance().enableTcpLog(cfg.tcpLogPort);
 #endif
     LOG_INFO("=== FluxPlayer V2 Starting ===");
-    LOG_INFO("Refactored with Player class architecture");
 
-    // 初始化 FFmpeg 网络子系统（Windows 上初始化 Winsock，DASH 流需要）
+    if (!SkinManager::instance().initialize(cfg.skinId, cfg.skinHotReload)) {
+        std::string err = SkinManager::instance().lastError();
+        if (!err.empty()) LOG_WARN("Skin initialization fell back: " + err);
+    }
+
     avformat_network_init();
-    // 在主线程预热 FFmpeg 内存分配，避免子线程首次分配时 CRT 死锁
     { AVDictionary* d = nullptr; av_dict_set(&d, "x", "x", 0); av_dict_free(&d); }
 
-    // 全局初始化 GLFW（整个程序生命周期只初始化一次）
     if (!glfwInit()) {
         LOG_ERROR("Failed to initialize GLFW");
         return -1;
     }
 
-    std::string mediaPath;
-    bool cliMode = false;
-
-    // 解析命令行参数：如果提供了文件路径，进入命令行模式
-    if (argc >= 2) {
-        mediaPath = argv[1];
-        cliMode = true;
-        LOG_INFO("CLI mode, video file: " + mediaPath);
-    }
-
-    bool shouldQuit = false;
-    std::string lastError;  // 保存上次播放的错误信息，传递给下一次 HomeScreen 显示
-
-    // ── 外层循环：HomeScreen ↔ 播放 交替执行 ──
-    while (!shouldQuit) {
-        // 每次切换界面时重新加载配置
-        Config::getInstance().checkAndReload();
-
-        // 如果没有待播放的媒体路径，显示主界面让用户选择
-        if (mediaPath.empty()) {
-            HomeScreen homeScreen;
-            if (!homeScreen.init()) {
-                LOG_ERROR("Failed to initialize HomeScreen");
-                break;
-            }
-
-            // 如果上次播放出错，将错误信息传递给 HomeScreen 显示
-            if (!lastError.empty()) {
-                homeScreen.setErrorMessage(lastError);
-                lastError.clear();
-            }
-
-            // 阻塞运行主界面，直到用户做出选择或关闭窗口
-            HomeScreenResult result = homeScreen.run();
-            homeScreen.destroy();
-
-            // 用户关闭了窗口 → 退出程序
-            if (result.shouldQuit) {
-                break;
-            }
-            // 用户选择了文件/URL → 赋值给 mediaPath，进入播放
-            mediaPath = result.mediaPath;
-        }
-
-        // 有待播放的媒体路径，启动播放
-        if (!mediaPath.empty()) {
-            std::string error = playMedia(mediaPath);//进入播放
-            if (!error.empty()) {
-                // 播放出错，保存错误信息，下次 HomeScreen 会显示
-                lastError = error;
-            }
-            // 播放结束，清空路径，回到 HomeScreen
-            mediaPath.clear();
-        }
-
-        // 命令行模式：播放一次后直接退出，不回到 HomeScreen
-        if (cliMode) {
+    int rc = 0;
+    do {
+        // ── CLI 模式：保留老路径 ──
+        if (argc >= 2) {
+            std::string mediaPath = argv[1];
+            LOG_INFO("CLI mode: " + mediaPath);
+            std::string err = playMediaCli(mediaPath);
+            if (!err.empty()) LOG_WARN("CLI playback ended with error: " + err);
             break;
         }
-    }
 
-    // 全局清理 GLFW（释放所有 GLFW 资源）
+        // ── GUI 模式：共享 UiContext ──
+        UiContext ui;
+        auto [w, h] = Window::clampToPrimaryMonitor(cfg.windowWidth, cfg.windowHeight);
+        if (!ui.init(w, h, "FluxPlayer")) {
+            LOG_ERROR("Failed to initialize shared UiContext");
+            rc = -1;
+            break;
+        }
+
+        std::string lastError;
+        std::string pendingPath;
+
+        while (!ui.shouldClose()) {
+            Config::getInstance().checkAndReload();
+
+            // ── 1) HomeScreen ──
+            HomeScreen home(ui);
+            if (!home.init()) {
+                LOG_ERROR("HomeScreen init failed");
+                break;
+            }
+            if (!lastError.empty()) {
+                home.setErrorMessage(lastError);
+                lastError.clear();
+            }
+            HomeScreenResult hr = home.run();
+            home.destroy();
+
+            if (hr.shouldQuit || ui.shouldClose()) break;
+            pendingPath = hr.mediaPath;
+            if (pendingPath.empty()) continue;
+
+            // ── 2) OpeningScreen + Player（共享窗口同步打开） ──
+            Player player;
+            OpeningScreen opening(ui, player);
+            OpeningResult oR = opening.run(pendingPath);
+            if (oR.windowClosed) break;
+            if (!oR.success) {
+                lastError = oR.errorMessage.empty() ? "Failed to open media" : oR.errorMessage;
+                LOG_WARN("OpeningScreen failed: " + lastError);
+                continue;  // 回 HomeScreen 显示错误
+            }
+
+            // ── 3) Controller 主循环（共享 ImGui ctx） ──
+            std::string err = playMediaShared(ui, player, pendingPath);
+            if (!err.empty()) lastError = err;
+        }
+
+        ui.destroy();
+    } while (false);
+
+    SkinManager::instance().shutdown();
     glfwTerminate();
     LOG_INFO("=== FluxPlayer Stopped Successfully ===");
-    return 0;
+    return rc;
 }

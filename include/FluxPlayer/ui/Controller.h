@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <functional>
@@ -12,6 +13,7 @@ class Player;
 class Window;
 class SubtitleManager;
 class Downloader;
+class UiContext;
 
 /**
  * Controller 类 - UI 控制界面
@@ -37,6 +39,14 @@ public:
     Controller& operator=(const Controller&) = delete;
 
     bool init();
+    /**
+     * @brief 共享 UiContext 模式：上下文 / 后端 / 字体已由 UiContext 完成初始化，
+     *        Controller 只需缓存窗口指针、注册键盘回调、应用皮肤样式即可。
+     *
+     * 与无参 init() 互斥：CLI 路径用 init()，UI 路径用 init(UiContext&)。
+     * destroy() 会根据 adoptedContext_ 决定是否拆 ImGui 后端。
+     */
+    bool init(UiContext& ui);
     void destroy();
     void render();
     void processInput();
@@ -121,6 +131,8 @@ private:
 
     void renderMediaInfo();
     void renderStats();
+    /// 居中模态：设置 + 皮肤切换；参考 source/UI/skins/cyberpunk-neon/mockup_skin_settings.svg
+    void renderSettingsModal();
     std::string formatTime(double seconds);
 
     /** @brief 绘制字幕浮层（在 render() 中每帧调用，独立于 UI 可见性） */
@@ -139,6 +151,7 @@ private:
     Window& window_;
 
     bool initialized_;
+    bool adoptedContext_ = false;  ///< true 表示 ImGui 上下文/后端归 UiContext，destroy 不拆
     bool visible_;
     bool showMediaInfo_;
     bool showStats_;
@@ -168,6 +181,7 @@ private:
     double volumeLeaveTime_;    // 鼠标离开音量区域的时间（用于延迟关闭）
     bool settingsHovered_;      // 设置按钮悬停状态
     bool showSettingsMenu_;     // 设置菜单显示状态
+    bool settingsModalWasOpen_ = false; // 上一帧的 showSettingsMenu_，用来判定"刚打开"那一帧
     float settingsMenuPosX_;    // 设置菜单X坐标
     float settingsMenuPosY_;    // 设置菜单Y坐标
 
@@ -202,6 +216,24 @@ private:
     bool subtitleEnabled_;       ///< 是否启用字幕渲染
     float subtitleFontScale_;    ///< 字幕字体缩放比例
     void* subtitleFont_;         ///< ImFont* 的不透明句柄（隔离 ImGui 依赖）
+
+    // ==================== 皮肤状态 ====================
+    /// 已应用皮肤代号；与 SkinManager::currentGeneration() 比较以决定是否重应用样式
+    uint64_t appliedSkinGeneration_ = 0;
+    /// Appearance 子页是否展开
+    bool showAppearanceMenu_ = false;
+
+    // ==================== 设置面板字符串输入缓冲 ====================
+    // ImGui::InputText 不支持直接绑定 std::string；按 Loop Playback 模式：
+    // 进入对话框时从 Config 同步到这些缓冲，编辑结束（IsItemDeactivatedAfterEdit）
+    // 时再写回 Config 并 save()。modal 关闭后状态仍保留以便下次直接展示。
+    bool  cfgBuffersInitialized_ = false;
+    char  cfgHttpProxyBuf_[256]      = {};
+    char  cfgSocksProxyBuf_[256]     = {};
+    char  cfgRecordDirBuf_[512]      = {};
+    char  cfgScreenshotDirBuf_[512]  = {};
+    char  cfgSubtitleFontBuf_[512]   = {};
+    char  cfgLogFilePathBuf_[512]    = {};
 };
 
 } // namespace FluxPlayer

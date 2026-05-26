@@ -79,9 +79,13 @@ std::string Config::getResourcePath(const std::string& filename) {
         std::string dir(exePath);
         auto pos = dir.rfind('/');
         if (pos != std::string::npos) {
-            std::string bundleRes = dir.substr(0, pos) + "/../Resources/" + filename;
+            std::string base = dir.substr(0, pos);
+            std::string bundleRes = base + "/../Resources/" + filename;
             if (access(bundleRes.c_str(), F_OK) == 0) return bundleRes;
-            std::string devPath = dir.substr(0, pos) + "/source/" + filename;
+            // 与 Windows/Linux 对齐：可执行文件同级 resources/ 目录（POST_BUILD 拷贝目标）
+            std::string resPath = base + "/resources/" + filename;
+            if (access(resPath.c_str(), F_OK) == 0) return resPath;
+            std::string devPath = base + "/source/" + filename;
             if (access(devPath.c_str(), F_OK) == 0) return devPath;
         }
     }
@@ -196,6 +200,8 @@ bool Config::load() {
                 else if (key == "proxyEnabled") settings_.proxyEnabled = (value == "true" || value == "1");
                 else if (key == "httpProxy") settings_.httpProxy = value;
                 else if (key == "socksProxy") settings_.socksProxy = value;
+                else if (key == "skinId") { if (!value.empty()) settings_.skinId = value; }
+                else if (key == "skinHotReload") settings_.skinHotReload = (value == "true" || value == "1");
             }
 
             lastModTime_ = getFileModTime();
@@ -251,7 +257,12 @@ bool Config::save() {
     file << "[UI]\n";
     file << "uiVisible=" << (settings_.uiVisible ? "true" : "false") << "\n";
     file << "showMediaInfo=" << (settings_.showMediaInfo ? "true" : "false") << "\n";
-    file << "showStats=" << (settings_.showStats ? "true" : "false") << "\n\n";
+    file << "showStats=" << (settings_.showStats ? "true" : "false") << "\n";
+    // 皮肤系统：当前激活皮肤 id 与热加载开关
+    file << "# skinId: 当前激活皮肤 ID（皮肤包目录名）。无效时回退到内置 cyberpunk-neon\n";
+    file << "skinId=" << settings_.skinId << "\n";
+    file << "# skinHotReload: 是否监听激活皮肤目录变更并热加载（true / false）\n";
+    file << "skinHotReload=" << (settings_.skinHotReload ? "true" : "false") << "\n\n";
     file << "[Playback]\n";
     file << "loopPlayback=" << (settings_.loopPlayback ? "true" : "false") << "\n\n";
     file << "[Screenshot]\n";

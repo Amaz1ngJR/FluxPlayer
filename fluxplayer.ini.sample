@@ -36,6 +36,14 @@ uiVisible=true
 showMediaInfo=true
 # showStats: 是否显示统计信息面板 (true / false)
 showStats=true
+# 说明：当前激活皮肤 ID（皮肤包目录名）。无效时回退到内置 cyberpunk-neon。
+# 取值：cyberpunk-neon 等已安装皮肤 id
+# 默认：cyberpunk-neon
+skinId=cyberpunk-neon
+# 说明：是否监听激活皮肤目录变更并热加载（无需重启即可预览皮肤修改）
+# 取值：true / false
+# 默认：true
+skinHotReload=true
 
 [Playback]
 # loopPlayback: 是否循环播放 (true / false)

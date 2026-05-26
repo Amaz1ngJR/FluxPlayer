@@ -84,6 +84,33 @@ public:
     bool open(const std::string& filePath);
 
     /**
+     * @brief 使用外部已有窗口打开媒体（供 OpeningScreen 共享窗口使用）
+     *
+     * 与 open(filePath) 行为相同，但 initWindowAndRenderer 跳过窗口创建，
+     * 直接使用调用方提供的 externalWindow。Player 不拥有该窗口，cleanup 时不销毁。
+     * 调用方必须保证 externalWindow 在 Player::close() 之前有效。
+     *
+     * @param externalWindow 外部 GLFW 窗口（不可为 nullptr）
+     */
+    bool open(const std::string& filePath, Window* externalWindow);
+
+    /**
+     * @brief 注入由调用方在工作线程预先完成的网页流提取结果
+     *
+     * 配合 OpeningScreen：yt-dlp 是阻塞操作（10–30 秒），主线程跑会让窗口
+     * 卡死；让 OpeningScreen 在工作线程上跑 StreamExtractor::extract，
+     * 再用本接口把结果交给 Player，然后在主线程调用 open() 完成 demuxer +
+     * 解码器 + GL 渲染器构造（这部分必须主线程，因为 GLFW context 亲和）。
+     *
+     * 调用本接口后下一次 open() 会跳过自身的提取阶段，直接使用注入的 info。
+     * 注入的状态仅一次有效，open() 消费后清空。
+     *
+     * @param pageUrl 原始网页 URL（即将传给 open() 的 filePath）
+     * @param info    StreamExtractor::extract 返回的 ExtractedStream
+     */
+    void setPreExtractedInfo(const std::string& pageUrl, const ExtractedStream& info);
+
+    /**
      * @brief 切换画质（仅网页视频有效）
      * @param formatId  yt-dlp format_id
      * @param seekTime  切换后 seek 到的时间（秒），保持播放位置
@@ -267,6 +294,20 @@ public:
      */
     void setRenderCallback(std::function<void()> callback) {
         renderCallback_ = callback;
+    }
+
+    /**
+     * 设置首帧 ready 回调
+     *
+     * 解码线程首次成功把视频帧推入队列后触发一次（仅一次）。
+     * 用于 OpeningScreen 等异步 UI 判断 BUFFER FIRST FRAME 步骤完成。
+     * 纯音频流目前不会触发，调用方需结合 PlayerState=PLAYING 兜底。
+     *
+     * @param callback 在解码线程上触发；UI 侧应通过原子标记或消息队列同步。
+     */
+    void setFirstFrameCallback(std::function<void()> callback) {
+        firstFrameCallback_ = callback;
+        firstFrameSignaled_.store(false, std::memory_order_release);
     }
 
     /**
@@ -503,6 +544,7 @@ private:
 
     // 核心组件（使用智能指针管理）
     std::unique_ptr<Window> window_;
+    bool ownsWindow_ = true; ///< false 时 cleanup 不销毁 window_（外部窗口场景）
     std::unique_ptr<GLRenderer> renderer_;
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<VideoDecoder> videoDecoder_;
@@ -514,6 +556,12 @@ private:
 
     // 网页视频提取相关
     std::string lastPageUrl_;   ///< 最近一次打开的网页 URL（用于下载功能）
+
+    // 预先提取的流信息（由 OpeningScreen 在工作线程跑完 yt-dlp 后注入；
+    // 下一次 open() 消费后清空）
+    bool             hasPreExtracted_ = false;
+    ExtractedStream  preExtractedInfo_;
+    std::string      preExtractedPageUrl_;
 
     // UI 控制器（不拥有，由外部管理）
     Controller* controller_;
@@ -555,6 +603,8 @@ private:
     std::function<void(const std::string&)> errorCallback_;
     std::function<void()> playbackFinishedCallback_;
     std::function<void()> renderCallback_;
+    std::function<void()> firstFrameCallback_;        ///< 首帧推入队列后触发一次
+    std::atomic<bool>     firstFrameSignaled_{false}; ///< 防止 firstFrameCallback_ 重复触发
 };
 
 } // namespace FluxPlayer

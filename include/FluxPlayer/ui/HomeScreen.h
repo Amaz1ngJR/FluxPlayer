@@ -2,157 +2,109 @@
  * @file HomeScreen.h
  * @brief FluxPlayer 主界面（Home Screen）类声明
  *
- * HomeScreen 是 FluxPlayer 的启动界面，当用户无参数启动程序时显示。
- * 提供两种媒体打开方式：
- * 1. 点击按钮或拖放文件 — 打开本地媒体文件
- * 2. 输入网络地址 — 播放 RTSP/RTMP/HTTP/HLS 等网络流
+ * HomeScreen 是 FluxPlayer 的启动界面，无参数启动时显示。
+ * 提供两种媒体打开方式：本地文件（按钮 / 拖放）和网络 URL。
  *
- * 与 Player/Controller 完全解耦，拥有独立的 GLFW 窗口和 ImGui 上下文。
- * 生命周期：init() → run() → destroy()，串行使用，不与 Player 窗口共存。
+ * 自 UiContext 引入后，HomeScreen 不再自行创建 GLFW 窗口或 ImGui 上下文，
+ * 而是通过引用借用 UiContext 中持有的共享窗口与 ImGui 上下文。
+ * 生命周期：构造（持 UiContext 引用） → init() 注册回调与样式 → run() → destroy()。
  */
 
 #pragma once
 
+#include <cstdint>
 #include <string>
-#include <memory>
 
-// 前向声明 ImGui 字体类型，避免在头文件中引入 imgui.h
 struct ImFont;
 
 namespace FluxPlayer {
 
-// 前向声明窗口类
-class Window;
+class UiContext;
 
 /**
  * @brief HomeScreen 运行结果
  *
- * run() 阻塞结束后返回此结构体，调用方据此决定下一步动作：
- * - shouldQuit == true  → 用户关闭了窗口，程序应退出
- * - shouldQuit == false → mediaPath 中包含用户选择的媒体路径，应启动播放
+ * - shouldQuit == true  → 用户关闭了窗口，程序应整体退出
+ * - shouldQuit == false → mediaPath 中包含用户选择的媒体路径，应进入 Opening
  */
 struct HomeScreenResult {
-    bool shouldQuit;        ///< 用户是否通过关闭窗口请求退出程序
-    std::string mediaPath;  ///< 用户选择的本地文件路径或网络 URL（shouldQuit 为 true 时为空）
+    bool shouldQuit;
+    std::string mediaPath;
 };
 
 /**
  * @brief FluxPlayer 主界面类
  *
- * 拥有独立的 GLFW 窗口 + ImGui 渲染循环，负责：
- * - 显示美观的深色主题卡片式 UI
- * - 通过 tinyfiledialogs 调用系统原生文件选择对话框
- * - 接收用户拖放的文件（GLFW drop callback）
- * - 接收用户输入的网络 URL
- * - 显示上次播放失败的错误信息
- *
- * 使用方式：
+ * 用法：
  * @code
- *   HomeScreen hs;
+ *   HomeScreen hs(uiContext);
  *   hs.init();
- *   HomeScreenResult result = hs.run();  // 阻塞，直到用户选择或关闭
+ *   HomeScreenResult result = hs.run();
  *   hs.destroy();
  * @endcode
  */
 class HomeScreen {
 public:
-    HomeScreen();
+    /// 构造时持有 UiContext 引用；UiContext 必须在 HomeScreen 全程保持有效
+    explicit HomeScreen(UiContext& ui);
     ~HomeScreen();
 
-    // 禁止拷贝和赋值（拥有 GLFW 窗口等不可复制资源）
     HomeScreen(const HomeScreen&) = delete;
     HomeScreen& operator=(const HomeScreen&) = delete;
 
     /**
-     * @brief 初始化主界面
+     * @brief 注册拖放回调、应用皮肤样式
      *
-     * 创建 960x600 的 GLFW 窗口，初始化 ImGui 上下文、字体、样式，
-     * 并注册文件拖放回调。
-     *
-     * @return true 初始化成功，false 失败（窗口创建或 ImGui 初始化出错）
+     * 由于 UiContext 已经创建了窗口、ImGui 上下文、字体 atlas，本函数只做
+     * 「轻量级初始化」：拖放回调、用户输入缓冲清零、皮肤样式刷新。
      */
     bool init();
 
     /**
      * @brief 进入主界面事件循环（阻塞）
      *
-     * 持续渲染 UI 并处理用户输入，直到以下情况之一发生：
-     * - 用户选择了本地文件或输入了 URL → 返回 mediaPath
-     * - 用户拖放了文件到窗口 → 返回拖放的文件路径
-     * - 用户关闭了窗口 → 返回 shouldQuit = true
-     *
-     * @return HomeScreenResult 包含用户的选择结果
+     * 持续渲染 UI，直到：用户选择文件 / 输入 URL / 拖放文件 / 关闭窗口。
      */
     HomeScreenResult run();
 
     /**
-     * @brief 销毁主界面，释放所有资源
-     *
-     * 按顺序关闭：ImGui OpenGL3 后端 → ImGui GLFW 后端 →
-     * ImGui 上下文 → GLFW 窗口。可安全重复调用。
+     * @brief 解除拖放回调（不销毁 UiContext / 窗口）
      */
     void destroy();
 
-    /**
-     * @brief 设置错误提示信息
-     *
-     * 设置后将在 UI 中以红色文字居中显示。用于回传上次播放的错误信息。
-     * 传入空字符串可清除错误提示。
-     *
-     * @param msg 要显示的错误信息，空字符串表示清除
-     */
+    /// 设置错误信息（红色文字居中显示）
     void setErrorMessage(const std::string& msg);
 
 private:
-    /**
-     * @brief 配置 ImGui 全局样式和配色
-     *
-     * 设置深色主题的圆角、间距、边框以及所有组件的颜色（深灰蓝底 + 青蓝强调色）。
-     * 在 init() 中创建 ImGui 上下文后调用一次。
-     */
+    /// 应用当前皮肤的 ImGui 样式（init 时与 generation drift 时调用）
     void setupStyle();
 
-    /**
-     * @brief 渲染主界面 UI 内容
-     *
-     * 每帧调用，绘制居中的卡片式窗口，包含：
-     * 标题 → 副标题 → 打开文件按钮 → 拖放提示 → 渐变分隔线 →
-     * URL 输入框 + Play 按钮 → 错误信息 → 底部格式提示。
-     */
+    /// 渲染主界面 UI（卡片 + 按钮 + URL 输入 + 登录弹窗）
     void renderUI();
 
-    /**
-     * @brief 渲染窗口背景装饰
-     *
-     * 使用 ImGui BackgroundDrawList 绘制：
-     * - 全屏深色渐变（深蓝灰 → 更深黑）
-     * - 左上方蓝色呼吸光晕
-     * - 右下方紫色呼吸光晕
-     */
+    /// 渲染窗口背景装饰（透视网格、扫描线、光晕、数字雨等）
     void renderBackground();
 
-    // ── 成员变量 ──
+    UiContext& ui_;               ///< 共享 UI 上下文（窗口 / ImGui ctx / 字体）
+    char urlBuffer_[1024];        ///< URL 输入框文本缓冲
+    std::string errorMessage_;
+    bool fileSelected_ = false;
+    std::string selectedFile_;
 
-    std::unique_ptr<Window> window_;   ///< GLFW 窗口（HomeScreen 独占）
-    char urlBuffer_[1024];             ///< URL 输入框的文本缓冲区
-    std::string errorMessage_;         ///< 当前显示的错误信息（空表示无错误）
-    bool fileSelected_;                ///< 标记：用户是否已选择/输入了媒体路径
-    std::string selectedFile_;         ///< 用户选择的文件路径或 URL
+    bool dropReceived_ = false;
+    std::string droppedFile_;
 
-    bool dropReceived_;                ///< 标记：是否收到了 GLFW 拖放事件
-    std::string droppedFile_;          ///< 拖放回调中接收到的文件路径
+    // 内置登录询问弹窗状态
+    bool   loginPromptOpen_      = false;
+    bool   loginPromptHasCookie_ = false;
+    std::string loginPromptUrl_;
 
-    // ── 内置登录询问对话框状态 ──
-    // 用户输入网页 URL 后弹出 ImGui 模态弹窗，询问登录策略：
-    //   1. 不登录打开
-    //   2. 登录并继续（打开内置 WebView 登录窗口，登录后写 CookieStore）
-    //   3. 已有 cookie 时多一项「使用已保存登录」
-    bool   loginPromptOpen_;           ///< 是否需要在下一帧打开询问弹窗
-    bool   loginPromptHasCookie_;      ///< 缓存：当前 URL 在 CookieStore 中是否已有 cookie
-    std::string loginPromptUrl_;       ///< 待处理的网页 URL
+    // 字体由 UiContext 持有，HomeScreen 仅缓存指针避免每帧 getter
+    ImFont* titleFont_   = nullptr;
+    ImFont* defaultFont_ = nullptr;
 
-    ImFont* titleFont_;                ///< 大号标题字体（36px），用于 "FluxPlayer" 标题
-    ImFont* defaultFont_;              ///< 默认字体（13px），用于正文和按钮
+    /// 已应用皮肤代号；与 SkinManager::currentGeneration() 比较以决定是否重应用样式
+    uint64_t appliedSkinGeneration_ = 0;
 };
 
 } // namespace FluxPlayer
