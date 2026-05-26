@@ -120,24 +120,27 @@
     <circle cx="1224" cy="873" r="6" fill="#EAF8FF"/>
   </g>
 
-  <g>
-    <path d="M1010 586H1268L1284 602V786L1268 802H1010L994 786V602L1010 586Z" fill="#050A1A" fill-opacity="0.96" stroke="#A855FF" stroke-opacity="0.85"/>
-    <path d="M1016 610H1134" stroke="#A855FF" stroke-width="2"/>
-    <text x="1016" y="632" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#A855FF">SETTINGS</text>
-    <path d="M1016 644H1260" stroke="url(#rail)" stroke-width="2"/>
-    <text x="1016" y="674" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Loop Playback</text>
-    <rect x="1232" y="661" width="22" height="16" rx="3" fill="#061126" stroke="#00E8FF"/>
-    <path d="M1237 668L1242 673L1250 665" stroke="#00E8FF" stroke-width="2"/>
-    <text x="1016" y="702" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Subtitles</text>
-    <rect x="1232" y="689" width="22" height="16" rx="3" fill="#061126" stroke="#00E8FF"/>
-    <path d="M1237 696L1242 701L1250 693" stroke="#00E8FF" stroke-width="2"/>
-    <text x="1016" y="730" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Media Info / Stats</text>
-    <text x="1254" y="730" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#00E8FF">ON / ON</text>
-    <text x="1016" y="758" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Record Quality</text>
-    <text x="1254" y="758" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#FF6A9D">ORIGINAL</text>
-    <text x="1016" y="779" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#6F89A8">SPACE PLAY  P SHOT  F FULLSCREEN</text>
-    <text x="1016" y="794" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#6F89A8">I INFO  S STATS  H HUD  ESC EXIT</text>
-  </g>
+	  <g>
+	    <path d="M1010 540H1268L1284 556V786L1268 802H1010L994 786V556L1010 540Z" fill="#050A1A" fill-opacity="0.96" stroke="#A855FF" stroke-opacity="0.85"/>
+	    <path d="M1016 558H1134" stroke="#A855FF" stroke-width="2"/>
+	    <text x="1016" y="580" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#A855FF">SETTINGS</text>
+	    <path d="M1016 592H1260" stroke="url(#rail)" stroke-width="2"/>
+	    <text x="1016" y="620" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Loop Playback</text>
+	    <rect x="1232" y="607" width="22" height="16" rx="3" fill="#061126" stroke="#00E8FF"/>
+	    <path d="M1237 614L1242 619L1250 611" stroke="#00E8FF" stroke-width="2"/>
+	    <text x="1016" y="648" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Subtitles</text>
+	    <rect x="1232" y="635" width="22" height="16" rx="3" fill="#061126" stroke="#00E8FF"/>
+	    <path d="M1237 642L1242 647L1250 639" stroke="#00E8FF" stroke-width="2"/>
+	    <text x="1016" y="676" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Media Info / Stats</text>
+	    <text x="1254" y="676" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#00E8FF">ON / ON</text>
+	    <text x="1016" y="704" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Record Quality</text>
+	    <text x="1254" y="704" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#FF6A9D">ORIGINAL</text>
+	    <text x="1016" y="732" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Appearance</text>
+	    <text x="1254" y="732" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#A855FF">CYBERPUNK &gt;</text>
+	    <text x="1016" y="756" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#00E8FF">SKIN HOT RELOAD / ON</text>
+	    <text x="1016" y="779" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#6F89A8">SPACE PLAY  P SHOT  F FULLSCREEN</text>
+	    <text x="1016" y="794" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#6F89A8">I INFO  S STATS  H HUD  ESC EXIT</text>
+	  </g>
 
   <g>
     <path d="M1080 96H1392L1418 122V474L1392 500H1080L1054 474V122L1080 96Z" fill="#050A1A" fill-opacity="0.88" stroke="#00E8FF" stroke-opacity="0.7"/>

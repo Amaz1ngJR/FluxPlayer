@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fluxplayer.local/schema/skin.schema.json",
+  "title": "FluxPlayer Skin Package Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "version",
+    "compatibility",
+    "roles",
+    "gradients",
+    "metrics",
+    "motion",
+    "typography",
+    "decoration"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "minLength": 2,
+      "maxLength": 64
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 240
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skinApi", "surfaces"],
+      "properties": {
+        "skinApi": {
+          "const": 1
+        },
+        "surfaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "minItems": 3,
+          "items": {
+            "enum": ["home", "opening", "player", "hud", "settings"]
+          },
+          "allOf": [
+            { "contains": { "const": "home" } },
+            { "contains": { "const": "opening" } },
+            { "contains": { "const": "player" } }
+          ]
+        }
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["background", "accent", "text", "state", "line"],
+      "properties": {
+        "background": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["void", "canvas", "panel", "panelRaised", "panelTransparent"],
+          "properties": {
+            "void": { "$ref": "#/$defs/color" },
+            "canvas": { "$ref": "#/$defs/color" },
+            "panel": { "$ref": "#/$defs/color" },
+            "panelRaised": { "$ref": "#/$defs/color" },
+            "panelTransparent": { "$ref": "#/$defs/color" }
+          }
+        },
+        "accent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary", "primarySoft", "primaryDim", "secondary", "tertiary"],
+          "properties": {
+            "primary": { "$ref": "#/$defs/color" },
+            "primarySoft": { "$ref": "#/$defs/color" },
+            "primaryDim": { "$ref": "#/$defs/color" },
+            "secondary": { "$ref": "#/$defs/color" },
+            "tertiary": { "$ref": "#/$defs/color" }
+          }
+        },
+        "text": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["primary", "secondary", "muted", "disabled"],
+          "properties": {
+            "primary": { "$ref": "#/$defs/color" },
+            "secondary": { "$ref": "#/$defs/color" },
+            "muted": { "$ref": "#/$defs/color" },
+            "disabled": { "$ref": "#/$defs/color" }
+          }
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["recording", "warning", "error", "success"],
+          "properties": {
+            "recording": { "$ref": "#/$defs/color" },
+            "warning": { "$ref": "#/$defs/color" },
+            "error": { "$ref": "#/$defs/color" },
+            "success": { "$ref": "#/$defs/color" }
+          }
+        },
+        "line": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subtle", "primary", "secondary"],
+          "properties": {
+            "subtle": { "$ref": "#/$defs/color" },
+            "primary": { "$ref": "#/$defs/color" },
+            "secondary": { "$ref": "#/$defs/color" }
+          }
+        }
+      }
+    },
+    "gradients": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primaryRail", "dockEdge", "panelHeader"],
+      "properties": {
+        "primaryRail": { "$ref": "#/$defs/gradient" },
+        "dockEdge": { "$ref": "#/$defs/gradient" },
+        "panelHeader": { "$ref": "#/$defs/gradient" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["radius", "spacing", "size", "opacity"],
+      "properties": {
+        "radius": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["panel", "popup", "button", "progress", "chip"],
+          "properties": {
+            "panel": { "$ref": "#/$defs/radius" },
+            "popup": { "$ref": "#/$defs/radius" },
+            "button": { "$ref": "#/$defs/radius" },
+            "progress": { "$ref": "#/$defs/radius" },
+            "chip": { "$ref": "#/$defs/radius" }
+          }
+        },
+        "spacing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["screenMargin", "dockPaddingX", "dockPaddingY", "panelPadding", "controlGap", "rowGap"],
+          "properties": {
+            "screenMargin": { "$ref": "#/$defs/space" },
+            "dockPaddingX": { "$ref": "#/$defs/space" },
+            "dockPaddingY": { "$ref": "#/$defs/space" },
+            "panelPadding": { "$ref": "#/$defs/space" },
+            "controlGap": { "$ref": "#/$defs/space" },
+            "rowGap": { "$ref": "#/$defs/space" }
+          }
+        },
+        "size": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["bottomDockHeight", "topRailHeight", "hudPanelWidth", "progressHotHeight", "progressVisualHeight", "mainPlayButton", "iconButton", "chipButton", "homeSourceCard", "homeCoreDiameter", "openingPanel"],
+          "properties": {
+            "bottomDockHeight": { "type": "number", "minimum": 56, "maximum": 132 },
+            "topRailHeight": { "type": "number", "minimum": 22, "maximum": 56 },
+            "hudPanelWidth": { "type": "number", "minimum": 240, "maximum": 460 },
+            "progressHotHeight": { "type": "number", "minimum": 14, "maximum": 34 },
+            "progressVisualHeight": { "type": "number", "minimum": 3, "maximum": 18 },
+            "mainPlayButton": { "$ref": "#/$defs/controlSize" },
+            "iconButton": { "$ref": "#/$defs/controlSize" },
+            "chipButton": { "$ref": "#/$defs/controlSize" },
+            "homeSourceCard": { "$ref": "#/$defs/panelSize" },
+            "homeCoreDiameter": { "type": "number", "minimum": 0, "maximum": 360 },
+            "openingPanel": { "$ref": "#/$defs/panelSize" }
+          }
+        },
+        "opacity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dock", "hudPanel", "popup", "subtleDecoration", "disabled"],
+          "properties": {
+            "dock": { "$ref": "#/$defs/opacity" },
+            "hudPanel": { "$ref": "#/$defs/opacity" },
+            "popup": { "$ref": "#/$defs/opacity" },
+            "subtleDecoration": { "$ref": "#/$defs/opacity" },
+            "disabled": { "$ref": "#/$defs/opacity" }
+          }
+        }
+      }
+    },
+    "motion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["autoHideDelaySeconds", "volumeCloseDelaySeconds", "scanlineSpeed", "pulseSpeed", "hoverGlowMs", "reloadDebounceMs"],
+      "properties": {
+        "autoHideDelaySeconds": { "type": "number", "minimum": 0.5, "maximum": 12 },
+        "volumeCloseDelaySeconds": { "type": "number", "minimum": 0, "maximum": 3 },
+        "scanlineSpeed": { "type": "number", "minimum": 0, "maximum": 240 },
+        "pulseSpeed": { "type": "number", "minimum": 0, "maximum": 12 },
+        "hoverGlowMs": { "type": "number", "minimum": 0, "maximum": 1000 },
+        "reloadDebounceMs": { "type": "number", "minimum": 50, "maximum": 2000 }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["displayFamily", "bodyFamily", "titlePx", "panelTitlePx", "bodyPx", "timecodePx", "buttonPx"],
+      "properties": {
+        "displayFamily": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "bodyFamily": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "titlePx": { "$ref": "#/$defs/fontSize" },
+        "panelTitlePx": { "$ref": "#/$defs/fontSize" },
+        "bodyPx": { "$ref": "#/$defs/fontSize" },
+        "timecodePx": { "$ref": "#/$defs/fontSize" },
+        "buttonPx": { "$ref": "#/$defs/fontSize" }
+      }
+    },
+    "decoration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cutCorners", "glow", "scanlines", "circuitTicks", "homeCore"],
+      "properties": {
+        "cutCorners": { "type": "boolean" },
+        "glow": { "type": "boolean" },
+        "scanlines": { "type": "boolean" },
+        "circuitTicks": { "type": "boolean" },
+        "homeCore": { "type": "boolean" }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preview": { "$ref": "#/$defs/relativeAsset" },
+        "displayFont": { "$ref": "#/$defs/relativeAsset" },
+        "bodyFont": { "$ref": "#/$defs/relativeAsset" },
+        "backgroundTexture": { "$ref": "#/$defs/relativeAsset" }
+      }
+    }
+  },
+  "$defs": {
+    "color": {
+      "type": "string",
+      "pattern": "^(#[0-9A-Fa-f]{6}|#[0-9A-Fa-f]{8}|rgba\\([0-9 ]{1,3},[0-9 ]{1,3},[0-9 ]{1,3},[ ]?(0|1|0?\\.[0-9]+)\\))$"
+    },
+    "gradient": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/color"
+      }
+    },
+    "radius": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 24
+    },
+    "space": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 64
+    },
+    "opacity": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "fontSize": {
+      "type": "number",
+      "minimum": 9,
+      "maximum": 72
+    },
+    "controlSize": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 18, "maximum": 200 },
+        { "type": "number", "minimum": 18, "maximum": 64 }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "panelSize": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 120, "maximum": 1400 },
+        { "type": "number", "minimum": 40, "maximum": 800 }
+      ],
+      "items": false,
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "relativeAsset": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_./ -]+$",
+      "maxLength": 180
+    }
+  }
+}
