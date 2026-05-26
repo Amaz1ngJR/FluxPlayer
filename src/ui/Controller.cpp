@@ -19,6 +19,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include <filesystem>
@@ -49,6 +50,12 @@ void openInFileManager(const std::string& path) {
     std::system(cmd.c_str());
 }
 
+ImVec4 skinAlpha(const SkinColor& color, float alphaMultiplier = 1.0f) {
+    ImVec4 out = ToImVec4(color);
+    out.w *= alphaMultiplier;
+    return out;
+}
+
 } // anonymous namespace
 
 Controller::Controller(Player& player, Window& window)
@@ -74,8 +81,6 @@ Controller::Controller(Player& player, Window& window)
     , isDraggingProgress_(false)
     , draggedProgress_(0.0f)
     , seekPrecision_(0.1)
-    , volumeHovered_(false)
-    , volumeLeaveTime_(0.0)
     , lastMouseMoveTime_(0.0)
     , forceVisible_(false)
     , settingsHovered_(false)
@@ -228,8 +233,8 @@ void Controller::processInput() {
             autoHide = snap->motion.autoHideDelaySeconds;
         }
         bool shouldShow = mouseInWindow && (now - lastMouseMoveTime_ < autoHide);
-        // 正在拖动进度条或操作音量时保持显示
-        if (isDraggingProgress_ || volumeHovered_) {
+        // 正在拖动进度条时保持显示
+        if (isDraggingProgress_) {
             shouldShow = true;
         }
         visible_ = shouldShow;
@@ -348,19 +353,24 @@ void Controller::setQualities(const std::vector<QualityItem>& qualities, const s
 
 void Controller::renderBottomOverlay() {
     const ImVec2& ds = ImGui::GetIO().DisplaySize;
-    const float overlayH = 64.0f;
-    const float pad = 8.0f;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
+    const float overlayH = sk.metrics.size.bottomDockHeight;
+    const float pad = playerUi.dockPaddingX;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, 4.0f));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.02f, 0.02f, 0.08f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, playerUi.dockPaddingY));
+    ImVec4 dockBg = ToImVec4(sk.colors.bgPanel);
+    dockBg.w = sk.metrics.opacity.dock;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, dockBg);
+    ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.00f, 0.00f, 0.00f, 0.00f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.00f, 1.00f, 1.00f, 0.12f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.00f, 1.00f, 1.00f, 0.25f));
-    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.00f, 0.80f, 1.00f, 0.50f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.accentPrimary, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.accentPrimary, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         skinAlpha(sk.colors.linePrimary, 0.75f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.progress);
 
     ImGui::SetNextWindowPos(ImVec2(0, ds.y - overlayH), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(ds.x, overlayH), ImGuiCond_Always);
@@ -368,10 +378,13 @@ void Controller::renderBottomOverlay() {
     // 顶部青色光带（手绘在窗口外）
     {
         ImDrawList* dl = ImGui::GetForegroundDrawList();
+        const auto& rail = sk.gradients.dockEdge;
+        ImU32 edge = ScaleAlpha(sk.colors.accentPrimary, 0.0f);
+        ImU32 left = rail.stops.size() > 1 ? ToImU32(rail.stops[1]) : ToImU32(sk.colors.accentPrimary);
+        ImU32 right = rail.stops.size() > 2 ? ToImU32(rail.stops[2]) : ToImU32(sk.colors.accentSecondary);
         dl->AddRectFilledMultiColor(
-            ImVec2(0, ds.y - overlayH), ImVec2(ds.x, ds.y - overlayH + 2.0f),
-            IM_COL32(0,255,255,0), IM_COL32(0,255,255,180),
-            IM_COL32(0,255,255,180), IM_COL32(0,255,255,0));
+            ImVec2(0, ds.y - overlayH), ImVec2(ds.x, ds.y - overlayH + playerUi.dockRailHeight),
+            edge, left, right, edge);
     }
 
     ImGui::Begin("##BottomOverlay", nullptr,
@@ -381,7 +394,7 @@ void Controller::renderBottomOverlay() {
         ImGuiWindowFlags_NoSavedSettings);
 
     // 皮肤系统可能把 ItemSpacing.y 改大，强制恢复 dock 内的紧凑行间距
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 4.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, playerUi.dockRowGap));
 
     // 获取当前播放时间和总时长
     double currentTime = player_.getCurrentTime();
@@ -407,7 +420,7 @@ void Controller::renderBottomOverlay() {
 
     // ── 第二行：下载（左） + 控制按钮（居中） + 设置/音量（右） ──
     // 三个渲染函数共享同一行：保存行首 Y，下载 UI 可能推进光标，渲染后恢复
-    const float btnH = 22.0f;
+    const float btnH = sk.metrics.size.mainPlayBtnH;
     float row2Y = ImGui::GetCursorPosY();
     renderDownloadButton(btnH);
     ImGui::SetCursorPosY(row2Y);
@@ -427,7 +440,10 @@ void Controller::renderBottomOverlay() {
  * @param duration 总时长（秒）
  */
 void Controller::renderProgressBar(float progressBarWidth, float progress, double duration) {
-    const float progressBarHeight = 16.0f;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
+    const float progressBarHeight = sk.metrics.size.progressHotHeight;
 
     // ===== 自定义进度条：支持精确点击和拖动 =====
 
@@ -440,6 +456,10 @@ void Controller::renderProgressBar(float progressBarWidth, float progress, doubl
     // 获取进度条的屏幕位置
     ImVec2 barMin = ImGui::GetItemRectMin();
     ImVec2 barMax = ImGui::GetItemRectMax();
+    float visualHeight = std::min(sk.metrics.size.progressVisualHeight, progressBarHeight);
+    float visualOffset = (progressBarHeight - visualHeight) * 0.5f;
+    ImVec2 trackMin(barMin.x, barMin.y + visualOffset);
+    ImVec2 trackMax(barMax.x, barMin.y + visualOffset + visualHeight);
 
     // 检查鼠标是否在进度条上
     bool isHovered = ImGui::IsItemHovered();
@@ -478,22 +498,22 @@ void Controller::renderProgressBar(float progressBarWidth, float progress, doubl
 
     // 进度条背景
     ImDrawList* drawList = ImGui::GetWindowDrawList();
-    drawList->AddRectFilled(barMin, barMax, IM_COL32(10, 15, 35, 255), 2.0f);
+    drawList->AddRectFilled(trackMin, trackMax, ToImU32(sk.colors.bgPanelRaised), sk.metrics.radius.progress);
     // 背景轨道边框（青色描边）
-    drawList->AddRect(barMin, barMax, IM_COL32(0, 150, 200, 80), 2.0f);
+    drawList->AddRect(trackMin, trackMax, ToImU32(sk.colors.lineSubtle), sk.metrics.radius.progress);
 
     // 已播放部分：青→紫渐变
     if (progress > 0.0f) {
-        ImVec2 filledMax = ImVec2(barMin.x + (barMax.x - barMin.x) * progress, barMax.y);
-        drawList->AddRectFilledMultiColor(barMin, filledMax,
-            IM_COL32(0, 220, 255, 255), IM_COL32(180, 0, 255, 255),
-            IM_COL32(180, 0, 255, 255), IM_COL32(0, 220, 255, 255));
+        ImVec2 filledMax = ImVec2(trackMin.x + (trackMax.x - trackMin.x) * progress, trackMax.y);
+        ImU32 start = SampleGradient(sk.gradients.primaryRail, 0.0f);
+        ImU32 end = SampleGradient(sk.gradients.primaryRail, 1.0f);
+        drawList->AddRectFilledMultiColor(trackMin, filledMax, start, end, end, start);
         // 进度头部发光点
         float headX = filledMax.x;
-        float midY = (barMin.y + barMax.y) * 0.5f;
-        drawList->AddCircleFilled(ImVec2(headX, midY), 5.0f, IM_COL32(0, 255, 255, 255), 12);
-        drawList->AddCircleFilled(ImVec2(headX, midY), 8.0f, IM_COL32(0, 255, 255, 60), 12);
-        drawList->AddCircleFilled(ImVec2(headX, midY), 12.0f, IM_COL32(0, 255, 255, 20), 12);
+        float midY = (trackMin.y + trackMax.y) * 0.5f;
+        drawList->AddCircleFilled(ImVec2(headX, midY), playerUi.progressHeadRadius, ToImU32(sk.colors.accentPrimary), 12);
+        drawList->AddCircleFilled(ImVec2(headX, midY), playerUi.progressGlowRadius, ScaleAlpha(sk.colors.accentPrimary, 0.24f), 12);
+        drawList->AddCircleFilled(ImVec2(headX, midY), playerUi.progressOuterGlowRadius, ScaleAlpha(sk.colors.accentPrimary, 0.08f), 12);
     }
 
     // 绘制拖动指示器或悬停预览
@@ -514,13 +534,13 @@ void Controller::renderProgressBar(float progressBarWidth, float progress, doubl
         float previewX = barMin.x + (barMax.x - barMin.x) * displayProgress;
 
         // 绘制预览线
-        drawList->AddLine(ImVec2(previewX, barMin.y), ImVec2(previewX, barMax.y),
-                          IM_COL32(255, 255, 255, 200), 2.0f);
+        drawList->AddLine(ImVec2(previewX, trackMin.y), ImVec2(previewX, trackMax.y),
+                          ScaleAlpha(sk.colors.textPrimary, 0.80f), sk.metrics.radius.progress);
 
         // 显示量化后的时间
         std::string previewText = formatTime(quantizedTime);
         ImVec2 textSize = ImGui::CalcTextSize(previewText.c_str());
-        ImVec2 tooltipPos(previewX - textSize.x * 0.5f, barMin.y - textSize.y - 5.0f);
+        ImVec2 tooltipPos(previewX - textSize.x * 0.5f, trackMin.y - textSize.y - playerUi.progressTooltipGap);
 
         // 确保提示框不超出窗口边界
         tooltipPos.x = std::max(barMin.x, std::min(tooltipPos.x, barMax.x - textSize.x));
@@ -529,8 +549,8 @@ void Controller::renderProgressBar(float progressBarWidth, float progress, doubl
         ImDrawList* fgDrawList = ImGui::GetForegroundDrawList();
         fgDrawList->AddRectFilled(ImVec2(tooltipPos.x - 5, tooltipPos.y - 2),
                                 ImVec2(tooltipPos.x + textSize.x + 5, tooltipPos.y + textSize.y + 2),
-                                IM_COL32(40, 40, 40, 230), 3.0f);
-        fgDrawList->AddText(tooltipPos, IM_COL32(255, 255, 255, 255), previewText.c_str());
+                                ToImU32(sk.colors.bgPanelRaised), sk.metrics.radius.popup);
+        fgDrawList->AddText(tooltipPos, ToImU32(sk.colors.textPrimary), previewText.c_str());
     }
 
     ImGui::PopStyleColor(3);
@@ -564,6 +584,9 @@ static void DrawStopIcon(ImDrawList* dl, ImVec2 center, float size, ImU32 col) {
 
 void Controller::renderPlaybackButtons(float btnH) {
     const ImVec2& ds = ImGui::GetIO().DisplaySize;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
 
     PlayerState state = player_.getState();
     bool isPlaying = (state == PlayerState::PLAYING);
@@ -573,44 +596,46 @@ void Controller::renderPlaybackButtons(float btnH) {
     const float btnSpacing = ImGui::GetStyle().ItemSpacing.x;
     bool isRecV = player_.isVideoRecording();
     bool isRecA = player_.isAudioRecording();
-    float recVBtnW = isRecV ? 70.0f : 60.0f;
-    float recABtnW = isRecA ? 70.0f : 60.0f;
-    float buttonsW = 80.0f + btnSpacing + 60.0f + btnSpacing + recVBtnW + btnSpacing + recABtnW;
+    float recVBtnW = isRecV ? playerUi.recordActiveButtonW : playerUi.recordIdleButtonW;
+    float recABtnW = isRecA ? playerUi.recordActiveButtonW : playerUi.recordIdleButtonW;
+    const float playBtnW = sk.metrics.size.mainPlayBtnW;
+    const float stopBtnW = playerUi.stopButtonW;
+    float buttonsW = playBtnW + btnSpacing + stopBtnW + btnSpacing + recVBtnW + btnSpacing + recABtnW;
     float centerX = (ds.x - buttonsW) * 0.5f;
     ImGui::SetCursorPosX(centerX);
 
     // 青色描边按钮样式
     auto pushCyan = [&]() {
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0,1,1,0.12f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0,1,1,0.25f));
-        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0,1,1,1));
-        ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0,0.8f,1,0.7f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.accentPrimary, 0.12f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.accentPrimary, 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text,           ToImVec4(sk.colors.accentPrimary));
+        ImGui::PushStyleColor(ImGuiCol_Border,         ToImVec4(sk.colors.linePrimary));
     };
     auto popCyan = [&]() { ImGui::PopStyleColor(5); };
 
     // 播放/暂停（图标按钮）
     pushCyan();
-    ImU32 cyanCol = IM_COL32(0, 220, 255, 255);
+    ImU32 cyanCol = ToImU32(sk.colors.accentPrimary);
     if (isPlaying) {
-        ImGui::Button("##pause", ImVec2(80, btnH));
+        ImGui::Button("##pause", ImVec2(playBtnW, btnH));
         bool hov = ImGui::IsItemHovered();
         ImVec2 c = ImGui::GetItemRectMin();
-        c.x += 40; c.y += btnH * 0.5f;
-        DrawPauseIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? IM_COL32(0,255,255,255) : cyanCol);
+        c.x += playBtnW * 0.5f; c.y += btnH * 0.5f;
+        DrawPauseIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? ToImU32(sk.colors.accentPrimarySoft) : cyanCol);
         if (ImGui::IsItemClicked()) player_.pause();
     } else if (isPaused) {
-        ImGui::Button("##play", ImVec2(80, btnH));
+        ImGui::Button("##play", ImVec2(playBtnW, btnH));
         bool hov = ImGui::IsItemHovered();
         ImVec2 c = ImGui::GetItemRectMin();
-        c.x += 40; c.y += btnH * 0.5f;
-        DrawPlayIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? IM_COL32(0,255,255,255) : cyanCol);
+        c.x += playBtnW * 0.5f; c.y += btnH * 0.5f;
+        DrawPlayIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? ToImU32(sk.colors.accentPrimarySoft) : cyanCol);
         if (ImGui::IsItemClicked()) player_.resume();
     } else {
         ImGui::BeginDisabled();
-        ImGui::Button("##play", ImVec2(80, btnH));
-        ImVec2 c = ImGui::GetItemRectMin(); c.x += 40; c.y += btnH * 0.5f;
-        DrawPlayIcon(ImGui::GetWindowDrawList(), c, btnH, IM_COL32(0,150,180,100));
+        ImGui::Button("##play", ImVec2(playBtnW, btnH));
+        ImVec2 c = ImGui::GetItemRectMin(); c.x += playBtnW * 0.5f; c.y += btnH * 0.5f;
+        DrawPlayIcon(ImGui::GetWindowDrawList(), c, btnH, ScaleAlpha(sk.colors.accentPrimary, sk.metrics.opacity.disabled));
         ImGui::EndDisabled();
     }
     popCyan();
@@ -619,21 +644,21 @@ void Controller::renderPlaybackButtons(float btnH) {
 
     // 停止（图标按钮，紫色）
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.7f,0,1,0.12f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.7f,0,1,0.25f));
-    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.7f,0,1,0.7f));
-    ImU32 purpleCol = IM_COL32(180, 0, 255, 255);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.accentSecondary, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.accentSecondary, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ToImVec4(sk.colors.lineSecondary));
+    ImU32 purpleCol = ToImU32(sk.colors.accentSecondary);
     if (canStop) {
-        ImGui::Button("##stop", ImVec2(60, btnH));
+        ImGui::Button("##stop", ImVec2(stopBtnW, btnH));
         bool hov = ImGui::IsItemHovered();
-        ImVec2 c = ImGui::GetItemRectMin(); c.x += 30; c.y += btnH * 0.5f;
-        DrawStopIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? IM_COL32(200,0,255,255) : purpleCol);
+        ImVec2 c = ImGui::GetItemRectMin(); c.x += stopBtnW * 0.5f; c.y += btnH * 0.5f;
+        DrawStopIcon(ImGui::GetWindowDrawList(), c, btnH, hov ? ToImU32(sk.colors.accentTertiary) : purpleCol);
         if (ImGui::IsItemClicked()) player_.stop();
     } else {
         ImGui::BeginDisabled();
-        ImGui::Button("##stop", ImVec2(60, btnH));
-        ImVec2 c = ImGui::GetItemRectMin(); c.x += 30; c.y += btnH * 0.5f;
-        DrawStopIcon(ImGui::GetWindowDrawList(), c, btnH, IM_COL32(100,0,150,80));
+        ImGui::Button("##stop", ImVec2(stopBtnW, btnH));
+        ImVec2 c = ImGui::GetItemRectMin(); c.x += stopBtnW * 0.5f; c.y += btnH * 0.5f;
+        DrawStopIcon(ImGui::GetWindowDrawList(), c, btnH, ScaleAlpha(sk.colors.accentSecondary, sk.metrics.opacity.disabled));
         ImGui::EndDisabled();
     }
     ImGui::PopStyleColor(4);
@@ -642,10 +667,10 @@ void Controller::renderPlaybackButtons(float btnH) {
 
     // 录像按钮
     if (isRecV) {
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f,0,0,0.3f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.8f,0,0,0.4f));
-        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1,0.3f,0.3f,1));
-        ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(1,0.2f,0.2f,0.8f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        skinAlpha(sk.colors.stateRecording, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, skinAlpha(sk.colors.stateRecording, 0.45f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ToImVec4(sk.colors.stateRecording));
+        ImGui::PushStyleColor(ImGuiCol_Border,        skinAlpha(sk.colors.stateRecording, 0.80f));
         if (ImGui::Button("* REC V", ImVec2(recVBtnW, btnH))) player_.stopVideoRecording();
         ImGui::PopStyleColor(4);
     } else if (canStop) {
@@ -662,10 +687,10 @@ void Controller::renderPlaybackButtons(float btnH) {
 
     // 录音按钮
     if (isRecA) {
-        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f,0,0,0.3f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.8f,0,0,0.4f));
-        ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(1,0.3f,0.3f,1));
-        ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(1,0.2f,0.2f,0.8f));
+        ImGui::PushStyleColor(ImGuiCol_Button,        skinAlpha(sk.colors.stateRecording, 0.30f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, skinAlpha(sk.colors.stateRecording, 0.45f));
+        ImGui::PushStyleColor(ImGuiCol_Text,          ToImVec4(sk.colors.stateRecording));
+        ImGui::PushStyleColor(ImGuiCol_Border,        skinAlpha(sk.colors.stateRecording, 0.80f));
         if (ImGui::Button("* REC A", ImVec2(recABtnW, btnH))) player_.stopAudioRecording();
         ImGui::PopStyleColor(4);
     } else if (canStop) {
@@ -700,40 +725,41 @@ void Controller::renderPlaybackButtons(float btnH) {
             else                 snprintf(buf, sizeof(buf), "A %02d:%02d %.1fMB", min, sec, sz/(1024.0*1024.0));
             recInfo += buf;
         }
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.stateRecording));
         ImGui::Text("%s", recInfo.c_str());
         ImGui::PopStyleColor();
     }
 }
 
 /**
- * 绘制设置齿轮图标和音量控制（图标 + 可展开滑块）
- * 齿轮在音量图标左侧，点击切换设置菜单
- * 音量滑块延迟关闭：鼠标离开后等 0.4 秒才收起
+ * 绘制设置、静音按钮和常驻音量滑块
+ * 右侧固定顺序为画质 / 速度 / 设置 / 静音 / 音量轨。
  * @param btnH 按钮高度
  */
 void Controller::renderVolumeAndSettings(float btnH) {
     const ImVec2& ds = ImGui::GetIO().DisplaySize;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
 
-    // 音量区域（图标固定，滑块向右展开，延迟关闭）
+    // 音量区域保留独立静音入口，长条滑块常驻显示。
     bool isMuted = player_.isMuted();
     float volume = player_.getVolume();
-    const float volSliderW = 100.0f;
-    const float volBtnW = btnH + 4.0f;
+    const float volSliderW = playerUi.volumeSliderW;
+    const float volBtnW = btnH + playerUi.volumeButtonExtraW;
     const float settingsBtnW = volBtnW;
-    const float speedBtnW = 60.0f;
-    // 音量图标固定在右侧，滑块向右展开
-    const float volIconX = ds.x - volBtnW - volSliderW - 12.0f;
+    const float speedBtnW = playerUi.toolButtonW;
+    const float sliderX = ds.x - volSliderW - playerUi.toolbarRightMargin;
+    const float volIconX = sliderX - volBtnW - playerUi.toolbarGap;
     // 设置按钮紧贴音量图标左侧
-    const float settingsIconX = volIconX - settingsBtnW - 4.0f;
-    constexpr double VOL_CLOSE_DELAY = 0.4;
+    const float settingsIconX = volIconX - settingsBtnW - playerUi.toolbarGap;
 
-    const float qualityBtnW  = currentQualityLabel_.empty() ? 0.0f : 60.0f;
+    const float qualityBtnW  = currentQualityLabel_.empty() ? 0.0f : playerUi.toolButtonW;
 
     // 速度按钮紧贴设置图标左侧，画质按钮在速度按钮左侧
-    float speedBtnX = settingsIconX - speedBtnW - 4.0f;
+    float speedBtnX = settingsIconX - speedBtnW - playerUi.toolbarGap;
     if (qualityBtnW > 0.0f) {
-        float qx = speedBtnX - qualityBtnW - 4.0f;
+        float qx = speedBtnX - qualityBtnW - playerUi.toolbarGap;
         ImGui::SameLine(qx);
         renderQualityButton(btnH);
     }
@@ -762,7 +788,7 @@ void Controller::renderVolumeAndSettings(float btnH) {
         float cy = (settingsBtnMin.y + settingsBtnMax.y) * 0.5f;
         float radius = (settingsBtnMax.y - settingsBtnMin.y) * 0.25f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 col = IM_COL32(0, 220, 255, 220);
+        ImU32 col = ScaleAlpha(sk.colors.accentPrimary, 0.86f);
 
         // 绘制齿轮齿（8个矩形）
         const int numTeeth = 8;
@@ -790,51 +816,61 @@ void Controller::renderVolumeAndSettings(float btnH) {
         // 绘制中心圆
         dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.5f, col);
         // 绘制中心孔
-        dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.25f, IM_COL32(0, 0, 0, 255));
+        dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.25f, ToImU32(sk.colors.bgVoid));
     }
 
     // 音量图标按钮（固定位置）
     ImGui::SameLine(volIconX);
     if (ImGui::Button("##volbtn", ImVec2(volBtnW, btnH))) {
-        player_.setMute(!isMuted);
+        isMuted = !isMuted;
+        player_.setMute(isMuted);
     }
-    bool iconHovered = ImGui::IsItemHovered();
-    // 立即保存按钮的 rect（后面画滑块会改变 GetItemRect）
+    // 立即保存按钮的 rect（后面绘制滑块会改变 GetItemRect）
     ImVec2 volBtnMin = ImGui::GetItemRectMin();
     ImVec2 volBtnMax = ImGui::GetItemRectMax();
 
-    // 音量滑块（在图标右侧展开）
-    bool sliderHovered = false;
-    bool sliderActive = false;
-    if (volumeHovered_) {
-        ImGui::SameLine(0, 4.0f);
-        ImGui::PushItemWidth(volSliderW);
-        if (ImGui::SliderFloat("##vol", &volume, 0.0f, 1.0f, "%.2f")) {
-            player_.setVolume(volume);
+    // 常驻长条滑块与 mockup_player.svg 对齐，不再等待 hover 展开。
+    ImGui::SameLine(sliderX);
+    const ImVec4 transparent(0.0f, 0.0f, 0.0f, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_FrameBg,          transparent);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,   transparent);
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive,    transparent);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab,       transparent);
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, transparent);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, sk.metrics.radius.progress);
+    ImGui::PushItemWidth(volSliderW);
+    if (ImGui::SliderFloat("##volumeDock", &volume, 0.0f, 1.0f, "")) {
+        player_.setVolume(volume);
+        if (isMuted && volume > 0.0f) {
+            isMuted = false;
+            player_.setMute(false);
         }
-        sliderHovered = ImGui::IsItemHovered();
-        sliderActive = ImGui::IsItemActive();
-        ImGui::PopItemWidth();
     }
+    ImVec2 sliderMin = ImGui::GetItemRectMin();
+    ImVec2 sliderMax = ImGui::GetItemRectMax();
+    bool sliderHovered = ImGui::IsItemHovered();
+    ImGui::PopItemWidth();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(5);
 
-    // 延迟关闭逻辑：
-    // - 图标或滑块上有鼠标 → 保持展开，重置离开时间
-    // - 鼠标离开后，等 VOL_CLOSE_DELAY 秒才真正关闭
-    // - 正在拖拽滑块时始终保持
-    bool anyHovered = iconHovered || sliderHovered || sliderActive;
-    if (anyHovered) {
-        volumeHovered_ = true;
-        volumeLeaveTime_ = 0.0;  // 重置
-    } else if (volumeHovered_) {
-        // 刚离开，记录离开时间
-        if (volumeLeaveTime_ == 0.0) {
-            volumeLeaveTime_ = glfwGetTime();
-        }
-        // 超过延迟时间才关闭
-        if (glfwGetTime() - volumeLeaveTime_ > VOL_CLOSE_DELAY) {
-            volumeHovered_ = false;
-            volumeLeaveTime_ = 0.0;
-        }
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float cy = (sliderMin.y + sliderMax.y) * 0.5f;
+        const float trackLeft = sliderMin.x + 10.0f;
+        const float trackRight = sliderMax.x - 10.0f;
+        const float headX = trackLeft + (trackRight - trackLeft) *
+            std::clamp(volume, 0.0f, 1.0f);
+        dl->AddRectFilled(sliderMin, sliderMax, ToImU32(sk.colors.bgPanelRaised),
+                          sk.metrics.radius.button);
+        dl->AddRect(sliderMin, sliderMax,
+                    ScaleAlpha(sk.colors.lineSubtle, sliderHovered ? 1.8f : 1.0f),
+                    sk.metrics.radius.button);
+        dl->AddLine(ImVec2(trackLeft, cy), ImVec2(trackRight, cy),
+                    ToImU32(sk.colors.accentPrimaryDim), 1.0f);
+        dl->AddLine(ImVec2(trackLeft, cy), ImVec2(headX, cy),
+                    ToImU32(sk.colors.accentPrimary), 1.5f);
+        dl->AddCircleFilled(ImVec2(headX, cy), 3.0f, ToImU32(sk.colors.accentPrimary), 10);
     }
 
     // 在音量按钮上手绘喇叭图标（使用保存的按钮 rect）
@@ -843,7 +879,7 @@ void Controller::renderVolumeAndSettings(float btnH) {
         float cy = (volBtnMin.y + volBtnMax.y) * 0.5f;
         float sz = (volBtnMax.y - volBtnMin.y) * 0.35f;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 col = IM_COL32(0, 220, 255, 220);
+        ImU32 col = ScaleAlpha(sk.colors.accentPrimary, 0.86f);
 
         // 喇叭主体（梯形：左窄右宽）
         dl->AddRectFilled(ImVec2(cx - sz * 0.8f, cy - sz * 0.3f),
@@ -859,11 +895,11 @@ void Controller::renderVolumeAndSettings(float btnH) {
 
         if (isMuted) {
             // 静音：红色斜线
-            ImU32 red = IM_COL32(220, 60, 60, 255);
+            ImU32 red = ToImU32(sk.colors.stateError);
             dl->AddLine(ImVec2(cx - sz, cy - sz), ImVec2(cx + sz, cy + sz), red, 2.0f);
         } else {
             // 声波弧线
-            ImU32 wave = IM_COL32(180, 180, 180, 180);
+            ImU32 wave = ScaleAlpha(sk.colors.textSecondary, 0.70f);
             float arcX = cx + sz * 0.6f;
             if (volume > 0.3f) {
                 dl->AddBezierQuadratic(
@@ -882,30 +918,34 @@ void Controller::renderVolumeAndSettings(float btnH) {
 }
 
 void Controller::renderMediaInfo() {
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& hud = sk.surfaces.hud;
     // 推入赛博朋克配色：深黑底 + 青色边框 + 青色文字
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,    ImVec4(0.02f, 0.03f, 0.08f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_Border,      ImVec4(0.00f, 0.80f, 1.00f, 0.60f));
-    ImGui::PushStyleColor(ImGuiCol_Text,        ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_TitleBg,     ImVec4(0.00f, 0.10f, 0.20f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ImVec4(0.00f, 0.15f, 0.30f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_Separator,   ImVec4(0.00f, 0.60f, 1.00f, 0.40f));
+    ImVec4 hudBg = ToImVec4(sk.colors.bgPanel); hudBg.w = sk.metrics.opacity.hudPanel;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,    hudBg);
+    ImGui::PushStyleColor(ImGuiCol_Border,      ToImVec4(sk.colors.linePrimary));
+    ImGui::PushStyleColor(ImGuiCol_Text,        ToImVec4(sk.colors.textPrimary));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,     ToImVec4(sk.colors.bgPanel));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ToImVec4(sk.colors.bgPanelRaised));
+    ImGui::PushStyleColor(ImGuiCol_Separator,   ToImVec4(sk.colors.lineSubtle));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sk.metrics.radius.panel);
 
     // 根据是否有网页视频信息调整窗口高度
-    float windowHeight = 250.0f;
+    float windowHeight = hud.mediaInfoH;
     bool hasWebInfo = !webPlatform_.empty() || !webUploader_.empty() || webViewCount_ >= 0 || !webUploadDate_.empty();
     if (hasWebInfo) {
-        windowHeight = 320.0f;  // 增加高度以容纳网页视频信息
+        windowHeight = hud.mediaInfoWebH;  // 增加高度以容纳网页视频信息
     }
 
-    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(450, windowHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(hud.margin, hud.margin), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(hud.mediaInfoW, windowHeight), ImGuiCond_Always);
     ImGui::Begin("Media Info", &showMediaInfo_,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
     // 文件名用暗青色显示，避免过长时视觉干扰
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 0.80f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
     ImGui::TextUnformatted("FILE:");
     ImGui::SameLine();
     ImGui::TextUnformatted(filename_.c_str());
@@ -970,18 +1010,22 @@ void Controller::renderMediaInfo() {
 }
 
 void Controller::renderStats() {
-    ImGui::PushStyleColor(ImGuiCol_WindowBg,     ImVec4(0.02f, 0.03f, 0.08f, 0.92f));
-    ImGui::PushStyleColor(ImGuiCol_Border,       ImVec4(0.75f, 0.00f, 1.00f, 0.60f));
-    ImGui::PushStyleColor(ImGuiCol_Text,         ImVec4(0.00f, 0.90f, 1.00f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_TitleBg,      ImVec4(0.10f, 0.00f, 0.20f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ImVec4(0.15f, 0.00f, 0.30f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_Separator,    ImVec4(0.75f, 0.00f, 1.00f, 0.40f));
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& hud = sk.surfaces.hud;
+    ImVec4 hudBg = ToImVec4(sk.colors.bgPanel); hudBg.w = sk.metrics.opacity.hudPanel;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,     hudBg);
+    ImGui::PushStyleColor(ImGuiCol_Border,       ToImVec4(sk.colors.lineSecondary));
+    ImGui::PushStyleColor(ImGuiCol_Text,         ToImVec4(sk.colors.textPrimary));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg,      ToImVec4(sk.colors.bgPanel));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive,ToImVec4(sk.colors.bgPanelRaised));
+    ImGui::PushStyleColor(ImGuiCol_Separator,    ToImVec4(sk.colors.lineSecondary));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sk.metrics.radius.panel);
 
     float windowWidth = ImGui::GetIO().DisplaySize.x;
-    ImGui::SetNextWindowPos(ImVec2(windowWidth - 250, 10), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(240, 180), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(windowWidth - hud.statsW - hud.margin, hud.margin), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(hud.statsW, hud.statsH), ImGuiCond_Always);
     ImGui::Begin("Statistics", &showStats_,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
@@ -990,7 +1034,7 @@ void Controller::renderStats() {
     ImGui::TextUnformatted("PERFORMANCE:");
     ImGui::Indent();
     // FPS 超过目标帧率时用亮青色，掉帧时用红色提示
-    ImU32 fpsCol = stats.fps >= 24.0f ? IM_COL32(0,255,200,255) : IM_COL32(255,80,80,255);
+    ImU32 fpsCol = stats.fps >= 24.0f ? ToImU32(sk.colors.stateSuccess) : ToImU32(sk.colors.stateError);
     ImGui::GetWindowDrawList()->AddText(ImGui::GetCursorScreenPos(), fpsCol,
         (std::string("FPS        : ") + std::to_string((int)stats.fps)).c_str());
     ImGui::Dummy(ImVec2(0, ImGui::GetTextLineHeight()));
@@ -1152,13 +1196,11 @@ void Controller::renderSubtitles() {
     const float winW = io.DisplaySize.x;
     const float winH = io.DisplaySize.y;
 
-    // 底部浮层高度 64px，字幕需在其上方留出间距
-    static constexpr float kSubtitleBottomMarginWithUI = 80.0f;  // UI 可见时距底距离
-    static constexpr float kSubtitleBottomMarginNoUI   = 24.0f;  // UI 隐藏时距底距离
-    static constexpr float kSubtitleWidthRatio         = 0.85f;  // 字幕窗口宽度占屏幕比例
+    const auto snap = SkinManager::instance().current();
+    const auto& sub = snap->surfaces.subtitle;
 
-    const float reserveBottom = visible_ ? kSubtitleBottomMarginWithUI
-                                         : kSubtitleBottomMarginNoUI;
+    const float reserveBottom = visible_ ? sub.bottomMarginWithUi
+                                         : sub.bottomMarginNoUi;
 
     // 切换到 CJK 字体（若已加载）
     if (subtitleFont_) {
@@ -1168,8 +1210,8 @@ void Controller::renderSubtitles() {
     ImGui::SetNextWindowPos(
         ImVec2(winW * 0.5f, winH - reserveBottom),
         ImGuiCond_Always, ImVec2(0.5f, 1.0f));
-    ImGui::SetNextWindowSize(ImVec2(winW * kSubtitleWidthRatio, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.55f);
+    ImGui::SetNextWindowSize(ImVec2(winW * sub.widthRatio, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(sub.backgroundAlpha);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 
@@ -1199,13 +1241,17 @@ void Controller::renderSubtitles() {
 }
 
 void Controller::renderSpeedButton(float btnH) {
-    const float speedBtnW = 60.0f;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
+    const auto& popup = sk.surfaces.popup;
+    const float speedBtnW = playerUi.toolButtonW;
     double currentSpeed = player_.getPlaybackSpeed();
     bool isNonDefault = (std::abs(currentSpeed - 1.0) > 0.01);
 
     if (isNonDefault) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, skinAlpha(sk.colors.accentPrimarySoft, 0.55f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, skinAlpha(sk.colors.accentPrimarySoft, 0.80f));
     }
 
     bool clicked = ImGui::Button("Speed##speedbtn", ImVec2(speedBtnW, btnH));
@@ -1219,7 +1265,7 @@ void Controller::renderSpeedButton(float btnH) {
         ImVec2 textSize = ImGui::CalcTextSize(speedText);
         float textX = (btnMin.x + btnMax.x - textSize.x) * 0.5f;
         ImGui::GetForegroundDrawList()->AddText(
-            ImVec2(textX, btnMax.y + 2), IM_COL32(100, 180, 255, 255), speedText);
+            ImVec2(textX, btnMax.y + 2), ToImU32(sk.colors.accentPrimarySoft), speedText);
     }
 
     if (clicked) {
@@ -1227,10 +1273,11 @@ void Controller::renderSpeedButton(float btnH) {
     }
 
     // 菜单在按钮上方弹出
-    ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - 172.0f), ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.12f, 0.95f));
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.12f, 0.12f, 0.12f, 0.95f));
+    ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popup.speedOffsetY), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, popup.rounding);
+    ImVec4 popupBg = ToImVec4(sk.colors.bgPanelRaised); popupBg.w = sk.metrics.opacity.popup;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, popupBg);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, popupBg);
 
     if (ImGui::BeginPopup("##SpeedPopup")) {
         constexpr float kSpeeds[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
@@ -1238,8 +1285,8 @@ void Controller::renderSpeedButton(float btnH) {
 
         for (int i = 0; i < 6; i++) {
             bool isSelected = (std::abs(currentSpeed - kSpeeds[i]) < 0.01);
-            if (isSelected) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
-            if (ImGui::Selectable(kLabels[i], isSelected, 0, ImVec2(80, 0))) {
+            if (isSelected) ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimarySoft));
+            if (ImGui::Selectable(kLabels[i], isSelected, 0, ImVec2(popup.speedOptionW, 0))) {
                 player_.setPlaybackSpeed(kSpeeds[i]);
                 ImGui::CloseCurrentPopup();
             }
@@ -1254,16 +1301,20 @@ void Controller::renderSpeedButton(float btnH) {
 
 void Controller::renderQualityButton(float btnH) {
     if (currentQualityLabel_.empty()) return;
-    const float btnW = 60.0f;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
+    const auto& popup = sk.surfaces.popup;
+    const float btnW = playerUi.toolButtonW;
 
     // 赛博蓝边框按钮，与速度按钮风格一致
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.00f,0.75f,1.00f,0.12f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.00f,0.75f,1.00f,0.25f));
-    ImGui::PushStyleColor(ImGuiCol_Text,           ImVec4(0.00f,0.75f,1.00f,1.00f));
-    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.00f,0.75f,1.00f,0.60f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.accentPrimary, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.accentPrimary, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Text,           ToImVec4(sk.colors.accentPrimary));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ToImVec4(sk.colors.linePrimary));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
 
     bool clicked = ImGui::Button(currentQualityLabel_.c_str(), ImVec2(btnW, btnH));
     ImVec2 btnMin = ImGui::GetItemRectMin();
@@ -1274,26 +1325,27 @@ void Controller::renderQualityButton(float btnH) {
     if (clicked) showQualityMenu_ = !showQualityMenu_;
 
     if (showQualityMenu_ && !qualities_.empty()) {
-        float popupH = qualities_.size() * 24.0f + 8.0f;
-        ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popupH - 4.0f), ImGuiCond_Always);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.04f,0.04f,0.10f,0.96f));
-        ImGui::PushStyleColor(ImGuiCol_Border,  ImVec4(0.00f,0.75f,1.00f,0.30f));
+        float popupH = qualities_.size() * popup.qualityRowH + popup.qualityPaddingH;
+        ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popupH - popup.offsetY), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, popup.rounding);
+        ImVec4 popupBg = ToImVec4(sk.colors.bgPanelRaised); popupBg.w = sk.metrics.opacity.popup;
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, popupBg);
+        ImGui::PushStyleColor(ImGuiCol_Border,  ToImVec4(sk.colors.linePrimary));
 
         if (ImGui::BeginPopupContextVoid("##QualityPopup")) {
             ImGui::EndPopup();
         }
         // 用 Window 方式弹出（BeginPopup 需要 OpenPopup 配合，改用直接窗口）
-        ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popupH - 4.0f), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(btnW + 20.0f, popupH), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(btnMin.x, btnMin.y - popupH - popup.offsetY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(btnW + popup.qualityExtraW, popupH), ImGuiCond_Always);
         ImGui::Begin("##QualityMenu", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
 
         for (const auto& q : qualities_) {
             bool isCurrent = (q.label == currentQualityLabel_);
-            if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.00f,0.75f,1.00f,1.00f));
-            if (ImGui::Selectable(q.label.c_str(), isCurrent, 0, ImVec2(0, 20))) {
+            if (isCurrent) ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
+            if (ImGui::Selectable(q.label.c_str(), isCurrent, 0, ImVec2(0, popup.qualityRowH - popup.offsetY))) {
                 // 切换画质：记录当前时间，调用 Player::switchQuality
                 if (!isCurrent && !currentPageUrl_.empty()) {
                     double currentTime = player_.getCurrentTime();
@@ -1319,16 +1371,19 @@ void Controller::renderQualityButton(float btnH) {
 
 void Controller::renderDownloadButton(float btnH) {
     if (currentPageUrl_.empty()) return;
-    const float btnW = 72.0f;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
+    const float btnW = playerUi.downloadButtonW;
 
     // Download 按钮固定在工具栏左侧
-    ImGui::SetCursorPosX(8.0f);
+    ImGui::SetCursorPosX(playerUi.dockPaddingX);
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.75f,0.00f,1.00f,0.12f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.75f,0.00f,1.00f,0.25f));
-    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.75f,0.00f,1.00f,0.60f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.accentSecondary, 0.12f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.accentSecondary, 0.25f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ToImVec4(sk.colors.lineSecondary));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
     bool clicked = ImGui::Button("Download", ImVec2(btnW, btnH));
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
@@ -1377,41 +1432,46 @@ void Controller::renderDownloadButton(float btnH) {
 void Controller::renderDownloadProgress(float btnH,
                                          float btnMinX, float btnMinY,
                                          float btnMaxX, float btnMaxY) {
-    const float iconBtnW = 24.0f;
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
+    const auto& playerUi = sk.surfaces.player;
+    const float iconBtnW = sk.metrics.size.iconBtnW;
+    const float iconBtnH = sk.metrics.size.iconBtnH;
     float progress = downloadProgress_.load();
     // ForegroundDrawList 不受窗口裁剪，避免文字超出 overlay 边界触发滚动
     ImDrawList* dl = ImGui::GetForegroundDrawList();
 
     // 进度条（在 Download 按钮右侧，高度与按钮等高以容纳内嵌文字）
-    const float barW = 120.0f, barH = btnH;
-    float barX = btnMaxX + 8.0f;
+    const float barW = playerUi.downloadBarW, barH = btnH;
+    float barX = btnMaxX + playerUi.downloadBarGap;
     float barY = btnMinY;
     dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW, barY + barH),
-                      IM_COL32(20,20,50,200), 3.0f);
+                      ScaleAlpha(sk.colors.bgPanelRaised, 0.80f), sk.metrics.radius.chip);
     if (progress > 0.0f) {
+        ImU32 start = SampleGradient(sk.gradients.primaryRail, 0.0f);
+        ImU32 end = SampleGradient(sk.gradients.primaryRail, 1.0f);
         dl->AddRectFilledMultiColor(
             ImVec2(barX, barY), ImVec2(barX + barW * progress, barY + barH),
-            IM_COL32(0,190,255,220), IM_COL32(190,0,255,220),
-            IM_COL32(190,0,255,220), IM_COL32(0,190,255,220));
+            start, end, end, start);
     }
     // 百分比文字内嵌在进度条中央
     char pct[8]; snprintf(pct, sizeof(pct), "%d%%", int(progress * 100));
     ImVec2 ts = ImGui::CalcTextSize(pct);
     dl->AddText(ImVec2(barX + (barW - ts.x) * 0.5f, barY + (barH - ts.y) * 0.5f),
-                IM_COL32(255,255,255,230), pct);
+                ToImU32(sk.colors.textPrimary), pct);
 
     // 暂停/继续图标按钮（进度条右侧）
     bool isPaused = downloader_ && downloader_->isPaused();
-    float pauseBtnX = barX + barW + 4.0f;
+    float pauseBtnX = barX + barW + playerUi.toolbarGap;
     ImGui::SameLine(0, 0);
     ImGui::SetCursorScreenPos(ImVec2(pauseBtnX, btnMinY));
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.0f,0.75f,1.0f,0.15f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.0f,0.75f,1.0f,0.30f));
-    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(0.0f,0.75f,1.0f,0.50f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.accentPrimary, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.accentPrimary, 0.30f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         ToImVec4(sk.colors.linePrimary));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
-    if (ImGui::Button("##dlpause", ImVec2(iconBtnW, btnH))) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
+    if (ImGui::Button("##dlpause", ImVec2(iconBtnW, iconBtnH))) {
         if (downloader_) { if (isPaused) downloader_->resume(); else downloader_->pause(); }
     }
     { // 手绘暂停/播放图标
@@ -1419,43 +1479,45 @@ void Controller::renderDownloadProgress(float btnH,
         float cx = (ib.x+ie.x)*0.5f, cy = (ib.y+ie.y)*0.5f, r = 5.0f;
         if (isPaused)
             dl->AddTriangleFilled(ImVec2(cx-r*0.5f,cy-r), ImVec2(cx-r*0.5f,cy+r),
-                                  ImVec2(cx+r,cy), IM_COL32(0,190,255,220));
+                                  ImVec2(cx+r,cy), ToImU32(sk.colors.accentPrimary));
         else {
-            dl->AddRectFilled(ImVec2(cx-r,cy-r), ImVec2(cx-r*0.3f,cy+r), IM_COL32(0,190,255,220));
-            dl->AddRectFilled(ImVec2(cx+r*0.3f,cy-r), ImVec2(cx+r,cy+r), IM_COL32(0,190,255,220));
+            dl->AddRectFilled(ImVec2(cx-r,cy-r), ImVec2(cx-r*0.3f,cy+r), ToImU32(sk.colors.accentPrimary));
+            dl->AddRectFilled(ImVec2(cx+r*0.3f,cy-r), ImVec2(cx+r,cy+r), ToImU32(sk.colors.accentPrimary));
         }
     }
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
 
     // 取消图标按钮（暂停按钮右侧）
-    ImGui::SameLine(0, 4.0f);
+    ImGui::SameLine(0, playerUi.toolbarGap);
     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(1.0f,0.2f,0.2f,0.15f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(1.0f,0.2f,0.2f,0.30f));
-    ImGui::PushStyleColor(ImGuiCol_Border,         ImVec4(1.0f,0.3f,0.3f,0.50f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  skinAlpha(sk.colors.stateError, 0.15f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,   skinAlpha(sk.colors.stateError, 0.30f));
+    ImGui::PushStyleColor(ImGuiCol_Border,         skinAlpha(sk.colors.stateError, 0.50f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
-    if (ImGui::Button("##dlcancel", ImVec2(iconBtnW, btnH))) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
+    if (ImGui::Button("##dlcancel", ImVec2(iconBtnW, iconBtnH))) {
         if (downloader_) downloader_->cancel();
         isDownloading_ = false;
     }
     { // 手绘 X
         ImVec2 xb = ImGui::GetItemRectMin(), xe = ImGui::GetItemRectMax();
         float xc = (xb.x+xe.x)*0.5f, yc = (xb.y+xe.y)*0.5f, xr = 4.0f;
-        dl->AddLine(ImVec2(xc-xr,yc-xr), ImVec2(xc+xr,yc+xr), IM_COL32(255,80,80,220), 1.5f);
-        dl->AddLine(ImVec2(xc+xr,yc-xr), ImVec2(xc-xr,yc+xr), IM_COL32(255,80,80,220), 1.5f);
+        dl->AddLine(ImVec2(xc-xr,yc-xr), ImVec2(xc+xr,yc+xr), ToImU32(sk.colors.stateError), 1.5f);
+        dl->AddLine(ImVec2(xc+xr,yc-xr), ImVec2(xc-xr,yc+xr), ToImU32(sk.colors.stateError), 1.5f);
     }
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
 
     // 速度/文件大小/ETA 文字信息
     float cancelMaxX = ImGui::GetItemRectMax().x;
-    renderDownloadInfo(btnH, btnMinY, cancelMaxX + 6.0f);
+    renderDownloadInfo(btnH, btnMinY, cancelMaxX + playerUi.downloadInfoGap);
 }
 
 /// 绘制下载速度、文件大小、ETA 文字信息（缩小字号双行排列）
 void Controller::renderDownloadInfo(float btnH, float btnMinY, float infoStartX) {
+    const auto snap = SkinManager::instance().current();
+    const auto& sk = *snap;
     std::string spd, eta, fsize;
     { std::lock_guard<std::mutex> lk(downloadMutex_); spd = downloadSpeed_; eta = downloadEta_; fsize = downloadFileSize_; }
 
@@ -1476,10 +1538,10 @@ void Controller::renderDownloadInfo(float btnH, float btnMinY, float infoStartX)
 
     if (!line1.empty())
         dl->AddText(font, smallSize, ImVec2(infoStartX, infoY),
-                    IM_COL32(0,190,255,180), line1.c_str());
+                    ScaleAlpha(sk.colors.accentPrimary, 0.72f), line1.c_str());
     if (!line2.empty())
         dl->AddText(font, smallSize, ImVec2(infoStartX, infoY + lineH),
-                    IM_COL32(0,190,255,140), line2.c_str());
+                    ScaleAlpha(sk.colors.accentPrimary, 0.56f), line2.c_str());
 }
 
 // ============================================================
@@ -1498,11 +1560,13 @@ void copyToBuffer(char* buf, size_t bufSize, const std::string& src) {
 
 /// 段落标题：浅色小字 + 上下留白
 void settingsSection(const char* label, const SkinSnapshot* snap) {
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    const float topGap = snap ? snap->surfaces.settings.sectionGap : 6.0f;
+    const float bottomGap = snap ? snap->surfaces.settings.sectionLabelGap : 2.0f;
+    ImGui::Dummy(ImVec2(0, topGap));
     if (snap) ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(snap->colors.accentPrimary));
     ImGui::TextUnformatted(label);
     if (snap) ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0, 2.0f));
+    ImGui::Dummy(ImVec2(0, bottomGap));
 }
 
 /// 在已渲染的控件下方画一行小字（说明 / 提示），不影响布局
@@ -1518,8 +1582,8 @@ void settingsHint(const char* text, const SkinSnapshot* snap) {
  * @brief 居中半透明遮罩 + 模态对话框，覆盖播放/字幕/皮肤/网络/录制/日志等所有可调配置
  *
  * 视觉：背景遮罩用 ForegroundDrawList 暗化整个屏幕，对话框自身用 bgPanel 而非
- * bgPanelTransparent（透明度 0.97），确保正文可读。中间用滚动子区域承载所有配置段，
- * 头尾（标题、状态栏）固定在窗口顶部/底部。
+ * bgPanelTransparent（透明度 0.97），确保正文可读。中间采用左侧分区导航和右侧
+ * 当前页面滚动区域，头尾（标题、状态栏）固定在窗口顶部/底部。
  *
  * 控件值变更走「Config::getMutable() 修改 + Config::save() + 必要时同步运行时」三步走，
  * 与 Loop Playback 一致；字符串输��用成员 char 缓冲，编辑完成后才落盘。
@@ -1529,6 +1593,7 @@ void Controller::renderSettingsModal() {
     auto& mgr   = SkinManager::instance();
     auto cur    = mgr.current();
     auto& cfgInst = Config::getInstance();
+    const auto& settingsUi = skSnap->surfaces.settings;
 
     // 进入对话框时把 Config 字符串同步进缓冲（首次或配置外部变化）
     if (!cfgBuffersInitialized_) {
@@ -1543,13 +1608,13 @@ void Controller::renderSettingsModal() {
     }
 
     const ImVec2& ds = ImGui::GetIO().DisplaySize;
-    const float dialogW = std::min(680.0f, ds.x * 0.92f);
-    const float dialogH = std::min(640.0f, ds.y * 0.88f);
+    const float dialogW = std::min(settingsUi.maxWidth, ds.x * settingsUi.widthRatio);
+    const float dialogH = std::min(settingsUi.maxHeight, ds.y * settingsUi.heightRatio);
 
     // 半透明遮罩：放在背景 DrawList 上（视频之上、所有 ImGui 窗口之下），
     // 这样只暗化视频，不会把设置面板也罩黑。
     ImGui::GetBackgroundDrawList()->AddRectFilled(
-        ImVec2(0,0), ds, IM_COL32(0,0,0,150));
+        ImVec2(0,0), ds, ScaleAlpha(skSnap->colors.bgVoid, settingsUi.overlayAlpha));
 
     ImGui::SetNextWindowPos(ImVec2(ds.x*0.5f, ds.y*0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(dialogW, dialogH), ImGuiCond_Always);
@@ -1561,16 +1626,16 @@ void Controller::renderSettingsModal() {
     settingsModalWasOpen_ = true;
 
     // 对话框风格：相对全局更宽松的 padding，让内部控件不局促
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 18.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(settingsUi.paddingX, settingsUi.paddingY));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, skSnap ? skSnap->metrics.radius.panel : 6.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 8.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(settingsUi.itemGapX, settingsUi.itemGapY));
 
     // 关键：用 bgPanel（不透明）+ 自��义 alpha=0.97，避免 bgPanelTransparent 的 0.88 让文字发灰
     if (skSnap) {
         ImVec4 dialogBg = ToImVec4(skSnap->colors.bgPanel);
-        dialogBg.w = 0.97f;
+        dialogBg.w = settingsUi.panelAlpha;
         ImGui::PushStyleColor(ImGuiCol_WindowBg, dialogBg);
         ImGui::PushStyleColor(ImGuiCol_Border,   ToImVec4(skSnap->colors.accentPrimary));
         ImGui::PushStyleColor(ImGuiCol_Text,     ToImVec4(skSnap->colors.textPrimary));
@@ -1597,24 +1662,24 @@ void Controller::renderSettingsModal() {
         ImVec2 titlePos = ImGui::GetCursorScreenPos();
         ImGui::TextUnformatted("SETTINGS");
         if (skSnap) {
-            float ty = titlePos.y + ImGui::GetTextLineHeight() + 4.0f;
+            float ty = titlePos.y + ImGui::GetTextLineHeight() + settingsUi.titleRailGap;
             const auto& g = skSnap->gradients.panelHeader;
             ImU32 c0 = g.stops.size() > 0 ? (ImU32)g.stops[0].imu32 & 0x00FFFFFFu : 0;
             ImU32 c1 = g.stops.size() > 1 ? (ImU32)g.stops[1].imu32 : ToImU32(skSnap->colors.accentPrimary);
             ImU32 c2 = g.stops.size() > 2 ? (ImU32)g.stops[2].imu32 : ToImU32(skSnap->colors.accentSecondary);
             ImU32 c3 = g.stops.size() > 3 ? (ImU32)g.stops.back().imu32 & 0x00FFFFFFu : 0;
             dl->AddRectFilledMultiColor(
-                ImVec2(titlePos.x, ty), ImVec2(titlePos.x + contentW, ty + 2.0f),
+                ImVec2(titlePos.x, ty), ImVec2(titlePos.x + contentW, ty + settingsUi.titleRailHeight),
                 c0, c1, c2, c3);
         }
         ImGui::PopStyleColor();
 
         // 关闭按钮（X）右对齐
-        const float closeBtnW = 28.0f;
+        const float closeBtnW = settingsUi.closeButtonW;
         ImGui::SameLine();
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + contentW - closeBtnW
                              - ImGui::CalcTextSize("SETTINGS").x - ImGui::GetStyle().ItemSpacing.x);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(settingsUi.closePaddingX, settingsUi.closePaddingY));
         if (ImGui::Button("X##close_settings", ImVec2(closeBtnW, 0))) {
             showSettingsMenu_ = false;
             settingsModalWasOpen_ = false;
@@ -1626,17 +1691,49 @@ void Controller::renderSettingsModal() {
     if (skSnap) ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(skSnap->colors.textMuted));
     ImGui::TextUnformatted("Live tweaks. Persisted to fluxplayer.ini on change.");
     if (skSnap) ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0, 4.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionLabelGap * 2.0f));
     ImGui::Separator();
 
-    // ── 主滚动区域：占满标题与状态栏之间的剩余空间 ──
-    const float footerReserve = 80.0f;  // 状态栏 + 提示行预留
-    ImGui::BeginChild("##SettingsScroll", ImVec2(contentW, ImGui::GetContentRegionAvail().y - footerReserve),
-                      false, ImGuiWindowFlags_NoBackground);
+    // ── 主体区域：左侧稳定导航，右侧仅滚动当前配置分区 ──
+    const float footerReserve = settingsUi.footerReserve;  // 状态栏 + 提示行预留
+    const float bodyH = std::max(120.0f, ImGui::GetContentRegionAvail().y - footerReserve);
+    const float navW = std::min(settingsUi.navWidth, contentW * 0.30f);
+
+    ImGui::BeginChild("##SettingsNavigation", ImVec2(navW, bodyH), false, ImGuiWindowFlags_NoBackground);
+    auto pageButton = [&](const char* label, SettingsPage page) {
+        const bool selected = settingsPage_ == page;
+        const float buttonW = ImGui::GetContentRegionAvail().x;
+        ImGui::PushStyleColor(ImGuiCol_Button, selected
+            ? skinAlpha(skSnap->colors.accentPrimary, 0.16f)
+            : ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, skinAlpha(skSnap->colors.accentPrimary, 0.12f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, skinAlpha(skSnap->colors.accentPrimary, 0.24f));
+        ImGui::PushStyleColor(ImGuiCol_Text, selected
+            ? ToImVec4(skSnap->colors.accentPrimary)
+            : ToImVec4(skSnap->colors.textSecondary));
+        ImGui::PushStyleColor(ImGuiCol_Border, selected
+            ? ToImVec4(skSnap->colors.linePrimary)
+            : ToImVec4(skSnap->colors.lineSubtle));
+        if (ImGui::Button(label, ImVec2(buttonW, settingsUi.navButtonH))) {
+            settingsPage_ = page;
+        }
+        ImGui::PopStyleColor(5);
+        ImGui::Dummy(ImVec2(0, settingsUi.navButtonGap));
+    };
+    pageButton("GENERAL", SettingsPage::General);
+    pageButton("CAPTURE", SettingsPage::Capture);
+    pageButton("LOGGING", SettingsPage::Logging);
+    pageButton("APPEARANCE", SettingsPage::Appearance);
+    ImGui::EndChild();
+
+    ImGui::SameLine(0, settingsUi.navGap);
+    ImGui::BeginChild("##SettingsContent", ImVec2(0, bodyH), false, ImGuiWindowFlags_NoBackground);
 
     auto& s = cfgInst.getMutable();
+    const float pageContentW = ImGui::GetContentRegionAvail().x;
 
     // ─────── PLAYBACK ───────
+    if (settingsPage_ == SettingsPage::General) {
     settingsSection("PLAYBACK", skSnap.get());
     {
         bool loopEnabled = player_.isLoopPlayback();
@@ -1666,7 +1763,7 @@ void Controller::renderSettingsModal() {
 
         // 音量：0..1
         float vol = player_.getVolume();
-        ImGui::SetNextItemWidth(contentW * 0.55f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.mediumFieldRatio);
         if (ImGui::SliderFloat("Volume", &vol, 0.0f, 1.0f, "%.2f")) {
             player_.setVolume(vol);
         }
@@ -1682,7 +1779,7 @@ void Controller::renderSettingsModal() {
         for (int i = 0; i < 6; ++i) {
             if (std::abs(s.playbackSpeed - kSpeedVals[i]) < 0.01) { curIdx = i; break; }
         }
-        ImGui::SetNextItemWidth(contentW * 0.55f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.mediumFieldRatio);
         if (ImGui::Combo("Default Playback Speed", &curIdx, kSpeedLabels, IM_ARRAYSIZE(kSpeedLabels))) {
             s.playbackSpeed = kSpeedVals[curIdx];
             player_.setPlaybackSpeed(kSpeedVals[curIdx]);
@@ -1690,14 +1787,14 @@ void Controller::renderSettingsModal() {
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
 
     // ─────── SUBTITLES ───────
     settingsSection("SUBTITLES", skSnap.get());
     {
         float scale = s.subtitleFontScale;
-        ImGui::SetNextItemWidth(contentW * 0.55f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.mediumFieldRatio);
         if (ImGui::SliderFloat("Font Scale", &scale, 1.0f, 2.5f, "%.2fx")) {
             s.subtitleFontScale = scale;
             subtitleFontScale_ = scale;
@@ -1706,7 +1803,7 @@ void Controller::renderSettingsModal() {
             cfgInst.save();
         }
 
-        ImGui::SetNextItemWidth(contentW * 0.75f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.wideFieldRatio);
         ImGui::InputText("Custom Font Path", cfgSubtitleFontBuf_, sizeof(cfgSubtitleFontBuf_));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             s.subtitleFontPath = cfgSubtitleFontBuf_;
@@ -1716,7 +1813,7 @@ void Controller::renderSettingsModal() {
                      "Takes effect on next launch (font atlas is built once).", skSnap.get());
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
 
     // ─────── NETWORK / PROXY ───────
@@ -1728,14 +1825,14 @@ void Controller::renderSettingsModal() {
             cfgInst.save();
         }
 
-        ImGui::SetNextItemWidth(contentW * 0.75f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.wideFieldRatio);
         ImGui::InputText("HTTP Proxy", cfgHttpProxyBuf_, sizeof(cfgHttpProxyBuf_));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             s.httpProxy = cfgHttpProxyBuf_;
             cfgInst.save();
         }
 
-        ImGui::SetNextItemWidth(contentW * 0.75f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.wideFieldRatio);
         ImGui::InputText("SOCKS5 Proxy", cfgSocksProxyBuf_, sizeof(cfgSocksProxyBuf_));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             s.socksProxy = cfgSocksProxyBuf_;
@@ -1744,13 +1841,15 @@ void Controller::renderSettingsModal() {
         settingsHint("Applied on next stream open / yt-dlp invocation.", skSnap.get());
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
+    }
 
     // ─────── RECORDING ───────
+    if (settingsPage_ == SettingsPage::Capture) {
     settingsSection("RECORDING", skSnap.get());
     {
-        ImGui::SetNextItemWidth(contentW * 0.62f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.pathFieldRatio);
         ImGui::InputText("Record Dir", cfgRecordDirBuf_, sizeof(cfgRecordDirBuf_));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             s.recordDir = cfgRecordDirBuf_;
@@ -1769,20 +1868,20 @@ void Controller::renderSettingsModal() {
         const char* kQual[] = {"low", "medium", "high", "original"};
         int qIdx = 3;
         for (int i = 0; i < 4; ++i) if (s.recordQuality == kQual[i]) { qIdx = i; break; }
-        ImGui::SetNextItemWidth(contentW * 0.55f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.mediumFieldRatio);
         if (ImGui::Combo("Record Quality", &qIdx, kQual, IM_ARRAYSIZE(kQual))) {
             s.recordQuality = kQual[qIdx];
             cfgInst.save();
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
 
     // ─────── SCREENSHOT ───────
     settingsSection("SCREENSHOT", skSnap.get());
     {
-        ImGui::SetNextItemWidth(contentW * 0.62f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.pathFieldRatio);
         ImGui::InputText("Screenshot Dir", cfgScreenshotDirBuf_, sizeof(cfgScreenshotDirBuf_));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             s.screenshotDir = cfgScreenshotDirBuf_;
@@ -1800,23 +1899,25 @@ void Controller::renderSettingsModal() {
 
         const char* kFmt[] = {"png", "jpg"};
         int fIdx = (s.screenshotFormat == "jpg") ? 1 : 0;
-        ImGui::SetNextItemWidth(contentW * 0.30f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.compactFieldRatio);
         if (ImGui::Combo("Format", &fIdx, kFmt, IM_ARRAYSIZE(kFmt))) {
             s.screenshotFormat = kFmt[fIdx];
             cfgInst.save();
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
+    }
 
     // ─────── LOGGING ───────
+    if (settingsPage_ == SettingsPage::Logging) {
     settingsSection("LOGGING", skSnap.get());
     {
         const char* kLevels[] = {"DEBUG", "INFO", "WARN", "ERROR"};
         int lvIdx = 1;
         for (int i = 0; i < 4; ++i) if (s.logLevel == kLevels[i]) { lvIdx = i; break; }
-        ImGui::SetNextItemWidth(contentW * 0.40f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.logLevelFieldRatio);
         if (ImGui::Combo("Log Level", &lvIdx, kLevels, IM_ARRAYSIZE(kLevels))) {
             s.logLevel = kLevels[lvIdx];
             // 同步运行时 Logger 级别
@@ -1842,7 +1943,7 @@ void Controller::renderSettingsModal() {
             cfgInst.save();
         }
 
-        ImGui::SetNextItemWidth(contentW * 0.62f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.pathFieldRatio);
         ImGui::InputText("Log File Path", cfgLogFilePathBuf_, sizeof(cfgLogFilePathBuf_));
         if (ImGui::IsItemDeactivatedAfterEdit()) {
             s.logFilePath = cfgLogFilePathBuf_;
@@ -1851,7 +1952,7 @@ void Controller::renderSettingsModal() {
         settingsHint("Empty = default app data dir. Takes effect on next launch.", skSnap.get());
 
         int port = s.tcpLogPort;
-        ImGui::SetNextItemWidth(contentW * 0.30f);
+        ImGui::SetNextItemWidth(pageContentW * settingsUi.compactFieldRatio);
         if (ImGui::InputInt("TCP Log Port", &port, 0, 0)) {
             if (port < 0) port = 0;
             if (port > 65535) port = 65535;
@@ -1862,10 +1963,12 @@ void Controller::renderSettingsModal() {
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
+    }
 
     // ─────── PANELS ───────
+    if (settingsPage_ == SettingsPage::Capture) {
     settingsSection("PANELS", skSnap.get());
     {
         if (ImGui::Checkbox("Show Media Info Panel", &showMediaInfo_)) {
@@ -1878,13 +1981,15 @@ void Controller::renderSettingsModal() {
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
     ImGui::Separator();
+    }
 
     // ─────── APPEARANCE / SKINS ───────
+    if (settingsPage_ == SettingsPage::Appearance) {
     settingsSection("APPEARANCE / SKINS", skSnap.get());
     settingsHint("Change the shell without interrupting playback.", skSnap.get());
-    ImGui::Dummy(ImVec2(0, 4.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionLabelGap * 2.0f));
 
     const char* sourceLabel =
         !cur ? "BUILT-IN" :
@@ -1893,9 +1998,9 @@ void Controller::renderSettingsModal() {
 
     // 当前皮肤卡片
     {
-        const float cardH = 64.0f;
+        const float cardH = settingsUi.activeCardH;
         ImVec2 cardMin = ImGui::GetCursorScreenPos();
-        ImVec2 cardMax = ImVec2(cardMin.x + contentW, cardMin.y + cardH);
+        ImVec2 cardMax = ImVec2(cardMin.x + pageContentW, cardMin.y + cardH);
         if (skSnap) {
             dl->AddRectFilled(cardMin, cardMax, ToImU32(skSnap->colors.bgPanelRaised),
                               skSnap->metrics.radius.panel);
@@ -1907,7 +2012,7 @@ void Controller::renderSettingsModal() {
             dl->AddRect(cardMin, cardMax, IM_COL32(0,180,255,180), 4.0f, 0, 1.0f);
         }
 
-        const float pad = 12.0f;
+        const float pad = settingsUi.activeCardPadding;
         ImVec2 textPos(cardMin.x + pad, cardMin.y + pad);
         if (cur) {
             ImGui::SetCursorScreenPos(textPos);
@@ -1915,7 +2020,7 @@ void Controller::renderSettingsModal() {
             ImGui::Text("%s", cur->displayName.c_str());
             if (skSnap) ImGui::PopStyleColor();
 
-            ImGui::SetCursorScreenPos(ImVec2(textPos.x, textPos.y + ImGui::GetTextLineHeight() + 2.0f));
+            ImGui::SetCursorScreenPos(ImVec2(textPos.x, textPos.y + ImGui::GetTextLineHeight() + settingsUi.activeCardTextGap));
             if (skSnap) ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(skSnap->colors.textMuted));
             ImGui::Text("v%s  /  %s  /  gen %llu",
                         cur->version.c_str(), sourceLabel,
@@ -1928,7 +2033,8 @@ void Controller::renderSettingsModal() {
 
         // 右侧 APPLIED chip
         if (cur) {
-            const float chipW = 76.0f, chipH = 20.0f;
+            const float chipW = skSnap->metrics.size.chipBtnW;
+            const float chipH = skSnap->metrics.size.chipBtnH;
             ImVec2 chipMin(cardMax.x - pad - chipW, cardMin.y + pad);
             ImVec2 chipMax(chipMin.x + chipW, chipMin.y + chipH);
             ImU32 chipBg = skSnap ? ScaleAlpha(skSnap->colors.accentPrimary, 0.18f)
@@ -1946,12 +2052,12 @@ void Controller::renderSettingsModal() {
                         chipBorder, tx);
         }
 
-        ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y + 10.0f));
+        ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y + settingsUi.activeCardAfterGap));
     }
 
     // 皮肤选择 combo
     {
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 8.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(settingsUi.comboPaddingX, settingsUi.comboPaddingY));
         static std::vector<SkinCandidate> cand;
         static double lastListAt = 0.0;
         double now = ImGui::GetTime();
@@ -1960,7 +2066,7 @@ void Controller::renderSettingsModal() {
             lastListAt = now;
         }
         std::string preview = cur ? cur->id : "";
-        ImGui::SetNextItemWidth(contentW);
+        ImGui::SetNextItemWidth(pageContentW);
         if (ImGui::BeginCombo("##skin_combo_modal", preview.c_str())) {
             for (const auto& c : cand) {
                 bool selected = (cur && c.id == cur->id);
@@ -1980,7 +2086,7 @@ void Controller::renderSettingsModal() {
         ImGui::PopStyleVar();
     }
 
-    ImGui::Dummy(ImVec2(0, 4.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionLabelGap * 2.0f));
 
     {
         bool hot = mgr.isHotReloadEnabled();
@@ -1992,13 +2098,13 @@ void Controller::renderSettingsModal() {
         settingsHint("Watch the active package and apply valid edits between frames.", skSnap.get());
     }
 
-    ImGui::Dummy(ImVec2(0, 8.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.itemGapY));
 
     // 三栏按钮
     {
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 10.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(settingsUi.actionPaddingX, settingsUi.actionPaddingY));
         const float gap = ImGui::GetStyle().ItemSpacing.x;
-        const float btnW = (contentW - gap * 2.0f) / 3.0f;
+        const float btnW = (pageContentW - gap * 2.0f) / 3.0f;
         const ImVec2 btnSize(btnW, 0);
 
         if (ImGui::Button("RELOAD NOW##modal", btnSize)) {
@@ -2019,12 +2125,13 @@ void Controller::renderSettingsModal() {
         ImGui::PopStyleVar();
     }
 
-    ImGui::Dummy(ImVec2(0, 6.0f));
+    ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
+    }
     ImGui::EndChild();
 
     // ── 底部状态栏（固定，不随滚动） ──
     {
-        const float barH = 32.0f;
+        const float barH = settingsUi.statusBarH;
         ImVec2 barMin = ImGui::GetCursorScreenPos();
         ImVec2 barMax = ImVec2(barMin.x + contentW, barMin.y + barH);
 
@@ -2048,7 +2155,8 @@ void Controller::renderSettingsModal() {
                           skSnap ? skSnap->metrics.radius.popup : 3.0f);
         dl->AddRect(barMin, barMax, border,
                     skSnap ? skSnap->metrics.radius.popup : 3.0f, 0, 1.0f);
-        dl->AddCircleFilled(ImVec2(barMin.x + 12.0f, barMin.y + barH * 0.5f), 4.0f, dotCol, 12);
+        dl->AddCircleFilled(ImVec2(barMin.x + settingsUi.statusDotInsetX, barMin.y + barH * 0.5f),
+                            settingsUi.statusDotRadius, dotCol, 12);
 
         std::string statusText;
         if (isErr) {
@@ -2061,7 +2169,7 @@ void Controller::renderSettingsModal() {
                          " / GEN " + std::to_string(cur ? cur->generation : 0u);
         }
         ImVec2 ts = ImGui::CalcTextSize(statusText.c_str());
-        dl->AddText(ImVec2(barMin.x + 24.0f, barMin.y + (barH - ts.y) * 0.5f),
+        dl->AddText(ImVec2(barMin.x + settingsUi.statusTextInsetX, barMin.y + (barH - ts.y) * 0.5f),
                     dotCol, statusText.c_str());
 
         ImGui::Dummy(ImVec2(contentW, barH));

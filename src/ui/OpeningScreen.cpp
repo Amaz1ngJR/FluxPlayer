@@ -57,6 +57,9 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
     ImGui::NewFrame();
 
     auto snap = SkinManager::instance().current();
+    if (!snap) return;
+    const auto& sk = *snap;
+    const auto& opening = sk.surfaces.opening;
     ImGuiIO& io = ImGui::GetIO();
     float W = io.DisplaySize.x;
     float H = io.DisplaySize.y;
@@ -64,34 +67,32 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
 
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
 
-    bg->AddRectFilled(ImVec2(0,0), ImVec2(W, H), IM_COL32(0,0,0,200));
+    bg->AddRectFilled(ImVec2(0,0), ImVec2(W, H), ScaleAlpha(sk.colors.bgVoid, opening.overlayAlpha));
 
-    const float cardW = std::min(560.0f, W * 0.7f);
-    const float cardH = 200.0f;
+    const float cardW = std::min(sk.metrics.size.openingPanelW, W * opening.maxWidthRatio);
+    const float cardH = sk.metrics.size.openingPanelH;
     ImVec2 cMin((W - cardW)*0.5f, (H - cardH)*0.5f);
     ImVec2 cMax(cMin.x + cardW, cMin.y + cardH);
 
-    if (snap) {
-        ImVec4 fill = ToImVec4(snap->colors.bgPanel); fill.w = 0.96f;
+    {
+        ImVec4 fill = ToImVec4(sk.colors.bgPanel); fill.w = sk.metrics.opacity.popup;
         bg->AddRectFilled(cMin, cMax, ImGui::ColorConvertFloat4ToU32(fill),
-                          snap->metrics.radius.panel);
-        DrawGlowRect(bg, cMin, cMax, snap->colors.accentPrimary, *snap,
-                     snap->metrics.radius.panel);
-        DrawCornerCuts(bg, cMin, cMax, snap->colors.accentPrimary, *snap, 18.0f, 1.5f);
-    } else {
-        bg->AddRectFilled(cMin, cMax, IM_COL32(8,16,38,245), 6.0f);
-        bg->AddRect(cMin, cMax, IM_COL32(0,200,255,200), 6.0f, 0, 1.5f);
+                          sk.metrics.radius.panel);
+        DrawGlowRect(bg, cMin, cMax, sk.colors.accentPrimary, sk,
+                     sk.metrics.radius.panel);
+        DrawCornerCuts(bg, cMin, cMax, sk.colors.accentPrimary, sk,
+                       opening.cornerLength, opening.cornerThickness);
     }
 
     {
         const char* title = "OPENING";
         ImFont* font = ui_.titleFont() ? ui_.titleFont() : ImGui::GetFont();
-        float fs = font == ui_.titleFont() ? 28.0f : font->FontSize;
+        float fs = font == ui_.titleFont() ? opening.titlePx : font->FontSize;
         ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, title);
-        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + 22.0f);
-        ImU32 col = snap ? ToImU32(snap->colors.accentPrimary) : IM_COL32(0,220,255,255);
-        if (snap && snap->decoration.glow) {
-            DrawTextGlow(bg, font, fs, pos, snap->colors.accentPrimary, title, *snap);
+        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + opening.titleOffsetY);
+        ImU32 col = ToImU32(sk.colors.accentPrimary);
+        if (sk.decoration.glow) {
+            DrawTextGlow(bg, font, fs, pos, sk.colors.accentPrimary, title, sk);
         }
         bg->AddText(font, fs, pos, col, title);
     }
@@ -99,8 +100,8 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
     {
         ImFont* font = ImGui::GetFont();
         ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, phase.c_str());
-        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + 78.0f);
-        ImU32 col = snap ? ToImU32(snap->colors.textPrimary) : IM_COL32(220,235,255,255);
+        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + opening.phaseOffsetY);
+        ImU32 col = ToImU32(sk.colors.textPrimary);
         bg->AddText(pos, col, phase.c_str());
     }
 
@@ -109,21 +110,20 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
         if (shown.size() > 64) shown = "..." + shown.substr(shown.size() - 60);
         ImFont* font = ImGui::GetFont();
         ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, shown.c_str());
-        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + 108.0f);
-        ImU32 col = snap ? ToImU32(snap->colors.textMuted) : IM_COL32(150,180,210,200);
+        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + opening.sourceOffsetY);
+        ImU32 col = ToImU32(sk.colors.textMuted);
         bg->AddText(pos, col, shown.c_str());
     }
 
     {
-        const float dy = cMin.y + cardH - 36.0f;
+        const float dy = cMin.y + cardH - opening.dotsBottomOffset;
         const float cx = cMin.x + cardW * 0.5f;
-        const float gap = 14.0f;
+        const float gap = opening.dotsGap;
         for (int i = 0; i < 3; ++i) {
             float phi = t * 2.0f - i * 0.4f;
             float a = 0.35f + 0.55f * (0.5f + 0.5f * std::sin(phi));
-            ImU32 c = snap ? ScaleAlpha(snap->colors.accentPrimary, a)
-                           : IM_COL32(0,220,255,(int)(a*255));
-            bg->AddCircleFilled(ImVec2(cx + (i-1)*gap, dy), 4.0f, c, 16);
+            ImU32 c = ScaleAlpha(sk.colors.accentPrimary, a);
+            bg->AddCircleFilled(ImVec2(cx + (i-1)*gap, dy), opening.dotRadius, c, 16);
         }
     }
 
@@ -131,7 +131,7 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
     int fbW, fbH;
     glfwGetFramebufferSize(w->getGLFWWindow(), &fbW, &fbH);
     glViewport(0, 0, fbW, fbH);
-    glClearColor(0.02f, 0.03f, 0.05f, 1.0f);
+    glClearColor(sk.colors.bgVoid.r, sk.colors.bgVoid.g, sk.colors.bgVoid.b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(w->getGLFWWindow());
@@ -188,9 +188,11 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
         while (extractDone.load(std::memory_order_acquire) == 0) {
             glfwPollEvents();
             if (glfwWindowShouldClose(w->getGLFWWindow())) break;
-            // 每 100ms 重绘一次 splash 让 dots 动画有动效
+            // 按当前皮肤设定的间隔重绘 splash，让 dots 动画保持连续
             auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDraw).count() > 100) {
+            auto snap = SkinManager::instance().current();
+            float redrawMs = snap ? snap->surfaces.opening.redrawIntervalMs : 100.0f;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDraw).count() > redrawMs) {
                 renderSplashFrame(mediaPath, "RESOLVING SOURCE...");
                 lastDraw = now;
             }

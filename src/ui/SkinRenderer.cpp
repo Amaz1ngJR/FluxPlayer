@@ -43,7 +43,7 @@ void ApplyImGuiStyle(const SkinSnapshot& s) {
     st.TabRounding    = s.metrics.radius.button;
 
     // 间距：来自 metrics.spacing
-    // 注意：dockPaddingX/Y 是 dock 容器自身的内边距，由 Controller 在 dock window
+    // 注意：surfaces.player.dockPaddingX/Y 是 dock 容器自身的内边距，由 Controller 在 dock window
     // 自己 PushStyleVar(WindowPadding) 时消费，不应该影响全局 FramePadding。
     // FramePadding（按钮内文字到边框的距离）保持 ImGui 默认 (4,3)，让小尺寸图标按钮
     // 仍能容纳文字；如果未来需要由皮肤控制，应在 schema 里新增独立字段。

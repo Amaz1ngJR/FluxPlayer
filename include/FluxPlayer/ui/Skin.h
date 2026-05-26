@@ -104,12 +104,9 @@ struct SkinRadius {
  * @brief 间距度量
  */
 struct SkinSpacing {
-    float screenMargin = 18.0f;
-    float dockPaddingX = 14.0f;
-    float dockPaddingY = 8.0f;
     float panelPadding = 18.0f;
     float controlGap = 8.0f;
-    float rowGap = 8.0f;
+    float rowGap = 4.0f;
 };
 
 /**
@@ -119,30 +116,27 @@ struct SkinSpacing {
  * 在 schema 中是 [w,h] 双元素数组，这里展开为两个 float 字段以便直接构造 ImVec2。
  */
 struct SkinSize {
-    float bottomDockHeight = 82.0f;
-    float topRailHeight = 32.0f;
-    float hudPanelWidth = 340.0f;
-    float progressHotHeight = 18.0f;
-    float progressVisualHeight = 10.0f;
-    float mainPlayBtnW = 84.0f;
-    float mainPlayBtnH = 30.0f;
-    float iconBtnW = 30.0f;
-    float iconBtnH = 30.0f;
-    float chipBtnW = 64.0f;
-    float chipBtnH = 30.0f;
-    float homeSourceCardW = 570.0f;
-    float homeSourceCardH = 200.0f;
-    float homeCoreDiameter = 244.0f;
+    float bottomDockHeight = 64.0f;
+    float progressHotHeight = 16.0f;
+    float progressVisualHeight = 16.0f;
+    float mainPlayBtnW = 80.0f;
+    float mainPlayBtnH = 22.0f;
+    float iconBtnW = 24.0f;
+    float iconBtnH = 22.0f;
+    float chipBtnW = 76.0f;
+    float chipBtnH = 20.0f;
+    float homeSourceCardW = 520.0f;
+    float homeSourceCardH = 400.0f;
     float openingPanelW = 560.0f;
-    float openingPanelH = 398.0f;
+    float openingPanelH = 200.0f;
 };
 
 /**
  * @brief 透明度度量
  */
 struct SkinOpacity {
-    float dock = 0.78f;
-    float hudPanel = 0.88f;
+    float dock = 0.92f;
+    float hudPanel = 0.92f;
     float popup = 0.96f;
     float subtleDecoration = 0.22f;
     float disabled = 0.35f;
@@ -159,16 +153,176 @@ struct SkinMetrics {
 };
 
 /**
+ * @brief 各可见界面的局部布局参数
+ *
+ * 与 metrics 不同，这些值只在对应 surface 的渲染函数内消费，用来完整保存
+ * 当前默认 UI 的按钮尺寸、对齐和容器间距。更换 skin.json 时，这些界面几何
+ * 与语义颜色在同一帧一并替换。
+ */
+struct SkinHomeSurface {
+    float cardPaddingX = 32.0f;
+    float cardPaddingY = 28.0f;
+    float panelTopRailHeight = 4.0f;
+    float panelBottomRailHeight = 3.0f;
+    float innerBorderInset = 6.0f;
+    float cornerLength = 24.0f;
+    float cornerThickness = 2.5f;
+    float titleToActionGap = 18.0f;
+    float localButtonW = 320.0f;
+    float localButtonH = 48.0f;
+    float sectionGap = 12.0f;
+    float separatorWidthRatio = 0.60f;
+    float separatorOffsetY = 4.0f;
+    float separatorAfterGap = 5.0f;
+    float urlLabelGap = 4.0f;
+    float urlButtonW = 90.0f;
+    float urlRowGap = 8.0f;
+    float urlFramePaddingX = 14.0f;
+    float urlFramePaddingY = 10.0f;
+    float errorGap = 8.0f;
+    float footerBottomGap = 4.0f;
+    float loginModalW = 440.0f;
+    float loginButtonH = 30.0f;
+    float loginStoredButtonW = 140.0f;
+    float loginRetryButtonW = 110.0f;
+    float loginOpenButtonW = 120.0f;
+    float loginChoiceButtonW = 150.0f;
+    float gridHorizonRatio = 0.42f;
+    float gridRows = 16.0f;
+    float gridColumns = 18.0f;
+    float scanlineStep = 3.0f;
+    float screenTopRailHeight = 3.0f;
+    float screenBottomRailHeight = 2.0f;
+    float particleCount = 60.0f;
+    float particleRadius = 1.2f;
+};
+
+struct SkinOpeningSurface {
+    float maxWidthRatio = 0.70f;
+    float overlayAlpha = 0.78f;
+    float titlePx = 28.0f;
+    float titleOffsetY = 22.0f;
+    float phaseOffsetY = 78.0f;
+    float sourceOffsetY = 108.0f;
+    float dotsBottomOffset = 36.0f;
+    float dotsGap = 14.0f;
+    float dotRadius = 4.0f;
+    float cornerLength = 18.0f;
+    float cornerThickness = 1.5f;
+    float redrawIntervalMs = 100.0f;
+};
+
+struct SkinPlayerSurface {
+    float dockPaddingX = 8.0f;
+    float dockPaddingY = 4.0f;
+    float dockRailHeight = 2.0f;
+    float dockRowGap = 4.0f;
+    float progressHeadRadius = 5.0f;
+    float progressGlowRadius = 8.0f;
+    float progressOuterGlowRadius = 12.0f;
+    float progressTooltipGap = 5.0f;
+    float stopButtonW = 60.0f;
+    float recordIdleButtonW = 60.0f;
+    float recordActiveButtonW = 70.0f;
+    float toolButtonW = 60.0f;
+    float volumeSliderW = 120.0f;
+    float volumeButtonExtraW = 4.0f;
+    float toolbarGap = 4.0f;
+    float toolbarRightMargin = 12.0f;
+    float downloadButtonW = 72.0f;
+    float downloadBarW = 120.0f;
+    float downloadBarGap = 8.0f;
+    float downloadInfoGap = 6.0f;
+};
+
+struct SkinHudSurface {
+    float margin = 10.0f;
+    float mediaInfoW = 450.0f;
+    float mediaInfoH = 250.0f;
+    float mediaInfoWebH = 320.0f;
+    float statsW = 240.0f;
+    float statsH = 180.0f;
+};
+
+struct SkinSettingsSurface {
+    float maxWidth = 920.0f;
+    float maxHeight = 640.0f;
+    float widthRatio = 0.92f;
+    float heightRatio = 0.88f;
+    float overlayAlpha = 0.59f;
+    float panelAlpha = 0.97f;
+    float paddingX = 24.0f;
+    float paddingY = 18.0f;
+    float itemGapX = 10.0f;
+    float itemGapY = 8.0f;
+    float sectionGap = 6.0f;
+    float sectionLabelGap = 2.0f;
+    float footerReserve = 80.0f;
+    float titleRailGap = 4.0f;
+    float titleRailHeight = 2.0f;
+    float navWidth = 136.0f;
+    float navGap = 16.0f;
+    float navButtonH = 34.0f;
+    float navButtonGap = 6.0f;
+    float closeButtonW = 28.0f;
+    float closePaddingX = 4.0f;
+    float closePaddingY = 2.0f;
+    float comboPaddingX = 10.0f;
+    float comboPaddingY = 8.0f;
+    float actionPaddingX = 12.0f;
+    float actionPaddingY = 10.0f;
+    float mediumFieldRatio = 0.55f;
+    float wideFieldRatio = 0.75f;
+    float pathFieldRatio = 0.62f;
+    float compactFieldRatio = 0.30f;
+    float logLevelFieldRatio = 0.40f;
+    float activeCardH = 64.0f;
+    float activeCardPadding = 12.0f;
+    float activeCardTextGap = 2.0f;
+    float activeCardAfterGap = 10.0f;
+    float statusBarH = 32.0f;
+    float statusDotInsetX = 12.0f;
+    float statusDotRadius = 4.0f;
+    float statusTextInsetX = 24.0f;
+};
+
+struct SkinPopupSurface {
+    float rounding = 6.0f;
+    float speedOffsetY = 172.0f;
+    float speedOptionW = 80.0f;
+    float qualityRowH = 24.0f;
+    float qualityPaddingH = 8.0f;
+    float qualityExtraW = 20.0f;
+    float offsetY = 4.0f;
+};
+
+struct SkinSubtitleSurface {
+    float bottomMarginWithUi = 80.0f;
+    float bottomMarginNoUi = 24.0f;
+    float widthRatio = 0.85f;
+    float backgroundAlpha = 0.55f;
+};
+
+struct SkinSurfaces {
+    SkinHomeSurface home;
+    SkinOpeningSurface opening;
+    SkinPlayerSurface player;
+    SkinHudSurface hud;
+    SkinSettingsSurface settings;
+    SkinPopupSurface popup;
+    SkinSubtitleSurface subtitle;
+};
+
+/**
  * @brief 时序参数（motion）
  *
- * autoHideDelaySeconds / volumeCloseDelaySeconds 用于 UI 自动隐藏与音量延迟收起；
+ * autoHideDelaySeconds 用于底部 dock 自动隐藏；
  * scanlineSpeed / pulseSpeed 控制装饰动画速率；
  * hoverGlowMs 控制悬停辉光淡入；
  * reloadDebounceMs 控制热加载防抖窗口。
  */
 struct SkinMotion {
     float autoHideDelaySeconds = 3.0f;
-    float volumeCloseDelaySeconds = 0.4f;
     float scanlineSpeed = 30.0f;
     float pulseSpeed = 2.6f;
     float hoverGlowMs = 120.0f;
@@ -196,14 +350,13 @@ struct SkinTypography {
  * @brief 装饰开关（decoration）
  *
  * 每个布尔位代表一类装饰是否启用：cutCorners 切角框、glow 多层发光、
- * scanlines 扫描线、circuitTicks 短刻线、homeCore 主页能量核心。
+ * scanlines 扫描线、circuitTicks 短刻线。
  */
 struct SkinDecoration {
     bool cutCorners = true;
     bool glow = true;
     bool scanlines = true;
     bool circuitTicks = true;
-    bool homeCore = true;
 };
 
 /**
@@ -236,6 +389,7 @@ struct SkinSnapshot {
     SkinColors     colors;
     SkinGradients  gradients;
     SkinMetrics    metrics;
+    SkinSurfaces   surfaces;
     SkinMotion     motion;
     SkinTypography typography;
     SkinDecoration decoration;

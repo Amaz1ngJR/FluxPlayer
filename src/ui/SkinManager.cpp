@@ -338,7 +338,7 @@ fs::path getUserSkinsDir() {
 const std::vector<std::string>& topLevelKeys() {
     static const std::vector<std::string> k = {
         "schemaVersion", "id", "name", "version", "author", "description",
-        "compatibility", "roles", "gradients", "metrics", "motion",
+        "compatibility", "roles", "gradients", "metrics", "surfaces", "motion",
         "typography", "decoration", "assets"
     };
     return k;
@@ -394,10 +394,11 @@ bool loadFromString(const std::string& raw, const fs::path& baseDir,
         (void)api;
 
         auto sit = compat->find("surfaces");
-        if (sit == compat->end() || !sit->is_array() || sit->size() < 3) {
+        if (sit == compat->end() || !sit->is_array() || sit->size() < 7) {
             err.add("compatibility.surfaces missing or too small");
         } else {
             bool hasHome = false, hasOpening = false, hasPlayer = false;
+            bool hasHud = false, hasSettings = false, hasPopup = false, hasSubtitle = false;
             for (const auto& v : *sit) {
                 if (!v.is_string()) {
                     err.add("compatibility.surfaces[]: non-string");
@@ -407,12 +408,17 @@ bool loadFromString(const std::string& raw, const fs::path& baseDir,
                 if (s == "home") hasHome = true;
                 else if (s == "opening") hasOpening = true;
                 else if (s == "player") hasPlayer = true;
-                else if (s != "hud" && s != "settings") {
+                else if (s == "hud") hasHud = true;
+                else if (s == "settings") hasSettings = true;
+                else if (s == "popup") hasPopup = true;
+                else if (s == "subtitle") hasSubtitle = true;
+                else {
                     err.add("compatibility.surfaces: invalid '" + s + "'");
                 }
             }
-            if (!hasHome || !hasOpening || !hasPlayer) {
-                err.add("compatibility.surfaces must contain home, opening, player");
+            if (!hasHome || !hasOpening || !hasPlayer || !hasHud || !hasSettings ||
+                !hasPopup || !hasSubtitle) {
+                err.add("compatibility.surfaces must contain home, opening, player, hud, settings, popup, subtitle");
             }
         }
     }
@@ -479,9 +485,6 @@ bool loadFromString(const std::string& raw, const fs::path& baseDir,
         }
         const json* sp = nullptr;
         if (requireObject(*m, "spacing", sp, err)) {
-            requireFloatInRange(*sp, "screenMargin", 0, 64, out.metrics.spacing.screenMargin, err);
-            requireFloatInRange(*sp, "dockPaddingX", 0, 64, out.metrics.spacing.dockPaddingX, err);
-            requireFloatInRange(*sp, "dockPaddingY", 0, 64, out.metrics.spacing.dockPaddingY, err);
             requireFloatInRange(*sp, "panelPadding", 0, 64, out.metrics.spacing.panelPadding, err);
             requireFloatInRange(*sp, "controlGap",   0, 64, out.metrics.spacing.controlGap,   err);
             requireFloatInRange(*sp, "rowGap",       0, 64, out.metrics.spacing.rowGap,       err);
@@ -489,11 +492,8 @@ bool loadFromString(const std::string& raw, const fs::path& baseDir,
         const json* sz = nullptr;
         if (requireObject(*m, "size", sz, err)) {
             requireFloatInRange(*sz, "bottomDockHeight",     56, 132, out.metrics.size.bottomDockHeight,     err);
-            requireFloatInRange(*sz, "topRailHeight",        22, 56,  out.metrics.size.topRailHeight,        err);
-            requireFloatInRange(*sz, "hudPanelWidth",        240, 460, out.metrics.size.hudPanelWidth,       err);
             requireFloatInRange(*sz, "progressHotHeight",    14, 34,  out.metrics.size.progressHotHeight,    err);
             requireFloatInRange(*sz, "progressVisualHeight", 3, 18,   out.metrics.size.progressVisualHeight, err);
-            requireFloatInRange(*sz, "homeCoreDiameter",     0, 360,  out.metrics.size.homeCoreDiameter,     err);
             requireControlSize(*sz, "mainPlayButton",  18, 200, 18, 64,
                                 out.metrics.size.mainPlayBtnW, out.metrics.size.mainPlayBtnH, err);
             requireControlSize(*sz, "iconButton",      18, 200, 18, 64,
@@ -515,11 +515,159 @@ bool loadFromString(const std::string& raw, const fs::path& baseDir,
         }
     }
 
+    // surfaces：各界面局部几何，记录默认 UI 的真实尺寸、间距与对齐
+    const json* sf = nullptr;
+    if (requireObject(j, "surfaces", sf, err)) {
+        const json* home = nullptr;
+        if (requireObject(*sf, "home", home, err)) {
+            requireFloatInRange(*home, "cardPaddingX",         0, 96,   out.surfaces.home.cardPaddingX, err);
+            requireFloatInRange(*home, "cardPaddingY",         0, 96,   out.surfaces.home.cardPaddingY, err);
+            requireFloatInRange(*home, "panelTopRailHeight",   0, 16,   out.surfaces.home.panelTopRailHeight, err);
+            requireFloatInRange(*home, "panelBottomRailHeight",0, 16,   out.surfaces.home.panelBottomRailHeight, err);
+            requireFloatInRange(*home, "innerBorderInset",     0, 32,   out.surfaces.home.innerBorderInset, err);
+            requireFloatInRange(*home, "cornerLength",         0, 64,   out.surfaces.home.cornerLength, err);
+            requireFloatInRange(*home, "cornerThickness",      0, 8,    out.surfaces.home.cornerThickness, err);
+            requireFloatInRange(*home, "titleToActionGap",     0, 64,   out.surfaces.home.titleToActionGap, err);
+            requireFloatInRange(*home, "localButtonW",         60, 800, out.surfaces.home.localButtonW, err);
+            requireFloatInRange(*home, "localButtonH",         18, 100, out.surfaces.home.localButtonH, err);
+            requireFloatInRange(*home, "sectionGap",           0, 64,   out.surfaces.home.sectionGap, err);
+            requireFloatInRange(*home, "separatorWidthRatio", 0.05, 1, out.surfaces.home.separatorWidthRatio, err);
+            requireFloatInRange(*home, "separatorOffsetY",    0, 32,   out.surfaces.home.separatorOffsetY, err);
+            requireFloatInRange(*home, "separatorAfterGap",   0, 32,   out.surfaces.home.separatorAfterGap, err);
+            requireFloatInRange(*home, "urlLabelGap",         0, 32,   out.surfaces.home.urlLabelGap, err);
+            requireFloatInRange(*home, "urlButtonW",          40, 240, out.surfaces.home.urlButtonW, err);
+            requireFloatInRange(*home, "urlRowGap",           0, 32,   out.surfaces.home.urlRowGap, err);
+            requireFloatInRange(*home, "urlFramePaddingX",    0, 48,   out.surfaces.home.urlFramePaddingX, err);
+            requireFloatInRange(*home, "urlFramePaddingY",    0, 48,   out.surfaces.home.urlFramePaddingY, err);
+            requireFloatInRange(*home, "errorGap",            0, 48,   out.surfaces.home.errorGap, err);
+            requireFloatInRange(*home, "footerBottomGap",     0, 48,   out.surfaces.home.footerBottomGap, err);
+            requireFloatInRange(*home, "loginModalW",        200, 800, out.surfaces.home.loginModalW, err);
+            requireFloatInRange(*home, "loginButtonH",        18, 64,  out.surfaces.home.loginButtonH, err);
+            requireFloatInRange(*home, "loginStoredButtonW", 40, 240, out.surfaces.home.loginStoredButtonW, err);
+            requireFloatInRange(*home, "loginRetryButtonW",  40, 240, out.surfaces.home.loginRetryButtonW, err);
+            requireFloatInRange(*home, "loginOpenButtonW",   40, 240, out.surfaces.home.loginOpenButtonW, err);
+            requireFloatInRange(*home, "loginChoiceButtonW", 40, 240, out.surfaces.home.loginChoiceButtonW, err);
+            requireFloatInRange(*home, "gridHorizonRatio",    0, 1,    out.surfaces.home.gridHorizonRatio, err);
+            requireFloatInRange(*home, "gridRows",            1, 64,   out.surfaces.home.gridRows, err);
+            requireFloatInRange(*home, "gridColumns",         1, 64,   out.surfaces.home.gridColumns, err);
+            requireFloatInRange(*home, "scanlineStep",        1, 32,   out.surfaces.home.scanlineStep, err);
+            requireFloatInRange(*home, "screenTopRailHeight", 0, 16,   out.surfaces.home.screenTopRailHeight, err);
+            requireFloatInRange(*home, "screenBottomRailHeight",0,16,  out.surfaces.home.screenBottomRailHeight, err);
+            requireFloatInRange(*home, "particleCount",       0, 240,  out.surfaces.home.particleCount, err);
+            requireFloatInRange(*home, "particleRadius",      0, 8,    out.surfaces.home.particleRadius, err);
+        }
+        const json* opening = nullptr;
+        if (requireObject(*sf, "opening", opening, err)) {
+            requireFloatInRange(*opening, "maxWidthRatio",      0.2, 1,    out.surfaces.opening.maxWidthRatio, err);
+            requireFloatInRange(*opening, "overlayAlpha",       0,   1,    out.surfaces.opening.overlayAlpha, err);
+            requireFloatInRange(*opening, "titlePx",            9,   72,   out.surfaces.opening.titlePx, err);
+            requireFloatInRange(*opening, "titleOffsetY",       0,   200,  out.surfaces.opening.titleOffsetY, err);
+            requireFloatInRange(*opening, "phaseOffsetY",       0,   300,  out.surfaces.opening.phaseOffsetY, err);
+            requireFloatInRange(*opening, "sourceOffsetY",      0,   300,  out.surfaces.opening.sourceOffsetY, err);
+            requireFloatInRange(*opening, "dotsBottomOffset",   0,   160,  out.surfaces.opening.dotsBottomOffset, err);
+            requireFloatInRange(*opening, "dotsGap",            0,   64,   out.surfaces.opening.dotsGap, err);
+            requireFloatInRange(*opening, "dotRadius",          1,   16,   out.surfaces.opening.dotRadius, err);
+            requireFloatInRange(*opening, "cornerLength",       0,   64,   out.surfaces.opening.cornerLength, err);
+            requireFloatInRange(*opening, "cornerThickness",    0,   8,    out.surfaces.opening.cornerThickness, err);
+            requireFloatInRange(*opening, "redrawIntervalMs",  16, 1000,  out.surfaces.opening.redrawIntervalMs, err);
+        }
+        const json* player = nullptr;
+        if (requireObject(*sf, "player", player, err)) {
+            requireFloatInRange(*player, "dockPaddingX",          0, 64,  out.surfaces.player.dockPaddingX, err);
+            requireFloatInRange(*player, "dockPaddingY",          0, 64,  out.surfaces.player.dockPaddingY, err);
+            requireFloatInRange(*player, "dockRailHeight",        0, 16,  out.surfaces.player.dockRailHeight, err);
+            requireFloatInRange(*player, "dockRowGap",            0, 32,  out.surfaces.player.dockRowGap, err);
+            requireFloatInRange(*player, "progressHeadRadius",    1, 24,  out.surfaces.player.progressHeadRadius, err);
+            requireFloatInRange(*player, "progressGlowRadius",    1, 32,  out.surfaces.player.progressGlowRadius, err);
+            requireFloatInRange(*player, "progressOuterGlowRadius",1,40,  out.surfaces.player.progressOuterGlowRadius, err);
+            requireFloatInRange(*player, "progressTooltipGap",    0, 32,  out.surfaces.player.progressTooltipGap, err);
+            requireFloatInRange(*player, "stopButtonW",          18, 200, out.surfaces.player.stopButtonW, err);
+            requireFloatInRange(*player, "recordIdleButtonW",    18, 200, out.surfaces.player.recordIdleButtonW, err);
+            requireFloatInRange(*player, "recordActiveButtonW",  18, 200, out.surfaces.player.recordActiveButtonW, err);
+            requireFloatInRange(*player, "toolButtonW",          18, 200, out.surfaces.player.toolButtonW, err);
+            requireFloatInRange(*player, "volumeSliderW",        20, 360, out.surfaces.player.volumeSliderW, err);
+            requireFloatInRange(*player, "volumeButtonExtraW",   0, 32,  out.surfaces.player.volumeButtonExtraW, err);
+            requireFloatInRange(*player, "toolbarGap",            0, 32,  out.surfaces.player.toolbarGap, err);
+            requireFloatInRange(*player, "toolbarRightMargin",    0, 64,  out.surfaces.player.toolbarRightMargin, err);
+            requireFloatInRange(*player, "downloadButtonW",      24, 240, out.surfaces.player.downloadButtonW, err);
+            requireFloatInRange(*player, "downloadBarW",         24, 400, out.surfaces.player.downloadBarW, err);
+            requireFloatInRange(*player, "downloadBarGap",        0, 32,  out.surfaces.player.downloadBarGap, err);
+            requireFloatInRange(*player, "downloadInfoGap",       0, 32,  out.surfaces.player.downloadInfoGap, err);
+        }
+        const json* hud = nullptr;
+        if (requireObject(*sf, "hud", hud, err)) {
+            requireFloatInRange(*hud, "margin",        0, 64,   out.surfaces.hud.margin, err);
+            requireFloatInRange(*hud, "mediaInfoW",  120, 1000, out.surfaces.hud.mediaInfoW, err);
+            requireFloatInRange(*hud, "mediaInfoH",   80, 800,  out.surfaces.hud.mediaInfoH, err);
+            requireFloatInRange(*hud, "mediaInfoWebH",80, 800,  out.surfaces.hud.mediaInfoWebH, err);
+            requireFloatInRange(*hud, "statsW",      120, 600,  out.surfaces.hud.statsW, err);
+            requireFloatInRange(*hud, "statsH",       80, 600,  out.surfaces.hud.statsH, err);
+        }
+        const json* settings = nullptr;
+        if (requireObject(*sf, "settings", settings, err)) {
+            requireFloatInRange(*settings, "maxWidth",          240, 1600, out.surfaces.settings.maxWidth, err);
+            requireFloatInRange(*settings, "maxHeight",         180, 1200, out.surfaces.settings.maxHeight, err);
+            requireFloatInRange(*settings, "widthRatio",       0.2, 1,     out.surfaces.settings.widthRatio, err);
+            requireFloatInRange(*settings, "heightRatio",      0.2, 1,     out.surfaces.settings.heightRatio, err);
+            requireFloatInRange(*settings, "overlayAlpha",       0, 1,     out.surfaces.settings.overlayAlpha, err);
+            requireFloatInRange(*settings, "panelAlpha",         0, 1,     out.surfaces.settings.panelAlpha, err);
+            requireFloatInRange(*settings, "paddingX",           0, 80,    out.surfaces.settings.paddingX, err);
+            requireFloatInRange(*settings, "paddingY",           0, 80,    out.surfaces.settings.paddingY, err);
+            requireFloatInRange(*settings, "itemGapX",           0, 48,    out.surfaces.settings.itemGapX, err);
+            requireFloatInRange(*settings, "itemGapY",           0, 48,    out.surfaces.settings.itemGapY, err);
+            requireFloatInRange(*settings, "sectionGap",         0, 48,    out.surfaces.settings.sectionGap, err);
+            requireFloatInRange(*settings, "sectionLabelGap",    0, 48,    out.surfaces.settings.sectionLabelGap, err);
+            requireFloatInRange(*settings, "footerReserve",      0, 240,   out.surfaces.settings.footerReserve, err);
+            requireFloatInRange(*settings, "titleRailGap",       0, 48,    out.surfaces.settings.titleRailGap, err);
+            requireFloatInRange(*settings, "titleRailHeight",    0, 16,    out.surfaces.settings.titleRailHeight, err);
+            requireFloatInRange(*settings, "navWidth",          70, 260,   out.surfaces.settings.navWidth, err);
+            requireFloatInRange(*settings, "navGap",             0, 48,    out.surfaces.settings.navGap, err);
+            requireFloatInRange(*settings, "navButtonH",        18, 72,    out.surfaces.settings.navButtonH, err);
+            requireFloatInRange(*settings, "navButtonGap",       0, 32,    out.surfaces.settings.navButtonGap, err);
+            requireFloatInRange(*settings, "closeButtonW",      18, 100,   out.surfaces.settings.closeButtonW, err);
+            requireFloatInRange(*settings, "closePaddingX",      0, 48,    out.surfaces.settings.closePaddingX, err);
+            requireFloatInRange(*settings, "closePaddingY",      0, 48,    out.surfaces.settings.closePaddingY, err);
+            requireFloatInRange(*settings, "comboPaddingX",      0, 48,    out.surfaces.settings.comboPaddingX, err);
+            requireFloatInRange(*settings, "comboPaddingY",      0, 48,    out.surfaces.settings.comboPaddingY, err);
+            requireFloatInRange(*settings, "actionPaddingX",     0, 48,    out.surfaces.settings.actionPaddingX, err);
+            requireFloatInRange(*settings, "actionPaddingY",     0, 48,    out.surfaces.settings.actionPaddingY, err);
+            requireFloatInRange(*settings, "mediumFieldRatio", 0.1, 1,     out.surfaces.settings.mediumFieldRatio, err);
+            requireFloatInRange(*settings, "wideFieldRatio",   0.1, 1,     out.surfaces.settings.wideFieldRatio, err);
+            requireFloatInRange(*settings, "pathFieldRatio",   0.1, 1,     out.surfaces.settings.pathFieldRatio, err);
+            requireFloatInRange(*settings, "compactFieldRatio",0.1, 1,     out.surfaces.settings.compactFieldRatio, err);
+            requireFloatInRange(*settings, "logLevelFieldRatio",0.1,1,     out.surfaces.settings.logLevelFieldRatio, err);
+            requireFloatInRange(*settings, "activeCardH",       30, 180,   out.surfaces.settings.activeCardH, err);
+            requireFloatInRange(*settings, "activeCardPadding",  0, 48,    out.surfaces.settings.activeCardPadding, err);
+            requireFloatInRange(*settings, "activeCardTextGap",  0, 48,    out.surfaces.settings.activeCardTextGap, err);
+            requireFloatInRange(*settings, "activeCardAfterGap", 0, 48,    out.surfaces.settings.activeCardAfterGap, err);
+            requireFloatInRange(*settings, "statusBarH",        18, 100,   out.surfaces.settings.statusBarH, err);
+            requireFloatInRange(*settings, "statusDotInsetX",    0, 48,    out.surfaces.settings.statusDotInsetX, err);
+            requireFloatInRange(*settings, "statusDotRadius",     1, 16,    out.surfaces.settings.statusDotRadius, err);
+            requireFloatInRange(*settings, "statusTextInsetX",    0, 96,    out.surfaces.settings.statusTextInsetX, err);
+        }
+        const json* popup = nullptr;
+        if (requireObject(*sf, "popup", popup, err)) {
+            requireFloatInRange(*popup, "rounding",       0, 24,  out.surfaces.popup.rounding, err);
+            requireFloatInRange(*popup, "speedOffsetY",  20, 400, out.surfaces.popup.speedOffsetY, err);
+            requireFloatInRange(*popup, "speedOptionW",  20, 300, out.surfaces.popup.speedOptionW, err);
+            requireFloatInRange(*popup, "qualityRowH",   10, 80,  out.surfaces.popup.qualityRowH, err);
+            requireFloatInRange(*popup, "qualityPaddingH",0, 80,  out.surfaces.popup.qualityPaddingH, err);
+            requireFloatInRange(*popup, "qualityExtraW",  0, 120, out.surfaces.popup.qualityExtraW, err);
+            requireFloatInRange(*popup, "offsetY",        0, 40,  out.surfaces.popup.offsetY, err);
+        }
+        const json* subtitle = nullptr;
+        if (requireObject(*sf, "subtitle", subtitle, err)) {
+            requireFloatInRange(*subtitle, "bottomMarginWithUi", 0, 300, out.surfaces.subtitle.bottomMarginWithUi, err);
+            requireFloatInRange(*subtitle, "bottomMarginNoUi",   0, 300, out.surfaces.subtitle.bottomMarginNoUi, err);
+            requireFloatInRange(*subtitle, "widthRatio",       0.1, 1,   out.surfaces.subtitle.widthRatio, err);
+            requireFloatInRange(*subtitle, "backgroundAlpha",    0, 1,   out.surfaces.subtitle.backgroundAlpha, err);
+        }
+    }
+
     // motion
     const json* mo = nullptr;
     if (requireObject(j, "motion", mo, err)) {
         requireFloatInRange(*mo, "autoHideDelaySeconds",   0.5, 12,   out.motion.autoHideDelaySeconds,   err);
-        requireFloatInRange(*mo, "volumeCloseDelaySeconds", 0,  3,    out.motion.volumeCloseDelaySeconds, err);
         requireFloatInRange(*mo, "scanlineSpeed",          0,   240,  out.motion.scanlineSpeed,          err);
         requireFloatInRange(*mo, "pulseSpeed",             0,   12,   out.motion.pulseSpeed,             err);
         requireFloatInRange(*mo, "hoverGlowMs",            0,   1000, out.motion.hoverGlowMs,            err);
@@ -545,7 +693,6 @@ bool loadFromString(const std::string& raw, const fs::path& baseDir,
         requireBool(*dc, "glow",         out.decoration.glow,         err);
         requireBool(*dc, "scanlines",    out.decoration.scanlines,    err);
         requireBool(*dc, "circuitTicks", out.decoration.circuitTicks, err);
-        requireBool(*dc, "homeCore",     out.decoration.homeCore,     err);
     }
 
     // assets（可选）

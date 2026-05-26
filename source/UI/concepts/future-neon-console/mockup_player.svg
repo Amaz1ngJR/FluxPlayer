@@ -1,0 +1,166 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Archived future concept; not the shipped default cyberpunk-neon UI. -->
+  <defs>
+    <linearGradient id="video" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#071224"/>
+      <stop offset="0.45" stop-color="#10172C"/>
+      <stop offset="1" stop-color="#210A30"/>
+    </linearGradient>
+    <linearGradient id="rail" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.25" stop-color="#00E8FF"/>
+      <stop offset="0.66" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="progress" x1="120" y1="0" x2="1030" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF"/>
+      <stop offset="0.62" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#FF3DF2"/>
+    </linearGradient>
+    <radialGradient id="centerGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(718 392) rotate(90) scale(260 500)">
+      <stop stop-color="#00E8FF" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#00E8FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softGlow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="13" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#030511"/>
+  <rect x="0" y="0" width="1440" height="900" fill="url(#video)"/>
+  <rect width="1440" height="900" fill="url(#centerGlow)"/>
+
+  <g opacity="0.18">
+    <path d="M0 120H420M1020 120H1440M0 420H260M1180 420H1440M0 650H360M1060 650H1440" stroke="#00E8FF" stroke-width="2"/>
+    <path d="M1120 160H1440M1180 186H1390M70 220H280" stroke="#FF3DF2" stroke-width="2"/>
+  </g>
+
+  <g opacity="0.64">
+    <rect x="18" y="18" width="1404" height="32" rx="4" fill="#030715" fill-opacity="0.48" stroke="#136C8F" stroke-opacity="0.45"/>
+    <path d="M48 34H210" stroke="#00E8FF" stroke-opacity="0.6"/>
+    <text x="230" y="38" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#A8C7E8">sample_video_4k_hdr.mkv</text>
+    <text x="1066" y="38" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#6F89A8">HW DECODER</text>
+    <rect x="1160" y="26" width="76" height="16" rx="2" fill="#061126" stroke="#00E8FF" stroke-opacity="0.55"/>
+    <text x="1198" y="38" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#00E8FF">D3D11VA</text>
+    <rect x="1244" y="26" width="74" height="16" rx="2" fill="#061126" stroke="#A855FF" stroke-opacity="0.55"/>
+    <text x="1281" y="38" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#A855FF">SUB ON</text>
+  </g>
+
+  <text x="720" y="710" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="30" fill="#FFFFFF" fill-opacity="0.9" stroke="#000000" stroke-opacity="0.7" stroke-width="4" paint-order="stroke">字幕保持白色可读，不被赛博色彩抢戏</text>
+
+  <g filter="url(#softGlow)">
+    <path d="M0 804H1440V900H0V804Z" fill="#030715" fill-opacity="0.82"/>
+    <path d="M0 804H1440" stroke="url(#rail)" stroke-width="4"/>
+  </g>
+  <path d="M0 804H1440V900H0V804Z" fill="#030715" fill-opacity="0.82"/>
+  <path d="M0 804H1440" stroke="url(#rail)" stroke-width="4"/>
+
+  <g opacity="0.5">
+    <path d="M22 832H68M22 848H52M22 864H76M1368 832H1418M1388 848H1418M1358 864H1418" stroke="#00E8FF" stroke-width="3"/>
+    <path d="M100 888H180M1260 888H1340" stroke="#A855FF" stroke-width="2"/>
+  </g>
+
+  <rect x="116" y="826" width="1040" height="18" rx="3" fill="#060B1D" stroke="#136C8F" stroke-opacity="0.6"/>
+  <rect x="120" y="830" width="640" height="10" rx="2" fill="url(#progress)"/>
+  <g filter="url(#glow)">
+    <circle cx="760" cy="835" r="6" fill="#EAF8FF"/>
+    <circle cx="760" cy="835" r="13" stroke="#00E8FF" stroke-opacity="0.72" stroke-width="2"/>
+    <circle cx="760" cy="835" r="20" stroke="#A855FF" stroke-opacity="0.24" stroke-width="2"/>
+  </g>
+  <text x="1180" y="840" font-family="Share Tech Mono, Consolas, monospace" font-size="14" fill="#EAF8FF">00:42:18 / 01:36:40</text>
+
+  <g>
+    <rect x="24" y="858" width="70" height="30" rx="3" fill="#050A1A" stroke="#A855FF" stroke-opacity="0.65"/>
+    <text x="59" y="878" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#A855FF">1080P</text>
+    <rect x="104" y="858" width="82" height="30" rx="3" fill="#050A1A" stroke="#A855FF" stroke-opacity="0.65"/>
+    <text x="145" y="878" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#A855FF">DOWNLOAD</text>
+    <rect x="194" y="858" width="90" height="30" rx="3" fill="#050A1A" stroke="#00E8FF" stroke-opacity="0.55"/>
+    <rect x="195" y="859" width="38" height="28" rx="3" fill="#00E8FF" fill-opacity="0.18"/>
+    <text x="239" y="878" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#EAF8FF">42%</text>
+    <rect x="292" y="858" width="26" height="30" rx="3" fill="#050A1A" stroke="#00E8FF" stroke-opacity="0.55"/>
+    <path d="M301 868V878M309 868V878" stroke="#00E8FF" stroke-width="2"/>
+    <rect x="324" y="858" width="26" height="30" rx="3" fill="#050A1A" stroke="#FF3B7A" stroke-opacity="0.55"/>
+    <path d="M332 868L342 878M342 868L332 878" stroke="#FF6A9D" stroke-width="1.5"/>
+    <text x="358" y="870" font-family="Share Tech Mono, Consolas, monospace" font-size="9.5" fill="#00E8FF">8.6 MiB/s  124 MiB</text>
+    <text x="358" y="884" font-family="Share Tech Mono, Consolas, monospace" font-size="9.5" fill="#6F89A8">ETA 00:18</text>
+  </g>
+
+  <g filter="url(#glow)">
+    <rect x="536" y="856" width="78" height="32" rx="4" fill="#061126" stroke="#00E8FF" stroke-width="2"/>
+    <path d="M565 866V878M585 866V878" stroke="#00E8FF" stroke-width="5" stroke-linecap="square"/>
+  </g>
+  <rect x="624" y="856" width="42" height="32" rx="4" fill="#070A1B" stroke="#A855FF" stroke-opacity="0.75"/>
+  <rect x="640" y="867" width="11" height="11" fill="#A855FF"/>
+  <rect x="676" y="856" width="72" height="32" rx="4" fill="#160817" stroke="#FF3B7A" stroke-opacity="0.9"/>
+  <circle cx="691" cy="872" r="4" fill="#FF3B7A"/>
+  <text x="718" y="876" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#FF6A9D">REC V</text>
+  <rect x="758" y="856" width="72" height="32" rx="4" fill="#050A1A" stroke="#00E8FF" stroke-opacity="0.6"/>
+  <circle cx="773" cy="872" r="4" fill="#136C8F"/>
+  <text x="800" y="876" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#00E8FF">REC A</text>
+
+  <g>
+    <rect x="964" y="858" width="60" height="30" rx="3" fill="#050A1A" stroke="#00E8FF" stroke-opacity="0.65"/>
+    <text x="994" y="878" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#00E8FF">1.0x</text>
+    <rect x="1034" y="858" width="66" height="30" rx="3" fill="#081126" stroke="#A855FF" stroke-opacity="0.9"/>
+    <text x="1067" y="878" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#EAF8FF">SET</text>
+    <rect x="1110" y="858" width="32" height="30" rx="3" fill="#050A1A" stroke="#00E8FF" stroke-opacity="0.65"/>
+    <path d="M1120 875H1132L1139 868V880L1132 873H1120Z" stroke="#00E8FF" stroke-width="2" stroke-linejoin="round"/>
+    <rect x="1152" y="869" width="112" height="8" rx="2" fill="#101936"/>
+    <rect x="1152" y="869" width="72" height="8" rx="2" fill="#00E8FF"/>
+    <circle cx="1224" cy="873" r="6" fill="#EAF8FF"/>
+  </g>
+
+	  <g>
+	    <path d="M1010 540H1268L1284 556V786L1268 802H1010L994 786V556L1010 540Z" fill="#050A1A" fill-opacity="0.96" stroke="#A855FF" stroke-opacity="0.85"/>
+	    <path d="M1016 558H1134" stroke="#A855FF" stroke-width="2"/>
+	    <text x="1016" y="580" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#A855FF">SETTINGS</text>
+	    <path d="M1016 592H1260" stroke="url(#rail)" stroke-width="2"/>
+	    <text x="1016" y="620" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Loop Playback</text>
+	    <rect x="1232" y="607" width="22" height="16" rx="3" fill="#061126" stroke="#00E8FF"/>
+	    <path d="M1237 614L1242 619L1250 611" stroke="#00E8FF" stroke-width="2"/>
+	    <text x="1016" y="648" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Subtitles</text>
+	    <rect x="1232" y="635" width="22" height="16" rx="3" fill="#061126" stroke="#00E8FF"/>
+	    <path d="M1237 642L1242 647L1250 639" stroke="#00E8FF" stroke-width="2"/>
+	    <text x="1016" y="676" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Media Info / Stats</text>
+	    <text x="1254" y="676" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#00E8FF">ON / ON</text>
+	    <text x="1016" y="704" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Record Quality</text>
+	    <text x="1254" y="704" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#FF6A9D">ORIGINAL</text>
+	    <text x="1016" y="732" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#A8C7E8">Appearance</text>
+	    <text x="1254" y="732" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#A855FF">CYBERPUNK &gt;</text>
+	    <text x="1016" y="756" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#00E8FF">SKIN HOT RELOAD / ON</text>
+	    <text x="1016" y="779" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#6F89A8">SPACE PLAY  P SHOT  F FULLSCREEN</text>
+	    <text x="1016" y="794" font-family="Share Tech Mono, Consolas, monospace" font-size="9" fill="#6F89A8">I INFO  S STATS  H HUD  ESC EXIT</text>
+	  </g>
+
+  <g>
+    <path d="M1080 96H1392L1418 122V474L1392 500H1080L1054 474V122L1080 96Z" fill="#050A1A" fill-opacity="0.88" stroke="#00E8FF" stroke-opacity="0.7"/>
+    <path d="M1102 120H1244" stroke="#00E8FF" stroke-width="2"/>
+    <text x="1102" y="148" font-family="Share Tech Mono, Consolas, monospace" font-size="14" fill="#00E8FF">MEDIA INFO</text>
+    <path d="M1102 164H1368" stroke="url(#rail)" stroke-width="2"/>
+    <text x="1102" y="202" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6F89A8">Codec</text>
+    <text x="1240" y="202" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#EAF8FF">H.264 / AAC</text>
+    <text x="1102" y="234" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6F89A8">Resolution</text>
+    <text x="1240" y="234" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#00E8FF">3840 x 2160</text>
+    <text x="1102" y="266" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6F89A8">FPS</text>
+    <text x="1240" y="266" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#EAF8FF">59.94</text>
+    <text x="1102" y="298" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6F89A8">Decoder</text>
+    <text x="1240" y="298" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#A855FF">D3D11VA</text>
+    <text x="1102" y="352" font-family="Share Tech Mono, Consolas, monospace" font-size="14" fill="#A855FF">STATS</text>
+    <path d="M1102 368H1368" stroke="url(#rail)" stroke-width="2"/>
+    <text x="1102" y="404" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6F89A8">Queue</text>
+    <text x="1240" y="404" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#EAF8FF">6 / 8 frames</text>
+    <text x="1102" y="436" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#6F89A8">Dropped</text>
+    <text x="1240" y="436" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#FF3B7A">0</text>
+  </g>
+</svg>

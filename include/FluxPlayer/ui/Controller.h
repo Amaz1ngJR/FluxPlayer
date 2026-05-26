@@ -177,8 +177,6 @@ private:
     bool isDraggingProgress_;
     float draggedProgress_;
     double seekPrecision_;
-    bool volumeHovered_;        // 音量区域悬停（控制滑块展开）
-    double volumeLeaveTime_;    // 鼠标离开音量区域的时间（用于延迟关闭）
     bool settingsHovered_;      // 设置按钮悬停状态
     bool showSettingsMenu_;     // 设置菜单显示状态
     bool settingsModalWasOpen_ = false; // 上一帧的 showSettingsMenu_，用来判定"刚打开"那一帧
@@ -222,6 +220,8 @@ private:
     uint64_t appliedSkinGeneration_ = 0;
     /// Appearance 子页是否展开
     bool showAppearanceMenu_ = false;
+    enum class SettingsPage { General, Capture, Logging, Appearance };
+    SettingsPage settingsPage_ = SettingsPage::General;
 
     // ==================== 设置面板字符串输入缓冲 ====================
     // ImGui::InputText 不支持直接绑定 std::string；按 Loop Playback 模式：

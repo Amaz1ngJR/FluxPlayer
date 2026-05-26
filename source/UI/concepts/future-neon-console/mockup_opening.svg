@@ -1,0 +1,89 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Archived future concept; not the shipped default cyberpunk-neon UI. -->
+  <defs>
+    <linearGradient id="rail" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.25" stop-color="#00E8FF"/>
+      <stop offset="0.66" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="track" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#00E8FF"/>
+      <stop offset="0.65" stop-color="#2DA7FF"/>
+      <stop offset="1" stop-color="#A855FF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="screenGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(720 405) rotate(90) scale(360 680)">
+      <stop stop-color="#00E8FF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#00E8FF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-45%" y="-45%" width="190%" height="190%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#030511"/>
+  <rect width="1440" height="900" fill="url(#screenGlow)"/>
+  <g opacity="0.18">
+    <path d="M0 144H390M1048 144H1440M0 612H272M1168 612H1440" stroke="#00E8FF" stroke-width="2"/>
+    <path d="M0 204H256M1160 230H1440M1050 648H1440" stroke="#A855FF" stroke-width="2"/>
+  </g>
+
+  <rect x="18" y="18" width="1404" height="34" rx="4" fill="#030715" fill-opacity="0.72" stroke="#136C8F" stroke-opacity="0.52"/>
+  <path d="M44 35H172" stroke="#00E8FF" stroke-opacity="0.65"/>
+  <text x="192" y="40" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#A8C7E8">NETWORK SOURCE</text>
+  <rect x="1182" y="27" width="202" height="18" rx="2" fill="#061126" stroke="#A855FF" stroke-opacity="0.65"/>
+  <circle cx="1198" cy="36" r="4" fill="#A855FF"/>
+  <text x="1288" y="40" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#EAF8FF">OPENING STREAM</text>
+
+  <g>
+    <path d="M468 216H972L1000 244V586L972 614H468L440 586V244L468 216Z"
+          fill="#050A1A" fill-opacity="0.96" stroke="#00E8FF" stroke-opacity="0.65"/>
+    <path d="M482 232H958L984 258V572L958 598H482L456 572V258L482 232Z"
+          stroke="#A855FF" stroke-opacity="0.3"/>
+    <path d="M492 242H660" stroke="url(#rail)" stroke-width="3"/>
+    <text x="492" y="272" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#6F89A8" letter-spacing="2">SOURCE HANDSHAKE</text>
+    <text x="492" y="307" font-family="Share Tech Mono, Consolas, monospace" font-size="21" fill="#EAF8FF" letter-spacing="2">OPENING STREAM</text>
+    <text x="492" y="332" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#A8C7E8">Preparing network playback. This may take a moment.</text>
+
+    <g filter="url(#glow)">
+      <circle cx="532" cy="401" r="27" stroke="#136C8F" stroke-width="3"/>
+      <path d="M532 374A27 27 0 0 1 559 401" stroke="#00E8FF" stroke-width="4"/>
+      <path d="M559 401A27 27 0 0 1 544 425" stroke="#A855FF" stroke-width="4"/>
+      <circle cx="532" cy="401" r="6" fill="#EAF8FF"/>
+    </g>
+
+    <path d="M588 384H622" stroke="#00E8FF" stroke-width="2"/>
+    <circle cx="634" cy="384" r="5" fill="#00E8FF"/>
+    <text x="654" y="388" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#EAF8FF">RESOLVE SOURCE</text>
+    <text x="940" y="388" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#00E8FF">DONE</text>
+    <path d="M588 418H622" stroke="#A855FF" stroke-width="2"/>
+    <circle cx="634" cy="418" r="5" fill="#A855FF"/>
+    <text x="654" y="422" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#EAF8FF">OPEN MEDIA STREAM</text>
+    <text x="940" y="422" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#A855FF">ACTIVE</text>
+    <path d="M588 452H622" stroke="#3E526C" stroke-width="2"/>
+    <circle cx="634" cy="452" r="5" fill="#3E526C"/>
+    <text x="654" y="456" font-family="Share Tech Mono, Consolas, monospace" font-size="12" fill="#6F89A8">BUFFER FIRST FRAME</text>
+    <text x="940" y="456" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#6F89A8">WAITING</text>
+
+    <rect x="492" y="500" width="448" height="8" rx="3" fill="#101936"/>
+    <rect x="616" y="500" width="172" height="8" rx="3" fill="url(#track)"/>
+    <text x="492" y="536" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#6F89A8">https://www.example.com/watch/stream-title...</text>
+    <text x="940" y="536" text-anchor="end" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#A855FF">00:07</text>
+    <text x="492" y="568" font-family="Share Tech Mono, Consolas, monospace" font-size="10" fill="#3E526C">PLAYER REMAINS VISIBLE UNTIL FIRST FRAME IS READY</text>
+  </g>
+
+  <path d="M0 806H1440V900H0V806Z" fill="#030715" fill-opacity="0.9"/>
+  <path d="M0 806H1440" stroke="url(#rail)" stroke-width="3"/>
+  <rect x="86" y="829" width="1100" height="12" rx="3" fill="#101936" stroke="#136C8F" stroke-opacity="0.35"/>
+  <text x="1210" y="841" font-family="Share Tech Mono, Consolas, monospace" font-size="13" fill="#6F89A8">--:-- / --:--</text>
+  <rect x="598" y="855" width="84" height="30" rx="3" fill="#050A1A" stroke="#3E526C" stroke-opacity="0.72"/>
+  <path d="M633 865L633 877L651 871L633 865Z" fill="#3E526C"/>
+  <rect x="692" y="855" width="48" height="30" rx="3" fill="#050A1A" stroke="#3E526C" stroke-opacity="0.72"/>
+  <rect x="710" y="865" width="11" height="11" fill="#3E526C"/>
+  <text x="752" y="875" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#6F89A8">CONTROLS AVAILABLE AFTER BUFFER READY</text>
+</svg>

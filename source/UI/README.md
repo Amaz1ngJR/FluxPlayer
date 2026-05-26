@@ -6,15 +6,18 @@
 source/UI/
 ├── README.md            ← 你正在看的文档（皮肤作者规范）
 ├── skin.schema.json     ← 单一权威：字段、类型、取值范围
-└── skins/
-    └── <id>/
-        ├── skin.json    ← 皮肤清单（必备）
-        ├── preview.svg  ← 预览图（推荐）
-        ├── mockup_*.svg ← 设计稿（可选，文档用）
-        └── 其他资源     ← 字体、纹理（可选）
+├── skins/
+│   └── <id>/
+│       ├── skin.json    ← 皮肤清单（必备）
+│       ├── preview.svg  ← 预览图（推荐）
+│       ├── mockup_*.svg ← 当前皮肤状态稿（可选，文档用）
+│       └── 其他资源     ← 字体、纹理（可选）
+└── concepts/
+    └── <concept-id>/    ← 尚未实现为皮肤的未来视觉稿，不参与加载/打包
 ```
 
 > **唯一权威是 `skin.schema.json`**。本 README 解释「字段语义」「与 ImGui 全局样式的关系」「常见陷阱」，但**字段名、必填项、取值范围以 schema 为准**。
+> `concepts/future-neon-console/` 保存的是未来设计探索；不要将其中 SVG 当作 `cyberpunk-neon` 当前默认实现的验收稿。
 
 ---
 
@@ -73,8 +76,7 @@ source/UI/
 
 **绝对不要**把以下「容器局部」字段写入全局 `ImGuiStyle`：
 
-- ~~`metrics.spacing.dockPaddingX/Y` → `FramePadding`~~ ❌（曾经的 bug）
-- ~~`metrics.spacing.screenMargin` → 任何全局间距~~ ❌
+- ~~`surfaces.player.dockPaddingX/Y` → `FramePadding`~~ ❌（曾经的 bug）
 
 ### 3.2 容器局部字段（只在特定 Surface 内消费）
 
@@ -82,18 +84,15 @@ source/UI/
 
 | 字段 | 谁在用 | 含义 |
 | --- | --- | --- |
-| `metrics.spacing.dockPaddingX/Y` | `Controller::renderBottomOverlay` 的 dock window | 底部 dock 容器自身的内边距 |
-| `metrics.spacing.screenMargin` | （预留）首页卡片到屏幕边缘的距离 | 用于将来 Home 卡片定位 |
+| `surfaces.player.dockPaddingX/Y` | `Controller::renderBottomOverlay` 的 dock window | 底部 dock 容器自身的内边距 |
 | `metrics.size.bottomDockHeight` | dock window 的固定高度 | dock 是定高容器，不能被布局推开 |
-| `metrics.size.hudPanelWidth` | 媒体信息 / 统计 HUD 宽度 | 仅作用于 HUD 面板 |
 | `metrics.size.progressHotHeight` / `progressVisualHeight` | 进度条交互区 / 视觉条厚度 | 进度条几何 |
 | `metrics.size.mainPlayButton` / `iconButton` / `chipButton` | 各按钮的 `[w, h]` | 单个控件几何 |
-| `metrics.size.homeSourceCard` / `homeCoreDiameter` / `openingPanel` | Home / Opening 卡片几何 | 单个 Surface 几何 |
+| `metrics.size.homeSourceCard` / `openingPanel` | Home / Opening 卡片几何 | 单个 Surface 几何 |
 | `metrics.opacity.dock` / `hudPanel` / `popup` | 对应窗口的整体透明度乘子 | 必须和具体绘制点配合 |
 | `metrics.opacity.subtleDecoration` | 背景装饰（光晕、网格、扫描线）alpha 乘子 | **永远是「乘子」，不是绝对 alpha** |
 | `metrics.opacity.disabled` | 禁用态控件 alpha 乘子 | 同上 |
 | `motion.autoHideDelaySeconds` | 鼠标停滞后 dock 自动隐藏的秒数 | 行为时序 |
-| `motion.volumeCloseDelaySeconds` | 音量滑块离开后延迟关闭的秒数 | 行为时序 |
 | `motion.scanlineSpeed` / `pulseSpeed` | 装饰动画速度 | 单位约定见 §4 |
 | `motion.hoverGlowMs` | hover 发光淡入毫秒 | 装饰动画 |
 | `motion.reloadDebounceMs` | 热加载防抖窗口（毫秒） | 影响皮肤改完到生效的延迟 |
@@ -103,7 +102,18 @@ source/UI/
 | `decoration.glow` | 发光层开关 | 关掉 → 不画外发光（性能更好） |
 | `decoration.scanlines` | 扫描线开关 | 关掉 → 静态背景 |
 | `decoration.circuitTicks` | 透视地板网格 + 数字雨开关 | 关掉 → 干净背景 |
-| `decoration.homeCore` | Home 核心圆装饰预留开关 | 当前未渲染，预留 |
+
+`surfaces` 是局部布局的权威区，完整覆盖当前皮肤必须展示的界面：
+
+| 对象 | 主要控制内容 |
+| --- | --- |
+| `surfaces.home` | 主页卡片 padding、本地按钮、URL 行、登录弹窗、背景装饰密度 |
+| `surfaces.opening` | 慢 URL 打开时面板、文案位置、点阵动画与重绘节奏 |
+| `surfaces.player` | Dock 行距、播放/录制/工具/下载控件尺寸及对齐 |
+| `surfaces.hud` | Media Info 与 Statistics 面板位置和大小 |
+| `surfaces.settings` | 设置模态、左侧分页导航、Appearance 卡片与状态条几何 |
+| `surfaces.popup` | 速度和画质菜单的行高、宽度与偏移 |
+| `surfaces.subtitle` | 字幕安全区域、宽度与背景透明度 |
 
 ### 3.3 不被皮肤控制的字段（**故意**）
 
@@ -111,7 +121,7 @@ source/UI/
 
 - `FramePadding`（按钮内文字到边框的距离）— 全局保持 ImGui 默认 `(4, 3)`。
   - 理由：FluxPlayer 多个按钮用固定高度（如 dock 内 22 px），太大的 `FramePadding` 会顶破布局；任何**容器内的局部需求**（例如设置弹窗想要更大的按钮）应在该容器内 **`PushStyleVar(FramePadding, ...)` + `PopStyleVar()`**，而不是改全局。
-  - 如果未来确实需要由皮肤控制，**应在 schema 里新增独立字段**（例如 `metrics.spacing.framePadX/framePadY`），不要复用 `dockPaddingX/Y`。
+  - 局部控件需要特定 padding 时，应在其所属 `surfaces.*` 下新增字段，不要复用其他容器字段。
 - `WindowBorderSize` / `FrameBorderSize` / `PopupBorderSize`：固定为 `1.0`。皮肤通过颜色（`roles.line.*`）和发光（`decoration.glow`）来表达边框强度，不通过粗细。
 
 ### 3.4 控件级排版铁律（避免视觉错位）
@@ -148,7 +158,7 @@ ImGui::PopStyleVar();
 
 - **超过 3 个交互项 / 包含 Combo / 包含按钮组 → 用居中模态窗口**，宽度至少 `min(640, displayW * 0.9)`。
 - **小型菜单（≤ 3 项 checkbox）才用 dropdown**，并且要 `AlwaysAutoResize` + 文字预算合理（计算最长项的 `CalcTextSize().x + padding * 2`）。
-- 历史教训：早期 `showAppearanceMenu_` 子页用 `SetNextWindowSize(280, 0)`，combo 项 `cyberpunk-neon (BUILT-IN)` + `RESTORE DEFAULT` 被裁切；改造为 `renderSettingsModal()`（`src/ui/Controller.cpp`），固定宽度 640、按内容自适应高度、ESC / 关闭按钮关闭。
+- 历史教训：早期 `showAppearanceMenu_` 子页用 `SetNextWindowSize(280, 0)`，combo 项 `cyberpunk-neon (BUILT-IN)` + `RESTORE DEFAULT` 被裁切；改造为 `renderSettingsModal()`（`src/ui/Controller.cpp`），最大宽度由 `surfaces.settings.maxWidth` 控制、按内容自适应高度、ESC / 关闭按钮关闭。
 
 #### 3.4.4 临时风格 push/pop 必须配对
 
@@ -164,7 +174,7 @@ ImGui::PopStyleVar();
 
 - **像素**：`metrics.spacing.*`、`metrics.size.*`、`metrics.radius.*`、`typography.*Px`。**逻辑像素**（与 `io.DisplaySize` 同坐标系），高 DPI 下由 ImGui 后端自动放大。
 - **0..1 比例**：`metrics.opacity.*`。
-- **秒**：`motion.autoHideDelaySeconds`、`motion.volumeCloseDelaySeconds`。
+- **秒**：`motion.autoHideDelaySeconds`。
 - **毫秒**：`motion.hoverGlowMs`、`motion.reloadDebounceMs`。
 - **每秒像素**：`motion.scanlineSpeed`（扫描线纵向偏移速度）、`motion.pulseSpeed`（脉冲频率，单位 Hz 量级）。
 
@@ -220,7 +230,7 @@ cp -r source/UI/skins/cyberpunk-neon source/UI/skins/<your-id>
 #   - "id": "<your-id>"   ← 必须与目录名一致
 #   - "name": "Your Name"
 #   - "version": "1.0.0"
-#   修改 roles / metrics / motion / decoration ...
+#   修改 roles / metrics / surfaces / motion / decoration ...
 ```
 
 重启应用 → Settings → Appearance → 皮肤下拉框中选择新皮肤。选定后 `Config::skinId` 会写回 `fluxplayer.ini`。
@@ -229,7 +239,8 @@ cp -r source/UI/skins/cyberpunk-neon source/UI/skins/<your-id>
 
 - [ ] `id` 字段与所在目录名**完全一致**
 - [ ] `schemaVersion` 为 `1`，`compatibility.skinApi` 为 `1`
-- [ ] `compatibility.surfaces` 至少包含 `home`、`opening`、`player`
+- [ ] `compatibility.surfaces` 包含 `home`、`opening`、`player`、`hud`、`settings`、`popup`、`subtitle`
+- [ ] `player` 仍容纳 `Download` 百分比/速度/大小/`ETA` 与独立 `REC V`、`REC A`
 - [ ] 所有颜色字面量符合 §5 的格式
 - [ ] 所有数值字段在 schema 规定的范围内
 - [ ] 引用的资源文件存在、扩展名合法、大小合理
@@ -262,8 +273,8 @@ cp -r source/UI/skins/cyberpunk-neon source/UI/skins/<your-id>
 ### 9.1 dock 按钮文字撑出边框（已修复）
 
 **症状**：底部 dock 中 `REC V` / `REC A` 等按钮的文字位置偏移、上下不居中。
-**原因**：早期 `ApplyImGuiStyle` 把 `metrics.spacing.dockPaddingX/Y` 当作 `FramePadding`。`dockPadding`(14, 8) 配合按钮固定高度 22 px，垂直方向 8+8=16 已大于按钮可用空间，文字被裁切。
-**修复**：`FramePadding` 全局保持 `(4, 3)`；`dockPaddingX/Y` 只由 dock 容器自己消费（在 dock window 内 `PushStyleVar(WindowPadding, ...)`）。
+**原因**：早期把 Dock 容器 padding 当作全局 `FramePadding`。较大的垂直边距配合按钮固定高度会令文字被裁切。
+**修复**：`FramePadding` 全局保持 `(4, 3)`；`surfaces.player.dockPaddingX/Y` 只由 Dock 容器自己消费。
 **教训**：「容器局部」的字段不能写入全局 `ImGuiStyle`。详见 §3.4.5。
 
 ### 9.2 OPEN URL 按钮比输入框矮（已修复）
@@ -277,7 +288,7 @@ cp -r source/UI/skins/cyberpunk-neon source/UI/skins/<your-id>
 
 **症状**：底部齿轮弹出的设置菜单只有 280 px 宽，`Cyberpunk Neon / BUI...`、`RESTORE DEF...` 都被截断；用户必须把菜单当主窗口尝试拉宽，但它是 `NoResize`。
 **原因**：用 dropdown 形态承载了「皮肤切换 + 三个长按钮 + 状态行」共 6 项交互；280 px 远不够 combo 全宽 + 按钮组横向布局。
-**修复**：改为居中模态窗口 `renderSettingsModal`，固定宽度 `min(640, displayW*0.92)`，三栏按钮等分；半透明遮罩 + ESC/关闭按钮退出。
+**修复**：改为居中模态窗口 `renderSettingsModal`，宽度由 `min(surfaces.settings.maxWidth, displayW * surfaces.settings.widthRatio)` 决定，三栏按钮等分；半透明遮罩 + ESC/关闭按钮退出。
 **教训**：见 §3.4.3「弹窗的最小尺寸约束」。
 
 ### 9.4 改字段后 UI 不变化

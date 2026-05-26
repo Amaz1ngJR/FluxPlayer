@@ -1,24 +1,36 @@
 <svg width="320" height="180" viewBox="0 0 320 180" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Current default skin preview: Home surface scaled from the runtime layout. -->
   <defs>
-    <linearGradient id="edge" x1="20" y1="0" x2="300" y2="0" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#00E8FF"/>
-      <stop offset="0.58" stop-color="#A855FF"/>
-      <stop offset="1" stop-color="#FF3DF2"/>
+    <linearGradient id="rail" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.27" stop-color="#00E8FF"/>
+      <stop offset="0.68" stop-color="#A855FF"/>
+      <stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/>
     </linearGradient>
-    <radialGradient id="halo" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(160 80) scale(88 68)">
-      <stop stop-color="#00E8FF" stop-opacity="0.2"/>
+    <radialGradient id="halo" cx="0" cy="0" r="1" gradientTransform="translate(56 34) scale(96 72)">
+      <stop stop-color="#2DA7FF" stop-opacity=".17"/>
       <stop offset="1" stop-color="#030511" stop-opacity="0"/>
     </radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="2"/></filter>
   </defs>
   <rect width="320" height="180" fill="#030511"/>
   <rect width="320" height="180" fill="url(#halo)"/>
-  <path d="M0 2H320M0 178H320" stroke="url(#edge)" stroke-width="2"/>
-  <path d="M26 23H96M224 23H294M20 152H76M244 152H300" stroke="#136C8F"/>
-  <circle cx="160" cy="78" r="42" stroke="#136C8F" stroke-dasharray="2 6"/>
-  <path d="M160 36A42 42 0 0 1 197 58" stroke="#00E8FF" stroke-width="2.5"/>
-  <path d="M197 98A42 42 0 0 1 160 120" stroke="#A855FF" stroke-width="2.5"/>
-  <path d="M160 51L183 64V92L160 105L137 92V64L160 51Z" stroke="url(#edge)" stroke-width="2"/>
-  <path d="M151 78H157L161 68L166 88L171 78H177" stroke="#00E8FF" stroke-width="2"/>
-  <text x="160" y="144" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="11" fill="#EAF8FF" letter-spacing="2">CYBERPUNK NEON</text>
-  <text x="160" y="160" text-anchor="middle" font-family="Share Tech Mono, Consolas, monospace" font-size="7" fill="#6F89A8" letter-spacing="1.5">DEFAULT SKIN</text>
+  <path d="M0 2H320M0 178H320" stroke="url(#rail)" stroke-width="2"/>
+  <g opacity=".18" stroke="#00E8FF" stroke-width=".5">
+    <path d="M160 76L35 180M160 76L92 180M160 76L228 180M160 76L285 180"/>
+    <path d="M105 122H215M75 148H245"/>
+  </g>
+  <rect x="90" y="42" width="140" height="105" rx="2" fill="#070D22" fill-opacity=".88" stroke="#00E8FF" stroke-opacity=".68"/>
+  <path d="M90 43H230M90 146H230" stroke="url(#rail)" stroke-width="1.2"/>
+  <text x="160" y="59" text-anchor="middle" font-family="Consolas, monospace" font-size="8" letter-spacing="1.1" fill="#00E8FF">FLUX PLAYER</text>
+  <text x="160" y="69" text-anchor="middle" font-family="Consolas, monospace" font-size="4" letter-spacing=".7" fill="#6F89A8">// MEDIA PLAYER SYSTEM //</text>
+  <rect x="113" y="77" width="94" height="16" rx="1.5" stroke="#00E8FF" stroke-opacity=".9"/>
+  <text x="160" y="88" text-anchor="middle" font-family="Consolas, monospace" font-size="5" fill="#00E8FF">&gt; OPEN LOCAL FILE</text>
+  <text x="160" y="100" text-anchor="middle" font-family="Consolas, monospace" font-size="4" fill="#6F89A8">or drag &amp; drop a file here</text>
+  <path d="M114 106H206" stroke="url(#rail)" stroke-width=".6"/>
+  <text x="160" y="114" text-anchor="middle" font-family="Consolas, monospace" font-size="4" fill="#00E8FF">[ NETWORK URL ]</text>
+  <rect x="101" y="119" width="79" height="12" rx="1.2" fill="#050816" stroke="#136C8F"/>
+  <rect x="183" y="119" width="36" height="12" rx="1.2" stroke="#A855FF"/>
+  <text x="201" y="127" text-anchor="middle" font-family="Consolas, monospace" font-size="4" fill="#A855FF">OPEN URL</text>
+  <text x="160" y="155" text-anchor="middle" font-family="Consolas, monospace" font-size="5" fill="#A8C7E8" letter-spacing=".7">CURRENT DEFAULT</text>
 </svg>

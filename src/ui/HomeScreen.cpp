@@ -128,6 +128,7 @@ void HomeScreen::renderBackground() {
     auto snap = SkinManager::instance().current();
     if (!snap) return;
     const auto& sk = *snap;
+    const auto& home = sk.surfaces.home;
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImGuiIO& io = ImGui::GetIO();
@@ -147,20 +148,22 @@ void HomeScreen::renderBackground() {
 
     // 透视地板网格
     if (sk.decoration.circuitTicks) {
-        const float vx = w * 0.5f, vy = h * 0.42f;
+        const float vx = w * 0.5f, vy = h * home.gridHorizonRatio;
         ImU32 line1 = ScaleAlpha(sk.colors.accentPrimary,   sk.metrics.opacity.subtleDecoration * 0.4f);
         ImU32 line2 = ScaleAlpha(sk.colors.accentSecondary, sk.metrics.opacity.subtleDecoration * 0.3f);
         ImU32 lineHi = ScaleAlpha(sk.colors.accentPrimary,  sk.metrics.opacity.subtleDecoration * 0.65f);
         ImU32 lineHi2 = ScaleAlpha(sk.colors.accentSecondary, sk.metrics.opacity.subtleDecoration * 0.55f);
-        for (int i = 1; i <= 16; i++) {
-            float frac = (float)i / 16.0f;
+        const int rows = static_cast<int>(home.gridRows);
+        const int cols = static_cast<int>(home.gridColumns);
+        for (int i = 1; i <= rows; i++) {
+            float frac = (float)i / (float)rows;
             float y = vy + (h - vy) * frac;
             float spread = w * 0.75f * frac;
             ImU32 c = (i % 4 == 0) ? lineHi : line1;
             dl->AddLine(ImVec2(vx - spread, y), ImVec2(vx + spread, y), c, (i%4==0) ? 1.5f : 0.8f);
         }
-        for (int i = 0; i <= 18; i++) {
-            float frac = (float)i / 18.0f;
+        for (int i = 0; i <= cols; i++) {
+            float frac = (float)i / (float)cols;
             float xb = w * frac;
             ImU32 c = (i % 3 == 0) ? lineHi2 : line2;
             dl->AddLine(ImVec2(vx, vy), ImVec2(xb, h), c, (i%3==0) ? 1.2f : 0.7f);
@@ -170,9 +173,9 @@ void HomeScreen::renderBackground() {
     // 全屏扫描线
     if (sk.decoration.scanlines) {
         float speed = sk.motion.scanlineSpeed > 0.0f ? sk.motion.scanlineSpeed : 30.0f;
-        float off = std::fmod(t * speed, 3.0f);
+        float off = std::fmod(t * speed, home.scanlineStep);
         ImU32 c = ScaleAlpha(sk.colors.accentPrimary, sk.metrics.opacity.subtleDecoration * 0.12f);
-        for (float y = off; y < h; y += 3.0f)
+        for (float y = off; y < h; y += home.scanlineStep)
             dl->AddLine(ImVec2(0,y), ImVec2(w,y), c);
     }
 
@@ -209,7 +212,7 @@ void HomeScreen::renderBackground() {
         ImU32 cl = g.stops.size() > 1 ? (ImU32)g.stops[1].imu32 : (ImU32)sk.colors.accentPrimary.imu32;
         ImU32 cr = g.stops.size() > 2 ? (ImU32)g.stops[2].imu32 : (ImU32)sk.colors.accentSecondary.imu32;
         ImU32 ed = withAlphaTransparent(sk.colors.accentPrimary);
-        dl->AddRectFilledMultiColor(ImVec2(0,0), ImVec2(w, 3.0f), ed, cl, cr, ed);
+        dl->AddRectFilledMultiColor(ImVec2(0,0), ImVec2(w, home.screenTopRailHeight), ed, cl, cr, ed);
     }
 
     // 底部紫色光带
@@ -217,12 +220,12 @@ void HomeScreen::renderBackground() {
         const auto& g = sk.gradients.dockEdge;
         ImU32 cl = g.stops.size() > 2 ? (ImU32)g.stops[2].imu32 : (ImU32)sk.colors.accentSecondary.imu32;
         ImU32 ed = withAlphaTransparent(sk.colors.accentSecondary);
-        dl->AddRectFilledMultiColor(ImVec2(0,h-2.0f), ImVec2(w,h), ed, cl, cl, ed);
+        dl->AddRectFilledMultiColor(ImVec2(0,h-home.screenBottomRailHeight), ImVec2(w,h), ed, cl, cl, ed);
     }
 
     // 数字雨粒子
     if (sk.decoration.circuitTicks) {
-        for (int i = 0; i < 60; i++) {
+        for (int i = 0; i < static_cast<int>(home.particleCount); i++) {
             float px = std::fmod(std::sin(i * 127.1f) * 43758.5f + t * (0.3f + std::sin(i*0.7f)*0.2f), 1.0f);
             float py = std::fmod(std::cos(i * 311.7f) * 43758.5f + t * (0.5f + std::cos(i*0.5f)*0.3f), 1.0f);
             if (px < 0) px += 1.0f;
@@ -231,7 +234,7 @@ void HomeScreen::renderBackground() {
             ImU32 col = (i % 3 == 0)
                 ? ScaleAlpha(sk.colors.accentSecondary, sk.metrics.opacity.subtleDecoration * 0.7f * bright)
                 : ScaleAlpha(sk.colors.accentPrimary,   sk.metrics.opacity.subtleDecoration * 0.6f * bright);
-            dl->AddCircleFilled(ImVec2(px*w, py*h), 1.2f, col, 4);
+            dl->AddCircleFilled(ImVec2(px*w, py*h), home.particleRadius, col, 4);
         }
     }
 }
@@ -291,8 +294,14 @@ HomeScreenResult HomeScreen::run() {
         glfwGetFramebufferSize(w->getGLFWWindow(), &displayW, &displayH);
         glViewport(0, 0, displayW, displayH);
 
-        // 清屏为深色（比渐变背景更深，作为渐变的底色）
-        glClearColor(0.07f, 0.07f, 0.09f, 1.0f);
+        // 清屏颜色也由皮肤提供；背景绘制含透明层时仍保持同一主题底色。
+        auto clearSkin = SkinManager::instance().current();
+        if (clearSkin) {
+            glClearColor(clearSkin->colors.bgVoid.r, clearSkin->colors.bgVoid.g,
+                         clearSkin->colors.bgVoid.b, 1.0f);
+        } else {
+            glClearColor(0.07f, 0.07f, 0.09f, 1.0f);
+        }
         glClear(GL_COLOR_BUFFER_BIT);
 
         // 将 ImGui 绘制数据提交给 OpenGL 渲染
@@ -322,13 +331,14 @@ void HomeScreen::renderUI() {
     auto snapPtr = SkinManager::instance().current();
     if (!snapPtr) return;
     const auto& sk = *snapPtr;
+    const auto& home = sk.surfaces.home;
     if (sk.generation != appliedSkinGeneration_) {
         ApplyImGuiStyle(sk);
         appliedSkinGeneration_ = sk.generation;
     }
 
-    float cardW = 520.0f;
-    float cardH = 400.0f;
+    float cardW = sk.metrics.size.homeSourceCardW;
+    float cardH = sk.metrics.size.homeSourceCardH;
     ImVec2 cardPos((io.DisplaySize.x - cardW) * 0.5f,
                    (io.DisplaySize.y - cardH) * 0.5f);
     ImVec2 cardMax(cardPos.x + cardW, cardPos.y + cardH);
@@ -348,7 +358,7 @@ void HomeScreen::renderUI() {
             ImU32 c1 = g.stops.size() > 1 ? (ImU32)g.stops[1].imu32 : ToImU32(sk.colors.accentPrimary);
             ImU32 c2 = g.stops.size() > 2 ? (ImU32)g.stops[2].imu32 : ToImU32(sk.colors.accentSecondary);
             ImU32 c3 = g.stops.size() > 3 ? withAlphaTransparent(g.stops.back()) : 0;
-            dl->AddRectFilledMultiColor(cardPos, ImVec2(cardMax.x, cardPos.y + 4.0f),
+            dl->AddRectFilledMultiColor(cardPos, ImVec2(cardMax.x, cardPos.y + home.panelTopRailHeight),
                                         c0, c1, c2, c3);
         }
 
@@ -359,7 +369,7 @@ void HomeScreen::renderUI() {
             ImU32 cl = g.stops.size() > 1 ? (ImU32)g.stops[1].imu32 : ToImU32(sk.colors.accentPrimary);
             ImU32 cr = g.stops.size() > 2 ? (ImU32)g.stops[2].imu32 : ToImU32(sk.colors.accentSecondary);
             dl->AddRectFilledMultiColor(
-                ImVec2(cardPos.x, cardMax.y - 3.0f), cardMax, ed, cl, cr, ed);
+                ImVec2(cardPos.x, cardMax.y - home.panelBottomRailHeight), cardMax, ed, cl, cr, ed);
         }
 
         // 卡片左侧扫描光（只在 decoration.scanlines 启用时绘制）
@@ -378,12 +388,13 @@ void HomeScreen::renderUI() {
 
         // 主发光边框 + 角落装饰（皮肤 decoration 开关控制）
         DrawGlowRect(dl, cardPos, cardMax, sk.colors.accentPrimary, sk, sk.metrics.radius.panel);
-        DrawCornerCuts(dl, cardPos, cardMax, sk.colors.accentPrimary, sk, 24.0f, 2.5f);
+        DrawCornerCuts(dl, cardPos, cardMax, sk.colors.accentPrimary, sk,
+                       home.cornerLength, home.cornerThickness);
 
         // 内层细边（accent.secondary，营造双层感）
         if (sk.decoration.cutCorners) {
-            ImVec2 inner1(cardPos.x + 6.0f, cardPos.y + 6.0f);
-            ImVec2 inner2(cardMax.x - 6.0f, cardMax.y - 6.0f);
+            ImVec2 inner1(cardPos.x + home.innerBorderInset, cardPos.y + home.innerBorderInset);
+            ImVec2 inner2(cardMax.x - home.innerBorderInset, cardMax.y - home.innerBorderInset);
             dl->AddRect(inner1, inner2,
                         ScaleAlpha(sk.colors.accentSecondary, sk.metrics.opacity.subtleDecoration), 1.0f);
             DrawCornerCuts(dl, inner1, inner2, sk.colors.accentSecondary, sk, 12.0f, 1.0f);
@@ -396,7 +407,7 @@ void HomeScreen::renderUI() {
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ToImVec4(sk.colors.bgPanelTransparent));
     ImGui::PushStyleColor(ImGuiCol_Border,   ImVec4(0,0,0,0));  // 隐藏 ImGui 自带边框，用手绘替代
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sk.metrics.radius.panel);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(32.0f, 28.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(home.cardPaddingX, home.cardPaddingY));
 
     // 窗口标志：去掉标题栏、调整大小、移动、折叠、滚动条，固定在背景层
     ImGui::Begin("##HomeScreen", nullptr,
@@ -449,12 +460,12 @@ void HomeScreen::renderUI() {
         ImGui::PopStyleColor();
     }
 
-    ImGui::Dummy(ImVec2(0, 18.0f));
+    ImGui::Dummy(ImVec2(0, home.titleToActionGap));
 
     // 主按钮 OPEN LOCAL FILE：accent.primary 描边发光
     {
-        float btnW = 320.0f;
-        float btnH = 48.0f;
+        float btnW = home.localButtonW;
+        float btnH = home.localButtonH;
         ImGui::SetCursorPosX((contentW - btnW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
 
         ImVec4 hov = ToImVec4(sk.colors.accentPrimary); hov.w *= 0.12f;
@@ -504,17 +515,17 @@ void HomeScreen::renderUI() {
         ImGui::PopStyleColor();
     }
 
-    ImGui::Dummy(ImVec2(0, 12.0f));
+    ImGui::Dummy(ImVec2(0, home.sectionGap));
     {
         // 渐变分隔线：以当前光标位置 + 4px 偏移为基线居中绘制
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 cursor = ImGui::GetCursorScreenPos();
-        cursor.y += 4.0f;
+        cursor.y += home.separatorOffsetY;
         float cx = cursor.x + ImGui::GetContentRegionAvail().x * 0.5f;
-        DrawGradientSeparator(dl, ImVec2(cx, cursor.y), contentW * 0.6f, sk.colors.accentPrimary);
-        ImGui::Dummy(ImVec2(0, 5.0f));
+        DrawGradientSeparator(dl, ImVec2(cx, cursor.y), contentW * home.separatorWidthRatio, sk.colors.accentPrimary);
+        ImGui::Dummy(ImVec2(0, home.separatorAfterGap));
     }
-    ImGui::Dummy(ImVec2(0, 12.0f));
+    ImGui::Dummy(ImVec2(0, home.sectionGap));
 
     // URL 输入区域
     {
@@ -526,17 +537,17 @@ void HomeScreen::renderUI() {
         ImGui::TextUnformatted(label);
         ImGui::PopStyleColor();
 
-        ImGui::Dummy(ImVec2(0, 4.0f));
+        ImGui::Dummy(ImVec2(0, home.urlLabelGap));
 
-        float playBtnW = 90.0f; // 容纳 OPEN URL 文案
-        float spacing = 8.0f;
+        float playBtnW = home.urlButtonW; // 容纳 OPEN URL 文案
+        float spacing = home.urlRowGap;
         float inputW = contentW - playBtnW - spacing;
 
         ImVec4 fbHov = ToImVec4(sk.colors.accentPrimary); fbHov.w *= 0.08f;
         ImVec4 fbAct = ToImVec4(sk.colors.accentPrimary); fbAct.w *= 0.14f;
         ImVec4 fbBorder = ToImVec4(sk.colors.accentPrimary); fbBorder.w *= 0.5f;
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 10.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(home.urlFramePaddingX, home.urlFramePaddingY));
         ImGui::PushStyleColor(ImGuiCol_FrameBg,        ToImVec4(sk.colors.bgPanel));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, fbHov);
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  fbAct);
@@ -549,7 +560,7 @@ void HomeScreen::renderUI() {
         if (urlBuffer_[0] == '\0' && !ImGui::IsItemActive()) {
             ImVec2 inputPos = ImGui::GetItemRectMin();
             ImGui::GetWindowDrawList()->AddText(
-                ImVec2(inputPos.x + 14.0f, inputPos.y + 10.0f),
+                ImVec2(inputPos.x + home.urlFramePaddingX, inputPos.y + home.urlFramePaddingY),
                 ToImU32(sk.colors.textMuted), "rtsp://... or https://bilibili.com/video/...");
         }
 
@@ -560,7 +571,7 @@ void HomeScreen::renderUI() {
 
         // OPEN URL 按钮：accent.secondary 描边
         // 注意：FramePadding 必须与上面的输入框一致（14,10），否则同一行控件高度不匹配
-        // ——这是「同行控件必须共用 FramePadding」规则的具体应用，详见 source/UI/README.md §3.3
+        // ——这是「同行控件必须共用 FramePadding」规则的具体应用，详见 source/UI/README.md §3.4.1
         ImVec4 sHov = ToImVec4(sk.colors.accentSecondary); sHov.w *= 0.12f;
         ImVec4 sAct = ToImVec4(sk.colors.accentSecondary); sAct.w *= 0.25f;
         ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
@@ -570,7 +581,7 @@ void HomeScreen::renderUI() {
         ImGui::PushStyleColor(ImGuiCol_Border,        ToImVec4(sk.colors.accentSecondary));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(14.0f, 10.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,  ImVec2(home.urlFramePaddingX, home.urlFramePaddingY));
 
         bool playClicked = ImGui::Button("OPEN URL", ImVec2(playBtnW, 0));
 
@@ -601,7 +612,7 @@ void HomeScreen::renderUI() {
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 8.0f));
+    ImGui::Dummy(ImVec2(0, home.errorGap));
 
     // 错误信息显示（state.error，居中）
     if (!errorMessage_.empty()) {
@@ -618,7 +629,7 @@ void HomeScreen::renderUI() {
     {
         const char* hint = "MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS";
         float hw = ImGui::CalcTextSize(hint).x;
-        float bottomY = cardH - ImGui::GetStyle().WindowPadding.y - ImGui::GetTextLineHeight() - 4.0f;
+        float bottomY = cardH - ImGui::GetStyle().WindowPadding.y - ImGui::GetTextLineHeight() - home.footerBottomGap;
         ImGui::SetCursorPosY(bottomY);
         ImGui::SetCursorPosX((contentW - hw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
@@ -637,7 +648,7 @@ void HomeScreen::renderUI() {
         ImGui::OpenPopup("WebLoginPrompt");
         loginPromptOpen_ = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(home.loginModalW, 0), ImGuiCond_Always);
     if (ImGui::BeginPopupModal("WebLoginPrompt", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
         if (loginPromptHasCookie_) {
@@ -648,22 +659,22 @@ void HomeScreen::renderUI() {
         ImGui::TextDisabled("%s", loginPromptUrl_.c_str());
         ImGui::Separator();
 
-        const float btnH = 30.0f;
+        const float btnH = home.loginButtonH;
         bool doLogin = false;
         bool useStored = false;
         bool noLogin = false;
 
         if (loginPromptHasCookie_) {
             // 横向三按钮
-            if (ImGui::Button("使用已保存登录", ImVec2(140, btnH))) useStored = true;
+            if (ImGui::Button("使用已保存登录", ImVec2(home.loginStoredButtonW, btnH))) useStored = true;
             ImGui::SameLine();
-            if (ImGui::Button("重新登录",     ImVec2(110, btnH))) doLogin = true;
+            if (ImGui::Button("重新登录",     ImVec2(home.loginRetryButtonW, btnH))) doLogin = true;
             ImGui::SameLine();
-            if (ImGui::Button("不登录打开",   ImVec2(120, btnH))) noLogin = true;
+            if (ImGui::Button("不登录打开",   ImVec2(home.loginOpenButtonW, btnH))) noLogin = true;
         } else {
-            if (ImGui::Button("登录并继续", ImVec2(150, btnH))) doLogin = true;
+            if (ImGui::Button("登录并继续", ImVec2(home.loginChoiceButtonW, btnH))) doLogin = true;
             ImGui::SameLine();
-            if (ImGui::Button("不登录打开", ImVec2(150, btnH))) noLogin = true;
+            if (ImGui::Button("不登录打开", ImVec2(home.loginChoiceButtonW, btnH))) noLogin = true;
         }
 
         if (useStored) {

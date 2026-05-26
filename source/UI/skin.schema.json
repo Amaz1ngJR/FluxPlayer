@@ -13,6 +13,7 @@
     "roles",
     "gradients",
     "metrics",
+    "surfaces",
     "motion",
     "typography",
     "decoration"
@@ -55,14 +56,18 @@
         "surfaces": {
           "type": "array",
           "uniqueItems": true,
-          "minItems": 3,
+          "minItems": 7,
           "items": {
-            "enum": ["home", "opening", "player", "hud", "settings"]
+            "enum": ["home", "opening", "player", "hud", "settings", "popup", "subtitle"]
           },
           "allOf": [
             { "contains": { "const": "home" } },
             { "contains": { "const": "opening" } },
-            { "contains": { "const": "player" } }
+            { "contains": { "const": "player" } },
+            { "contains": { "const": "hud" } },
+            { "contains": { "const": "settings" } },
+            { "contains": { "const": "popup" } },
+            { "contains": { "const": "subtitle" } }
           ]
         }
       }
@@ -160,11 +165,8 @@
         "spacing": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["screenMargin", "dockPaddingX", "dockPaddingY", "panelPadding", "controlGap", "rowGap"],
+          "required": ["panelPadding", "controlGap", "rowGap"],
           "properties": {
-            "screenMargin": { "$ref": "#/$defs/space" },
-            "dockPaddingX": { "$ref": "#/$defs/space" },
-            "dockPaddingY": { "$ref": "#/$defs/space" },
             "panelPadding": { "$ref": "#/$defs/space" },
             "controlGap": { "$ref": "#/$defs/space" },
             "rowGap": { "$ref": "#/$defs/space" }
@@ -173,18 +175,15 @@
         "size": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["bottomDockHeight", "topRailHeight", "hudPanelWidth", "progressHotHeight", "progressVisualHeight", "mainPlayButton", "iconButton", "chipButton", "homeSourceCard", "homeCoreDiameter", "openingPanel"],
+          "required": ["bottomDockHeight", "progressHotHeight", "progressVisualHeight", "mainPlayButton", "iconButton", "chipButton", "homeSourceCard", "openingPanel"],
           "properties": {
             "bottomDockHeight": { "type": "number", "minimum": 56, "maximum": 132 },
-            "topRailHeight": { "type": "number", "minimum": 22, "maximum": 56 },
-            "hudPanelWidth": { "type": "number", "minimum": 240, "maximum": 460 },
             "progressHotHeight": { "type": "number", "minimum": 14, "maximum": 34 },
             "progressVisualHeight": { "type": "number", "minimum": 3, "maximum": 18 },
             "mainPlayButton": { "$ref": "#/$defs/controlSize" },
             "iconButton": { "$ref": "#/$defs/controlSize" },
             "chipButton": { "$ref": "#/$defs/controlSize" },
             "homeSourceCard": { "$ref": "#/$defs/panelSize" },
-            "homeCoreDiameter": { "type": "number", "minimum": 0, "maximum": 360 },
             "openingPanel": { "$ref": "#/$defs/panelSize" }
           }
         },
@@ -202,13 +201,129 @@
         }
       }
     },
+    "surfaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["home", "opening", "player", "hud", "settings", "popup", "subtitle"],
+      "properties": {
+        "home": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cardPaddingX", "cardPaddingY", "panelTopRailHeight", "panelBottomRailHeight", "innerBorderInset", "cornerLength", "cornerThickness", "titleToActionGap", "localButtonW", "localButtonH", "sectionGap", "separatorWidthRatio", "separatorOffsetY", "separatorAfterGap", "urlLabelGap", "urlButtonW", "urlRowGap", "urlFramePaddingX", "urlFramePaddingY", "errorGap", "footerBottomGap", "loginModalW", "loginButtonH", "loginStoredButtonW", "loginRetryButtonW", "loginOpenButtonW", "loginChoiceButtonW", "gridHorizonRatio", "gridRows", "gridColumns", "scanlineStep", "screenTopRailHeight", "screenBottomRailHeight", "particleCount", "particleRadius"],
+          "properties": {
+            "cardPaddingX": { "$ref": "#/$defs/space" }, "cardPaddingY": { "$ref": "#/$defs/space" },
+            "panelTopRailHeight": { "$ref": "#/$defs/space" }, "panelBottomRailHeight": { "$ref": "#/$defs/space" },
+            "innerBorderInset": { "$ref": "#/$defs/space" }, "cornerLength": { "$ref": "#/$defs/space" },
+            "cornerThickness": { "$ref": "#/$defs/space" }, "titleToActionGap": { "$ref": "#/$defs/space" },
+            "localButtonW": { "$ref": "#/$defs/dimension" }, "localButtonH": { "$ref": "#/$defs/dimension" },
+            "sectionGap": { "$ref": "#/$defs/space" }, "separatorWidthRatio": { "$ref": "#/$defs/ratio" },
+            "separatorOffsetY": { "$ref": "#/$defs/space" }, "separatorAfterGap": { "$ref": "#/$defs/space" },
+            "urlLabelGap": { "$ref": "#/$defs/space" }, "urlButtonW": { "$ref": "#/$defs/dimension" },
+            "urlRowGap": { "$ref": "#/$defs/space" }, "urlFramePaddingX": { "$ref": "#/$defs/space" },
+            "urlFramePaddingY": { "$ref": "#/$defs/space" }, "errorGap": { "$ref": "#/$defs/space" },
+            "footerBottomGap": { "$ref": "#/$defs/space" }, "loginModalW": { "$ref": "#/$defs/dimension" },
+            "loginButtonH": { "$ref": "#/$defs/dimension" }, "loginStoredButtonW": { "$ref": "#/$defs/dimension" },
+            "loginRetryButtonW": { "$ref": "#/$defs/dimension" }, "loginOpenButtonW": { "$ref": "#/$defs/dimension" },
+            "loginChoiceButtonW": { "$ref": "#/$defs/dimension" }, "gridHorizonRatio": { "$ref": "#/$defs/ratio" },
+            "gridRows": { "$ref": "#/$defs/count" }, "gridColumns": { "$ref": "#/$defs/count" },
+            "scanlineStep": { "$ref": "#/$defs/space" }, "screenTopRailHeight": { "$ref": "#/$defs/space" },
+            "screenBottomRailHeight": { "$ref": "#/$defs/space" }, "particleCount": { "$ref": "#/$defs/count" },
+            "particleRadius": { "$ref": "#/$defs/space" }
+          }
+        },
+        "opening": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["maxWidthRatio", "overlayAlpha", "titlePx", "titleOffsetY", "phaseOffsetY", "sourceOffsetY", "dotsBottomOffset", "dotsGap", "dotRadius", "cornerLength", "cornerThickness", "redrawIntervalMs"],
+          "properties": {
+            "maxWidthRatio": { "$ref": "#/$defs/ratio" }, "overlayAlpha": { "$ref": "#/$defs/opacity" },
+            "titlePx": { "$ref": "#/$defs/fontSize" }, "titleOffsetY": { "$ref": "#/$defs/dimension" },
+            "phaseOffsetY": { "$ref": "#/$defs/dimension" }, "sourceOffsetY": { "$ref": "#/$defs/dimension" },
+            "dotsBottomOffset": { "$ref": "#/$defs/dimension" }, "dotsGap": { "$ref": "#/$defs/space" },
+            "dotRadius": { "$ref": "#/$defs/space" }, "cornerLength": { "$ref": "#/$defs/space" },
+            "cornerThickness": { "$ref": "#/$defs/space" }, "redrawIntervalMs": { "$ref": "#/$defs/dimension" }
+          }
+        },
+        "player": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["dockPaddingX", "dockPaddingY", "dockRailHeight", "dockRowGap", "progressHeadRadius", "progressGlowRadius", "progressOuterGlowRadius", "progressTooltipGap", "stopButtonW", "recordIdleButtonW", "recordActiveButtonW", "toolButtonW", "volumeSliderW", "volumeButtonExtraW", "toolbarGap", "toolbarRightMargin", "downloadButtonW", "downloadBarW", "downloadBarGap", "downloadInfoGap"],
+          "properties": {
+            "dockPaddingX": { "$ref": "#/$defs/space" }, "dockPaddingY": { "$ref": "#/$defs/space" },
+            "dockRailHeight": { "$ref": "#/$defs/space" }, "dockRowGap": { "$ref": "#/$defs/space" },
+            "progressHeadRadius": { "$ref": "#/$defs/space" },
+            "progressGlowRadius": { "$ref": "#/$defs/space" }, "progressOuterGlowRadius": { "$ref": "#/$defs/space" },
+            "progressTooltipGap": { "$ref": "#/$defs/space" }, "stopButtonW": { "$ref": "#/$defs/dimension" },
+            "recordIdleButtonW": { "$ref": "#/$defs/dimension" }, "recordActiveButtonW": { "$ref": "#/$defs/dimension" },
+            "toolButtonW": { "$ref": "#/$defs/dimension" }, "volumeSliderW": { "$ref": "#/$defs/dimension" },
+            "volumeButtonExtraW": { "$ref": "#/$defs/space" }, "toolbarGap": { "$ref": "#/$defs/space" },
+            "toolbarRightMargin": { "$ref": "#/$defs/space" }, "downloadButtonW": { "$ref": "#/$defs/dimension" },
+            "downloadBarW": { "$ref": "#/$defs/dimension" },
+            "downloadBarGap": { "$ref": "#/$defs/space" }, "downloadInfoGap": { "$ref": "#/$defs/space" }
+          }
+        },
+        "hud": {
+          "type": "object", "additionalProperties": false,
+          "required": ["margin", "mediaInfoW", "mediaInfoH", "mediaInfoWebH", "statsW", "statsH"],
+          "properties": {
+            "margin": { "$ref": "#/$defs/space" }, "mediaInfoW": { "$ref": "#/$defs/dimension" },
+            "mediaInfoH": { "$ref": "#/$defs/dimension" }, "mediaInfoWebH": { "$ref": "#/$defs/dimension" },
+            "statsW": { "$ref": "#/$defs/dimension" }, "statsH": { "$ref": "#/$defs/dimension" }
+          }
+        },
+        "settings": {
+          "type": "object", "additionalProperties": false,
+          "required": ["maxWidth", "maxHeight", "widthRatio", "heightRatio", "overlayAlpha", "panelAlpha", "paddingX", "paddingY", "itemGapX", "itemGapY", "sectionGap", "sectionLabelGap", "footerReserve", "titleRailGap", "titleRailHeight", "navWidth", "navGap", "navButtonH", "navButtonGap", "closeButtonW", "closePaddingX", "closePaddingY", "comboPaddingX", "comboPaddingY", "actionPaddingX", "actionPaddingY", "mediumFieldRatio", "wideFieldRatio", "pathFieldRatio", "compactFieldRatio", "logLevelFieldRatio", "activeCardH", "activeCardPadding", "activeCardTextGap", "activeCardAfterGap", "statusBarH", "statusDotInsetX", "statusDotRadius", "statusTextInsetX"],
+          "properties": {
+            "maxWidth": { "$ref": "#/$defs/dimension" }, "maxHeight": { "$ref": "#/$defs/dimension" },
+            "widthRatio": { "$ref": "#/$defs/ratio" }, "heightRatio": { "$ref": "#/$defs/ratio" },
+            "overlayAlpha": { "$ref": "#/$defs/opacity" }, "panelAlpha": { "$ref": "#/$defs/opacity" },
+            "paddingX": { "$ref": "#/$defs/space" },
+            "paddingY": { "$ref": "#/$defs/space" }, "itemGapX": { "$ref": "#/$defs/space" },
+            "itemGapY": { "$ref": "#/$defs/space" }, "sectionGap": { "$ref": "#/$defs/space" },
+            "sectionLabelGap": { "$ref": "#/$defs/space" }, "footerReserve": { "$ref": "#/$defs/dimension" },
+            "titleRailGap": { "$ref": "#/$defs/space" }, "titleRailHeight": { "$ref": "#/$defs/space" },
+            "navWidth": { "$ref": "#/$defs/dimension" }, "navGap": { "$ref": "#/$defs/space" },
+            "navButtonH": { "$ref": "#/$defs/dimension" }, "navButtonGap": { "$ref": "#/$defs/space" },
+            "closeButtonW": { "$ref": "#/$defs/dimension" }, "activeCardH": { "$ref": "#/$defs/dimension" },
+            "closePaddingX": { "$ref": "#/$defs/space" }, "closePaddingY": { "$ref": "#/$defs/space" },
+            "comboPaddingX": { "$ref": "#/$defs/space" }, "comboPaddingY": { "$ref": "#/$defs/space" },
+            "actionPaddingX": { "$ref": "#/$defs/space" }, "actionPaddingY": { "$ref": "#/$defs/space" },
+            "mediumFieldRatio": { "$ref": "#/$defs/ratio" }, "wideFieldRatio": { "$ref": "#/$defs/ratio" },
+            "pathFieldRatio": { "$ref": "#/$defs/ratio" }, "compactFieldRatio": { "$ref": "#/$defs/ratio" },
+            "logLevelFieldRatio": { "$ref": "#/$defs/ratio" },
+            "activeCardPadding": { "$ref": "#/$defs/space" }, "activeCardTextGap": { "$ref": "#/$defs/space" },
+            "activeCardAfterGap": { "$ref": "#/$defs/space" }, "statusBarH": { "$ref": "#/$defs/dimension" },
+            "statusDotInsetX": { "$ref": "#/$defs/space" }, "statusDotRadius": { "$ref": "#/$defs/space" },
+            "statusTextInsetX": { "$ref": "#/$defs/space" }
+          }
+        },
+        "popup": {
+          "type": "object", "additionalProperties": false,
+          "required": ["rounding", "speedOffsetY", "speedOptionW", "qualityRowH", "qualityPaddingH", "qualityExtraW", "offsetY"],
+          "properties": {
+            "rounding": { "$ref": "#/$defs/radius" }, "speedOffsetY": { "$ref": "#/$defs/dimension" },
+            "speedOptionW": { "$ref": "#/$defs/dimension" }, "qualityRowH": { "$ref": "#/$defs/dimension" },
+            "qualityPaddingH": { "$ref": "#/$defs/space" }, "qualityExtraW": { "$ref": "#/$defs/dimension" },
+            "offsetY": { "$ref": "#/$defs/space" }
+          }
+        },
+        "subtitle": {
+          "type": "object", "additionalProperties": false,
+          "required": ["bottomMarginWithUi", "bottomMarginNoUi", "widthRatio", "backgroundAlpha"],
+          "properties": {
+            "bottomMarginWithUi": { "$ref": "#/$defs/dimension" }, "bottomMarginNoUi": { "$ref": "#/$defs/dimension" },
+            "widthRatio": { "$ref": "#/$defs/ratio" }, "backgroundAlpha": { "$ref": "#/$defs/opacity" }
+          }
+        }
+      }
+    },
     "motion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["autoHideDelaySeconds", "volumeCloseDelaySeconds", "scanlineSpeed", "pulseSpeed", "hoverGlowMs", "reloadDebounceMs"],
+      "required": ["autoHideDelaySeconds", "scanlineSpeed", "pulseSpeed", "hoverGlowMs", "reloadDebounceMs"],
       "properties": {
         "autoHideDelaySeconds": { "type": "number", "minimum": 0.5, "maximum": 12 },
-        "volumeCloseDelaySeconds": { "type": "number", "minimum": 0, "maximum": 3 },
         "scanlineSpeed": { "type": "number", "minimum": 0, "maximum": 240 },
         "pulseSpeed": { "type": "number", "minimum": 0, "maximum": 12 },
         "hoverGlowMs": { "type": "number", "minimum": 0, "maximum": 1000 },
@@ -232,13 +347,12 @@
     "decoration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cutCorners", "glow", "scanlines", "circuitTicks", "homeCore"],
+      "required": ["cutCorners", "glow", "scanlines", "circuitTicks"],
       "properties": {
         "cutCorners": { "type": "boolean" },
         "glow": { "type": "boolean" },
         "scanlines": { "type": "boolean" },
-        "circuitTicks": { "type": "boolean" },
-        "homeCore": { "type": "boolean" }
+        "circuitTicks": { "type": "boolean" }
       }
     },
     "assets": {
@@ -284,6 +398,21 @@
       "type": "number",
       "minimum": 9,
       "maximum": 72
+    },
+    "dimension": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1600
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "count": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 240
     },
     "controlSize": {
       "type": "array",
