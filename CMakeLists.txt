@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.3.2 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.3.3 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -298,6 +298,10 @@ elseif(WIN32)
                     $<TARGET_FILE_DIR:FluxPlayer>
                 COMMENT "Copying WebView2Loader.dll"
             )
+            # WebView2Loader.dll 是运行时 LoadLibraryW 动态加载的（不在 exe 的
+            # PE 导入表里），file(GET_RUNTIME_DEPENDENCIES) 扫不到它，因此必须显式
+            # 安装到 staging，否则 Inno Setup 打包后安装的程序找不到该 DLL。
+            install(FILES "${WEBVIEW2_LOADER_DLL}" DESTINATION .)
         else()
             message(WARNING "WebView2Loader.dll 未找到: ${WEBVIEW2_LOADER_DLL}\n"
                             "请从 Microsoft.Web.WebView2 NuGet 包提取 runtimes/win-x64/native/WebView2Loader.dll，\n"

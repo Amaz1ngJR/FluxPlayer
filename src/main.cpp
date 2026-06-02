@@ -54,6 +54,12 @@ const char* stateName(PlayerState s) {
 
 } // anonymous namespace
 
+static inline bool isNetworkPath(const std::string& p) {
+    return p.find("rtsp://") == 0 || p.find("rtmp://") == 0 ||
+           p.find("rtp://")  == 0 || p.find("http://") == 0 ||
+           p.find("https://") == 0;
+}
+
 /**
  * @brief 共享窗口模式下，对已通过 OpeningScreen 打开的 Player 启动 Controller 主循环
  *
@@ -79,9 +85,9 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
         LOG_INFO("Playback finished");
     });
 
-    // 媒体信息（仅本地文件可探测；网页流交给 Player 内部 yt-dlp 流程）
+    // 媒体信息（仅本地文件可探测；网络流 / 网页流不重复连接）
     MediaInfo mediaInfo;
-    if (!StreamExtractor::needsExtraction(mediaPath)) {
+    if (!isNetworkPath(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
         if (!mediaInfo.extractFromFile(mediaPath)) {
             LOG_WARN("Failed to extract media info; UI may show incomplete fields");
         }
@@ -164,7 +170,7 @@ static std::string playMediaCli(const std::string& mediaPath) {
     }
 
     MediaInfo mediaInfo;
-    if (!StreamExtractor::needsExtraction(mediaPath)) {
+    if (!isNetworkPath(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
         mediaInfo.extractFromFile(mediaPath);
     }
 

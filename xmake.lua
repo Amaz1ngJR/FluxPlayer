@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 -- 项目基本信息
 set_project("FluxPlayer")
-set_version("0.3.2")
+set_version("0.3.3")
 set_languages("cxx17")  -- 要求 C++17 标准
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
