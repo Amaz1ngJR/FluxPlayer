@@ -21,7 +21,45 @@
 #include <fstream>
 #include <vector>
 
+// 定位可执行文件所在目录所需的平台头（仅 .cpp 引入，符合头文件最小暴露约定）
+#ifdef _WIN32
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <climits>
+#else
+#include <unistd.h>
+#include <climits>
+#endif
+
 namespace FluxPlayer {
+
+namespace {
+// 返回可执行文件所在目录（不含末尾分隔符）。
+// 标题字体随构建拷贝到 exe 同级 fonts/，从 Finder/快捷方式启动时工作目录
+// 不一定是 exe 目录（macOS bundle 启动时为 "/"），故必须按 exe 路径解析而非 CWD。
+// 与 GLRenderer 定位 shaders 的策略保持一致。
+std::string getExeDir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string p(buf);
+    return p.substr(0, p.find_last_of("\\/"));
+#elif defined(__APPLE__)
+    char buf[PATH_MAX];
+    uint32_t size = PATH_MAX;
+    if (_NSGetExecutablePath(buf, &size) != 0) return ".";
+    std::string p(buf);
+    return p.substr(0, p.find_last_of('/'));
+#else
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, PATH_MAX);
+    if (n <= 0) return ".";
+    std::string p(buf, n);
+    return p.substr(0, p.find_last_of('/'));
+#endif
+}
+} // anonymous namespace
 
 UiContext::UiContext() = default;
 
@@ -155,12 +193,15 @@ void UiContext::loadFonts() {
     }
 
     // ── 标题字体（36px ShareTechMono） ──
-    titleFont_ = io.Fonts->AddFontFromFileTTF("fonts/ShareTechMono-Regular.ttf", 36.0f);
+    // 按 exe 同级 fonts/ 解析，确保从 Finder/任意工作目录启动都能命中
+    std::string titleFontPath = getExeDir() + "/fonts/ShareTechMono-Regular.ttf";
+    titleFont_ = io.Fonts->AddFontFromFileTTF(titleFontPath.c_str(), 36.0f);
     if (!titleFont_) {
         ImFontConfig cfg;
         cfg.SizePixels = 36.0f;
         titleFont_ = io.Fonts->AddFontDefault(&cfg);
-        LOG_WARN("UiContext: ShareTechMono missing; falling back to default for title");
+        LOG_WARN("UiContext: ShareTechMono missing (" + titleFontPath
+                 + "); falling back to default for title");
     }
 
     // ── 字幕字体（22px CJK + 扩展范围） ──

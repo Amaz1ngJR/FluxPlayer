@@ -6,7 +6,7 @@ add_rules("mode.debug", "mode.release")
 
 -- 项目基本信息
 set_project("FluxPlayer")
-set_version("0.3.3")
+set_version("0.3.4")
 set_languages("cxx17")  -- 要求 C++17 标准
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
@@ -289,10 +289,16 @@ target("FluxPlayer")
         os.cp("assets/shaders", path.join(target:targetdir(), "shaders"))
         -- 把字体文件复制到可执行文件旁边（主界面 TTF 字体运行时加载）
         os.cp("assets/fonts", path.join(target:targetdir(), "fonts"))
-        -- 把 source/ 目录复制到可执行文件旁边（封面兜底图、开发期皮肤源）
+        -- source/ 全拷贝（开发期依赖，含字幕测试、封面兜底图）
         os.cp("source", path.join(target:targetdir(), "source"))
         -- 皮肤包内置回退：与 source/UI/skins 解耦，发布版从 resources/skins 加载
-        os.cp("source/UI/skins", path.join(target:targetdir(), "resources/skins"))
+        -- 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
+        -- 先清空目标目录：os.cp 不删除已存在文件，否则旧构建残留的 mockup 会滞留
+        local skin_dst = path.join(target:targetdir(), "resources/skins/cyberpunk-neon")
+        os.tryrm(skin_dst)
+        os.mkdir(skin_dst)
+        os.cp("source/UI/skins/cyberpunk-neon/skin.json", skin_dst)
+        os.cp("source/UI/skins/cyberpunk-neon/preview.svg", skin_dst)
         if is_plat("windows") then
             -- Windows：把 FFmpeg 的 DLL 增量复制到可执行文件旁边，否则运行时找不到
             local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")

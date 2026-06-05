@@ -43,9 +43,23 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 # 复制可执行文件
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 
-# 复制运行时资源（shader 和字体）
+# shaders/fonts 必须与可执行文件同目录：
+# GLRenderer 用 getExeDir()+"/shaders/..." 定位着色器，字体按可执行文件同级 fonts/
+# 加载，二者都依赖「与 exe 同级」而非 Resources，因此放进 Contents/MacOS/
 cp -r "$BUILD_DIR/shaders" "$APP_BUNDLE/Contents/MacOS/"
 cp -r "$BUILD_DIR/fonts"   "$APP_BUNDLE/Contents/MacOS/"
+
+# pic2.png：纯音频封面兜底图，Player 通过 Config::getResourcePath("pic2.png") 加载，
+# macOS 优先解析 ../Resources/，故直接放在 Resources 根下
+cp "$ROOT/source/pic2.png" "$APP_BUNDLE/Contents/Resources/pic2.png"
+
+# 皮肤包：Config::getResourcePath("skins") 在 macOS 优先解析到 ../Resources/skins，
+# 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
+mkdir -p "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon"
+cp "$ROOT/source/UI/skins/cyberpunk-neon/skin.json" \
+   "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon/"
+cp "$ROOT/source/UI/skins/cyberpunk-neon/preview.svg" \
+   "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon/"
 
 # 复制 FFmpeg dylib（rpath 设为 @executable_path，dylib 需与可执行文件同目录）
 find "$BUILD_DIR" -maxdepth 1 -name "*.dylib" -exec cp {} "$APP_BUNDLE/Contents/MacOS/" \;

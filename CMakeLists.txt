@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.3.3 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.3.4 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -350,15 +350,25 @@ add_custom_command(TARGET FluxPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts
         $<TARGET_FILE_DIR:FluxPlayer>/fonts
+    # source/ 全拷贝（开发期依赖，含字幕测试、封面兜底图）
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/source
         $<TARGET_FILE_DIR:FluxPlayer>/source
     # 皮肤包内置回退路径：与开发期 source/UI/skins 解耦，
     # 让发布版即便缺失开发目录也能从 resources/skins 加载到内置 cyberpunk-neon
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins
-        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins
-    COMMENT "Copying shader files..."
+    # 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
+    # 先清空目标目录：避免旧构建（曾整目录拷贝）残留的 mockup 滞留
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins/cyberpunk-neon/skin.json
+        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon/skin.json
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins/cyberpunk-neon/preview.svg
+        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon/preview.svg
+    COMMENT "Copying runtime resources..."
 )
 
 # Windows：构建完成后把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
@@ -411,10 +421,17 @@ endif()
 install(TARGETS FluxPlayer RUNTIME DESTINATION .)
 install(DIRECTORY assets/shaders/ DESTINATION shaders)
 install(DIRECTORY assets/fonts/   DESTINATION fonts)
-install(DIRECTORY source/         DESTINATION source)
+# source/ 安装策略：仅安装运行时必需文件，不安装整个 UI/ 设计目录。
+# pic2.png 是纯音频封面兜底图，Player 通过 Config::getResourcePath("pic2.png")
+# 加载（Win/Linux 解析为 <exe>/resources/），故装到 resources/ 而非 source/
+install(FILES source/pic2.png DESTINATION resources)
 # 安装阶段同步把皮肤包当作只读资源放到 resources/skins，
 # 与运行期 Config::getResourcePath("skins") 的解析路径对齐
-install(DIRECTORY source/UI/skins/ DESTINATION resources/skins)
+# 只安装运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
+install(FILES
+    source/UI/skins/cyberpunk-neon/skin.json
+    source/UI/skins/cyberpunk-neon/preview.svg
+    DESTINATION resources/skins/cyberpunk-neon)
 
 if(WIN32)
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)

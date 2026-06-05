@@ -10,9 +10,12 @@
  * 实现约束：
  * - GLRenderer / VideoDecoder 等组件涉及 GL 上下文，必须在主线程构建。
  *   所以 Player::open 仍然在主线程同步调用，OpeningScreen 在调用前先绘制
- *   一帧 splash 让用户看到反馈；状态切换时（EXTRACTING → OPENING → STOPPED）
- *   通过 Player::setStateChangeCallback 更新文案，但 yt-dlp 阻塞期间窗口
- *   不会重绘——这与现状一致，且窗口已可见，比之前彻底没有窗口好得多。
+ *   一帧 splash 让用户看到反馈；yt-dlp 提取阶段在 worker 线程运行，主线程
+ *   周期性重绘 splash（按皮肤设定的 redrawIntervalMs）保持动画流畅，同时
+ *   响应 glfwPollEvents 防止系统标记窗口未响应。
+ * - 支持用户取消：检测窗口关闭事件，worker 完成后检查 windowClosed 标志。
+ * - 超时机制：yt-dlp 调用通过 runCommand(cmd, timeoutSec) 传入超时参数，
+ *   超时后 popen 返回空字符串，extract() 识别为失败并返回错误。
  */
 
 #pragma once
