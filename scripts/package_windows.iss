@@ -27,12 +27,16 @@ WizardStyle=modern
 Source: "..\dist\staging\FluxPlayer.exe"; DestDir: "{app}"; Flags: ignoreversion
 ; 运行时 DLL（由 cmake --install + file(GET_RUNTIME_DEPENDENCIES) 精确收集）
 Source: "..\dist\staging\*.dll";          DestDir: "{app}"; Flags: ignoreversion
+; yt-dlp 可执行文件（网页流提取依赖，必须与 exe 同级，否则运行时报「找不到 dlp」）
+Source: "..\dist\staging\yt-dlp.exe";     DestDir: "{app}"; Flags: ignoreversion
 ; GLSL 着色器（运行时从可执行文件目录相对路径加载）
 Source: "..\dist\staging\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
 ; 字体文件（ImGui 渲染字幕和 UI 使用）
 Source: "..\dist\staging\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
 ; 资源图片（纯音频模式兜底封面等）
 Source: "..\dist\staging\source\*";       DestDir: "{app}\source";  Flags: ignoreversion recursesubdirs
+; 内置皮肤资源（运行期 Config::getResourcePath("skins") 解析到 {app}\resources\skins）
+Source: "..\dist\staging\resources\*";    DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs
 
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件

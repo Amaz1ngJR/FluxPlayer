@@ -433,6 +433,15 @@ install(FILES
     source/UI/skins/cyberpunk-neon/preview.svg
     DESTINATION resources/skins/cyberpunk-neon)
 
+# yt-dlp 可执行文件：发布版必须随程序分发到 exe 同级，
+# 否则安装到目标机后 StreamExtractor 找不到 yt-dlp（运行时报「找不到 dlp」）。
+# 运行期由 getYtDlpPath() 优先在 exe 同级目录查找。
+if(WIN32)
+    install(PROGRAMS third_party/yt-dlp/yt-dlp.exe DESTINATION .)
+elseif(APPLE)
+    install(PROGRAMS third_party/yt-dlp/yt-dlp_macos DESTINATION .)
+endif()
+
 if(WIN32)
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     install(CODE "

@@ -64,6 +64,15 @@ cp "$ROOT/source/UI/skins/cyberpunk-neon/preview.svg" \
 # 复制 FFmpeg dylib（rpath 设为 @executable_path，dylib 需与可执行文件同目录）
 find "$BUILD_DIR" -maxdepth 1 -name "*.dylib" -exec cp {} "$APP_BUNDLE/Contents/MacOS/" \;
 
+# yt-dlp：网页流提取依赖，必须与可执行文件同级（getYtDlpPath 优先在 exe 同级查找），
+# 否则装到目标机后运行时报「找不到 dlp」。保留可执行权限。
+if [ -f "$ROOT/third_party/yt-dlp/yt-dlp_macos" ]; then
+    cp "$ROOT/third_party/yt-dlp/yt-dlp_macos" "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
+    chmod +x "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
+else
+    echo "WARNING: third_party/yt-dlp/yt-dlp_macos 缺失，打包后将无法提取网页流"
+fi
+
 # ── 3. 图标处理 ───────────────────────────────────────────────────────────────
 ICNS_OUT="$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 if [ -f "$ROOT/source/pic.icns" ]; then

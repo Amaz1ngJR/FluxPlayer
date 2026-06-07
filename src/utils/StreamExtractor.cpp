@@ -28,6 +28,13 @@
 #include <fcntl.h>
 #endif
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <climits>
+#elif defined(__linux__)
+#include <climits>
+#endif
+
 namespace FluxPlayer {
 
 using json = nlohmann::json;
@@ -51,18 +58,68 @@ static const std::vector<std::string> kDirectExts = {
 // 工具函数：执行命令并捕获 stdout，支持超时
 // ─────────────────────────────────────────────
 
-// 获取 yt-dlp 可执行文件路径
-// 优先使用 third_party/yt-dlp/ 打包版本，找不到则回退到系统 PATH
+// 返回可执行文件所在目录（不含末尾分隔符）。
+// 发布版的 yt-dlp 随安装包拷到 exe 同级，必须按 exe 路径解析而非 CWD
+// （从开始菜单/快捷方式启动时 CWD 不一定是安装目录）。
+static std::string getExeDir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    std::string p(buf);
+    return p.substr(0, p.find_last_of("\\/"));
+#elif defined(__APPLE__)
+    char buf[PATH_MAX];
+    uint32_t size = PATH_MAX;
+    if (_NSGetExecutablePath(buf, &size) != 0) return ".";
+    std::string p(buf);
+    return p.substr(0, p.find_last_of('/'));
+#else
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, PATH_MAX);
+    if (n <= 0) return ".";
+    std::string p(buf, n);
+    return p.substr(0, p.find_last_of('/'));
+#endif
+}
+
+// 获取 yt-dlp 可执行文件路径，按优先级查找：
+//   1) exe 同级目录（发布版安装包把 yt-dlp 拷到这里）
+//   2) YTDLP_BUNDLED_PATH（编译期固定的源码树路径，仅开发期从 build/ 启动时有效）
+//   3) 回退到系统 PATH 中的 "yt-dlp"
 static std::string getYtDlpPath() {
+    // 1) exe 同级：发布版的权威位置（安装包随程序分发）
+#ifdef _WIN32
+    std::string exeLocal = getExeDir() + "\\yt-dlp.exe";
+    if (_access(exeLocal.c_str(), 0) == 0) {
+        LOG_INFO("getYtDlpPath: 命中 exe 同级 " + exeLocal);
+        return exeLocal;
+    }
+#elif defined(__APPLE__)
+    std::string exeLocal = getExeDir() + "/yt-dlp_macos";
+    if (access(exeLocal.c_str(), X_OK) == 0) {
+        LOG_INFO("getYtDlpPath: 命中 exe 同级 " + exeLocal);
+        return exeLocal;
+    }
+#else
+    std::string exeLocal = getExeDir() + "/yt-dlp";
+    if (access(exeLocal.c_str(), X_OK) == 0) {
+        LOG_INFO("getYtDlpPath: 命中 exe 同级 " + exeLocal);
+        return exeLocal;
+    }
+#endif
+
+    // 2) 编译期固定路径（开发期从 build/ 目录直接启动时用源码树里的副本）
 #ifdef YTDLP_BUNDLED_PATH
 #ifdef _WIN32
     int ret = _access(YTDLP_BUNDLED_PATH, 0);  // Windows：0 = 检查文件是否存在
 #else
     int ret = access(YTDLP_BUNDLED_PATH, X_OK);
 #endif
-    LOG_INFO(std::string("getYtDlpPath: path=") + YTDLP_BUNDLED_PATH + " access=" + std::to_string(ret));
+    LOG_INFO(std::string("getYtDlpPath: bundled path=") + YTDLP_BUNDLED_PATH + " access=" + std::to_string(ret));
     if (ret == 0) return YTDLP_BUNDLED_PATH;
 #endif
+
+    // 3) 回退到系统 PATH
     return "yt-dlp";
 }
 
