@@ -51,9 +51,9 @@ constexpr int    kAudioFrameSize = 1024;   ///< AAC 默认每帧采样数（编�
 /// 转码目标视频码率回退（编码器主要由 CRF 控制质量，bit_rate 仅作上限提示）
 constexpr int    kVideoBitRate   = 4000000;
 
-/// 单个输入文件探测信息
-struct InputInfo {
-    std::string path;
+/// 单个片段的探测信息（含截取范围与校验后时长）
+struct ClipInfo {
+    MergeClip clip;              ///< 原始片段（path + start/end）
     bool ok = false;
     // 视频
     int       vIdx   = -1;
@@ -68,8 +68,15 @@ struct InputInfo {
     int       sampleRate = 0;
     int       channels   = 0;
     int       aSampleFmt = -1;
-    double    duration   = 0.0;  ///< 文件时长（秒）
+    double    sourceDuration = 0.0;  ///< 源文件总时长（秒）
+    double    startSec  = 0.0;       ///< 校验后入点
+    double    endSec    = 0.0;       ///< 校验后出点
+    double    clipDuration = 0.0;    ///< endSec - startSec
+    bool      fullClip  = true;      ///< 是否整段（决定能否流拷贝）
 };
+
+/// 片段最小长度（秒），防止 start>=end 导致空片段
+constexpr double kMinClipDuration = 0.1;
 
 /// 把秒数换算到指定 time_base 的整数刻度
 int64_t secToTs(double sec, AVRational tb) {
@@ -77,18 +84,18 @@ int64_t secToTs(double sec, AVRational tb) {
     return (int64_t)std::llround(sec / av_q2d(tb));
 }
 
-/// 探测单个文件的视频/音频参数与时长（探测后立即关闭，不持有句柄）
-InputInfo probeOne(const std::string& path) {
-    InputInfo info;
-    info.path = path;
+/// 探测单个片段的视频/音频参数与源时长，并校验截取范围（探测后立即关闭，不持有句柄）
+ClipInfo probeClip(const MergeClip& clip) {
+    ClipInfo info;
+    info.clip = clip;
 
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
-        LOG_WARN("VideoMerger: 无法打开输入: " + path);
+    if (avformat_open_input(&fmt, clip.path.c_str(), nullptr, nullptr) < 0) {
+        LOG_WARN("VideoMerger: 无法打开输入: " + clip.path);
         return info;
     }
     if (avformat_find_stream_info(fmt, nullptr) < 0) {
-        LOG_WARN("VideoMerger: 无法解析流信息: " + path);
+        LOG_WARN("VideoMerger: 无法解析流信息: " + clip.path);
         avformat_close_input(&fmt);
         return info;
     }
@@ -115,20 +122,42 @@ InputInfo probeOne(const std::string& path) {
     }
 
     if (fmt->duration > 0) {
-        info.duration = (double)fmt->duration / AV_TIME_BASE;
+        info.sourceDuration = (double)fmt->duration / AV_TIME_BASE;
     }
-    info.ok = (info.vIdx >= 0);
     avformat_close_input(&fmt);
+
+    if (info.vIdx < 0) return info;  // 无有效视频流，ok 保持 false
+
+    // —— 校验并规范化截取范围 ——
+    double src = info.sourceDuration;
+    double start = clip.startSec > 0.0 ? clip.startSec : 0.0;
+    double end   = clip.endSec;
+    if (end < 0.0) end = src > 0.0 ? src : 0.0;          // -1 → 源末尾
+    if (src > 0.0 && end > src) end = src;               // 截断到源时长
+    if (src > 0.0 && start > src) start = src;
+    // 源时长未知（src==0）时无法精确校验 end，保留用户输入
+    if (end > 0.0 && end - start < kMinClipDuration) {
+        // 范围非法（start>=end 或过短）：标记失败
+        LOG_WARN("VideoMerger: 片段范围非法 " + clip.path);
+        return info;
+    }
+    info.startSec = start;
+    info.endSec   = end;
+    info.clipDuration = (end > 0.0) ? (end - start)
+                                     : (src > 0.0 ? src - start : 0.0);
+    info.fullClip = (start <= 0.0) && (src <= 0.0 || end >= src - 1e-6);
+    info.ok = true;
     return info;
 }
 
-/// 判断能否走流拷贝：所有文件视频参数一致，且音频要么全无、要么全一致
-bool canStreamCopy(const std::vector<InputInfo>& infos) {
+/// 判断能否走流拷贝：所有片段都是整段，且视频参数一致、音频要么全无、要么全一致
+bool canStreamCopy(const std::vector<ClipInfo>& infos) {
     if (infos.empty()) return false;
-    const InputInfo& a = infos.front();
+    const ClipInfo& a = infos.front();
     bool audioUniformPresent = (a.aIdx >= 0);
 
     for (const auto& b : infos) {
+        if (!b.fullClip) return false;  // 任一片段有截取 → 必须精确转码
         if (b.vCodec != a.vCodec || b.width != a.width ||
             b.height != a.height || b.pixFmt != a.pixFmt) {
             return false;
@@ -157,12 +186,24 @@ VideoMerger::~VideoMerger() {
 }
 
 bool VideoMerger::start(const std::vector<std::string>& inputs, const std::string& outputPath) {
+    // 旧入口：把每个路径转换为「整段」片段后委托给 clip 版本，保证基础合并不回退
+    std::vector<MergeClip> clips;
+    clips.reserve(inputs.size());
+    for (const auto& p : inputs) {
+        MergeClip c;
+        c.path = p;          // startSec=0, endSec=-1 即整段
+        clips.push_back(std::move(c));
+    }
+    return start(clips, outputPath);
+}
+
+bool VideoMerger::start(const std::vector<MergeClip>& clips, const std::string& outputPath) {
     if (running_.load()) {
         LOG_WARN("VideoMerger: 已在运行");
         return false;
     }
-    if (inputs.size() < 2) {
-        fail("Please select at least 2 files");
+    if (clips.size() < 2) {
+        fail("Please select at least 2 clips");
         return false;
     }
     cancelRequested_.store(false);
@@ -177,7 +218,7 @@ bool VideoMerger::start(const std::vector<std::string>& inputs, const std::strin
     }
     state_.store(State::Probing);
     running_.store(true);
-    thread_ = std::thread(&VideoMerger::mergeLoop, this, inputs, outputPath);
+    thread_ = std::thread(&VideoMerger::mergeLoop, this, clips, outputPath);
     return true;
 }
 
@@ -221,8 +262,8 @@ void VideoMerger::fail(const std::string& msg) {
 
 namespace {
 
-/// 流拷贝 concat：infos 已保证视频参数一致、音频要么全无要么全一致
-bool runStreamCopy(const std::vector<InputInfo>& infos, const std::string& outputPath,
+/// 流拷贝 concat：infos 已保证全整段、视频参数一致、音频要么全无要么全一致
+bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& outputPath,
                    std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                    std::string& err) {
     bool keepAudio = (infos.front().aIdx >= 0);
@@ -248,8 +289,8 @@ bool runStreamCopy(const std::vector<InputInfo>& infos, const std::string& outpu
         if (cancelFlag.load()) { cleanup(); return false; }
 
         AVFormatContext* in = nullptr;
-        if (avformat_open_input(&in, infos[i].path.c_str(), nullptr, nullptr) < 0) {
-            err = "Failed to open input: " + infos[i].path; cleanup(); return false;
+        if (avformat_open_input(&in, infos[i].clip.path.c_str(), nullptr, nullptr) < 0) {
+            err = "Failed to open input: " + infos[i].clip.path; cleanup(); return false;
         }
         avformat_find_stream_info(in, nullptr);
         int vIdx = infos[i].vIdx, aIdx = infos[i].aIdx;
@@ -303,8 +344,8 @@ bool runStreamCopy(const std::vector<InputInfo>& infos, const std::string& outpu
         }
         av_packet_free(&pkt);
 
-        // 推进各输出流偏移（按本文件时长，保证下一个文件衔接且 A/V 同步）
-        double dur = infos[i].duration > 0 ? infos[i].duration : 0.0;
+        // 推进各输出流偏移（流拷贝下片段都是整段，按片段时长推进，保持 A/V 同步）
+        double dur = infos[i].clipDuration > 0 ? infos[i].clipDuration : 0.0;
         streamOffset[0] += secToTs(dur, out->streams[outVIdx]->time_base);
         if (keepAudio) streamOffset[1] += secToTs(dur, out->streams[outAIdx]->time_base);
         processed.store(processed.load() + dur);
@@ -445,15 +486,15 @@ void drainAudioFifo(TranscodeCtx& tc, AVPacket* pkt, bool drainAll) {
 
 namespace {
 
-/// 转码单个文件：解码视频/音频，缩放到统一分辨率、重采样到统一格式后编码写出
-/// @param baseSec        本文件在合并时间轴上的起始秒数（前序文件累计时长）
-/// @param outConsumedSec 输出参数：本文件实际消耗时长（供调用方推进 baseSec）
-bool transcodeFile(const InputInfo& info, TranscodeCtx& tc, int targetW, int targetH,
+/// 转码单个片段：seek 到入点 → 丢弃入点前帧 → 解码/缩放/重采样/编码 → 出点截断
+/// @param timelineBaseSec 本片段在合并时间轴上的起始秒数（前序片段累计裁剪时长）
+/// @param outConsumedSec  输出参数：本片段实际消耗时长（供调用方推进 timelineBaseSec）
+bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targetH,
                    std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
-                   double baseSec, double& outConsumedSec, std::string& err) {
+                   double timelineBaseSec, double& outConsumedSec, std::string& err) {
     AVFormatContext* in = nullptr;
-    if (avformat_open_input(&in, info.path.c_str(), nullptr, nullptr) < 0) {
-        err = "Failed to open input: " + info.path; return false;
+    if (avformat_open_input(&in, info.clip.path.c_str(), nullptr, nullptr) < 0) {
+        err = "Failed to open input: " + info.clip.path; return false;
     }
     avformat_find_stream_info(in, nullptr);
 
@@ -492,15 +533,30 @@ bool transcodeFile(const InputInfo& info, TranscodeCtx& tc, int targetW, int tar
         }
     }
 
+    // —— seek 到入点（startSec>0 时）——
+    // 用 AVSEEK_FLAG_BACKWARD 跳到入点前最近关键帧，随后解码并丢弃入点前的帧，
+    // 保证裁剪边界尽量贴合用户选取的画面。
+    const double startSec = info.startSec;
+    const double endSec   = info.endSec;       // <=0 表示无出点限制（取到末尾）
+    const bool   hasEnd   = endSec > 0.0;
+    if (startSec > 0.0) {
+        int64_t seekTarget = (int64_t)(startSec * AV_TIME_BASE);
+        avformat_seek_file(in, -1, INT64_MIN, seekTarget, seekTarget, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(vDec);
+        if (aDec) avcodec_flush_buffers(aDec);
+    }
+
     SwsContext* sws = nullptr;
     AVFrame* dstV = nullptr;       // 缩放后的目标视频帧（YUV420P, targetWxH）
     AVFrame* frame = av_frame_alloc();
     AVPacket* pkt = av_packet_alloc();
     AVRational vInTb = in->streams[info.vIdx]->time_base;  // 输入视频流时间基
-    double fileFirstVideoSec = -1.0;  // 本文件首个视频帧时间（秒），用于片内归零
-    double maxRelSec = 0.0;           // 本文件已解码视频的最大相对时间（推进 baseSec）
+    AVRational aInTb = (info.aIdx >= 0) ? in->streams[info.aIdx]->time_base : AVRational{1, 1};
+    double maxRelSec = 0.0;            // 本片段已写出视频的最大相对时间（推进 timelineBase）
+    double lastSrcSec = startSec;      // 缺时间戳时用于递推
     double frameDurSec = (info.frameRate.num > 0)
         ? av_q2d(av_inv_q(info.frameRate)) : 1.0 / 25.0;  // 缺时间戳时的回退步长
+    bool reachedEnd = false;           // 视频已到出点，停止本片段
 
     auto cleanup = [&]() {
         if (sws) sws_freeContext(sws);
@@ -513,13 +569,23 @@ bool transcodeFile(const InputInfo& info, TranscodeCtx& tc, int targetW, int tar
         if (in) avformat_close_input(&in);
     };
 
-    while (av_read_frame(in, pkt) >= 0) {
+    while (!reachedEnd && av_read_frame(in, pkt) >= 0) {
         if (cancelFlag.load()) { cleanup(); err = "Cancelled"; return false; }
 
         // ── 视频包 ──
         if (pkt->stream_index == info.vIdx) {
             if (avcodec_send_packet(vDec, pkt) >= 0) {
                 while (avcodec_receive_frame(vDec, frame) >= 0) {
+                    // 帧源时间（绝对秒）；缺时间戳时按帧时长递推
+                    int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                                 ? frame->best_effort_timestamp : frame->pts;
+                    double srcSec = (ts != AV_NOPTS_VALUE)
+                                    ? ts * av_q2d(vInTb) : lastSrcSec + frameDurSec;
+                    lastSrcSec = srcSec;
+
+                    if (srcSec < startSec - 1e-6) { av_frame_unref(frame); continue; }       // 入点前丢弃
+                    if (hasEnd && srcSec >= endSec) { reachedEnd = true; av_frame_unref(frame); break; }  // 出点截断
+
                     if (!sws) {  // 首帧惰性创建缩放器（按真实帧格式）
                         sws = sws_getContext(frame->width, frame->height, (AVPixelFormat)frame->format,
                                              targetW, targetH, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
@@ -532,27 +598,17 @@ bool transcodeFile(const InputInfo& info, TranscodeCtx& tc, int targetW, int tar
                     sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
                               dstV->data, dstV->linesize);
 
-                    // 视频 PTS 由帧真实时间戳驱动：片内相对时间 + 累计偏移 baseSec，
-                    // 换算到编码器 1/90000 时间基。这样不同文件帧率不一致时仍与真实
-                    // 时间对齐，不会出现「第二段快放/卡住」。缺时间戳时按帧序回退。
-                    int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-                                 ? frame->best_effort_timestamp : frame->pts;
-                    double relSec;
-                    if (ts != AV_NOPTS_VALUE) {
-                        double sec = ts * av_q2d(vInTb);
-                        if (fileFirstVideoSec < 0.0) fileFirstVideoSec = sec;
-                        relSec = sec - fileFirstVideoSec;
-                        if (relSec < 0.0) relSec = maxRelSec + frameDurSec;
-                    } else {
-                        relSec = maxRelSec + frameDurSec;  // 无时间戳：按帧时长递推
-                    }
+                    // 输出 PTS = 片段内相对时间(srcSec-startSec) + 时间轴偏移，换算到 1/90000。
+                    // 多片段拼接时输出时间轴连续，且每段从相对 0 开始；不同帧率也与真实时间对齐。
+                    double relSec = srcSec - startSec;
+                    if (relSec < 0.0) relSec = 0.0;
                     if (relSec > maxRelSec) maxRelSec = relSec;
-                    int64_t pts = (int64_t)((baseSec + relSec) * 90000.0 + 0.5);
+                    int64_t pts = (int64_t)((timelineBaseSec + relSec) * 90000.0 + 0.5);
                     if (pts <= tc.vLastPts) pts = tc.vLastPts + 1;  // 保证严格递增
                     tc.vLastPts = pts;
                     dstV->pts = pts;
                     encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, dstV, pkt);
-                    processed.store(baseSec + relSec);
+                    processed.store(timelineBaseSec + relSec);
                     av_frame_unref(frame);
                 }
             }
@@ -561,6 +617,16 @@ bool transcodeFile(const InputInfo& info, TranscodeCtx& tc, int targetW, int tar
         else if (swr && pkt->stream_index == info.aIdx) {
             if (avcodec_send_packet(aDec, pkt) >= 0) {
                 while (avcodec_receive_frame(aDec, frame) >= 0) {
+                    // 音频按帧裁剪（首版帧级精度，误差数十毫秒）
+                    int64_t ats = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                                  ? frame->best_effort_timestamp : frame->pts;
+                    double aSrcSec = (ats != AV_NOPTS_VALUE) ? ats * av_q2d(aInTb) : -1.0;
+                    double aFrameDur = (aDec->sample_rate > 0)
+                        ? (double)frame->nb_samples / aDec->sample_rate : 0.0;
+                    if (aSrcSec >= 0.0) {
+                        if (aSrcSec + aFrameDur <= startSec) { av_frame_unref(frame); continue; }  // 整帧在入点前
+                        if (hasEnd && aSrcSec >= endSec) { av_frame_unref(frame); continue; }      // 出点后丢弃
+                    }
                     int outSamples = (int)av_rescale_rnd(
                         swr_get_delay(swr, aDec->sample_rate) + frame->nb_samples,
                         tc.targetSampleRate, aDec->sample_rate, AV_ROUND_UP);
@@ -579,32 +645,41 @@ bool transcodeFile(const InputInfo& info, TranscodeCtx& tc, int targetW, int tar
         av_packet_unref(pkt);
     }
 
-    // flush 视频解码器残留帧（音频尾部留待全部文件处理完再 flush，保证 PTS 连续）
-    avcodec_send_packet(vDec, nullptr);
-    while (avcodec_receive_frame(vDec, frame) >= 0) {
-        if (sws) {
-            sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dstV->data, dstV->linesize);
-            double relSec = maxRelSec + frameDurSec;  // flush 帧无可靠时间戳，按帧时长递推
-            maxRelSec = relSec;
-            int64_t pts = (int64_t)((baseSec + relSec) * 90000.0 + 0.5);
-            if (pts <= tc.vLastPts) pts = tc.vLastPts + 1;
-            tc.vLastPts = pts;
-            dstV->pts = pts;
-            encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, dstV, pkt);
+    // flush 视频解码器残留帧（仅当未到出点；音频尾部留待全部片段处理完再 flush 保证 PTS 连续）
+    if (!reachedEnd) {
+        avcodec_send_packet(vDec, nullptr);
+        while (avcodec_receive_frame(vDec, frame) >= 0) {
+            int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                         ? frame->best_effort_timestamp : frame->pts;
+            double srcSec = (ts != AV_NOPTS_VALUE) ? ts * av_q2d(vInTb) : lastSrcSec + frameDurSec;
+            lastSrcSec = srcSec;
+            if (srcSec < startSec - 1e-6) { av_frame_unref(frame); continue; }
+            if (hasEnd && srcSec >= endSec) { av_frame_unref(frame); break; }
+            if (sws) {
+                sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dstV->data, dstV->linesize);
+                double relSec = srcSec - startSec;
+                if (relSec < 0.0) relSec = 0.0;
+                if (relSec > maxRelSec) maxRelSec = relSec;
+                int64_t pts = (int64_t)((timelineBaseSec + relSec) * 90000.0 + 0.5);
+                if (pts <= tc.vLastPts) pts = tc.vLastPts + 1;
+                tc.vLastPts = pts;
+                dstV->pts = pts;
+                encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, dstV, pkt);
+            }
+            av_frame_unref(frame);
         }
-        av_frame_unref(frame);
     }
     cleanup();
-    // 返回本文件实际消耗时长：优先用解码得到的最大相对时间（+一帧），比容器 duration 更准
+    // 本片段消耗时长：优先用裁剪后实际写出的最大相对时间（+一帧），否则回退校验时长
     double consumed = maxRelSec > 0.0 ? (maxRelSec + frameDurSec)
-                                      : (info.duration > 0 ? info.duration : 0.0);
+                                      : (info.clipDuration > 0 ? info.clipDuration : 0.0);
     outConsumedSec = consumed;
-    processed.store(baseSec + consumed);
+    processed.store(timelineBaseSec + consumed);
     return true;
 }
 
 /// 统一转码主流程：建立输出与编码器，逐文件转码，最后 flush
-bool runTranscode(const std::vector<InputInfo>& infos, const std::string& outputPath,
+bool runTranscode(const std::vector<ClipInfo>& infos, const std::string& outputPath,
                   bool keepAudio, std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                   std::string& err) {
     TranscodeCtx tc;
@@ -642,15 +717,17 @@ bool runTranscode(const std::vector<InputInfo>& infos, const std::string& output
     }
     if (avformat_write_header(tc.out, nullptr) < 0) { err = "Failed to write header"; cleanup(); return false; }
 
-    double baseSec = 0.0;
+    // 时间轴起点：逐片段累计「裁剪后」消耗时长
+    double timelineBaseSec = 0.0;
     for (const auto& info : infos) {
         if (cancelFlag.load()) { cleanup(); return false; }
         double consumed = 0.0;
-        if (!transcodeFile(info, tc, targetW, targetH, cancelFlag, processed, baseSec, consumed, err)) {
+        if (!transcodeClip(info, tc, targetW, targetH, cancelFlag, processed, timelineBaseSec, consumed, err)) {
             cleanup(); return false;
         }
-        // 按实际消耗时长推进时间轴；为零（异常文件）时回退容器 duration
-        baseSec += consumed > 0.0 ? consumed : (info.duration > 0 ? info.duration : 0.0);
+        // 按实际消耗时长推进时间轴；为零（异常）时回退校验裁剪时长
+        timelineBaseSec += consumed > 0.0 ? consumed
+                                          : (info.clipDuration > 0 ? info.clipDuration : 0.0);
     }
 
     // flush 音频 FIFO 尾部与编码器
@@ -671,32 +748,32 @@ bool runTranscode(const std::vector<InputInfo>& infos, const std::string& output
 // 后台线程主函数
 // ─────────────────────────────────────────────
 
-void VideoMerger::mergeLoop(std::vector<std::string> inputs, std::string outputPath) {
+void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath) {
     avformat_network_init();
 
     // —— 探测阶段 ——
     state_.store(State::Probing);
-    std::vector<InputInfo> infos;
-    infos.reserve(inputs.size());
+    std::vector<ClipInfo> infos;
+    infos.reserve(clips.size());
     double total = 0.0;
-    for (const auto& path : inputs) {
+    for (const auto& clip : clips) {
         if (cancelRequested_.load()) { state_.store(State::Cancelled); running_.store(false); return; }
-        InputInfo info = probeOne(path);
+        ClipInfo info = probeClip(clip);
         if (!info.ok) {
-            fail("File has no valid video stream: " + path);
+            fail("Invalid clip (no video stream or bad range): " + clip.path);
             running_.store(false);
             return;
         }
-        total += info.duration;
+        total += info.clipDuration;   // 总时长按「裁剪后」片段时长累计
         infos.push_back(std::move(info));
     }
     totalDuration_.store(total);
 
-    // —— 智能决策 ——
+    // —— 智能决策 ——（任一片段有截取 → canStreamCopy 内部已拒绝，走精确转码）
     bool streamCopy = canStreamCopy(infos);
     bool keepAudio = true;
     for (const auto& info : infos) {
-        if (info.aIdx < 0) { keepAudio = false; break; }  // 任一文件无音频 → 转码时丢音轨
+        if (info.aIdx < 0) { keepAudio = false; break; }  // 任一片段无音频 → 转码时丢音轨
     }
 
     // 校正输出扩展名：流拷贝→.mkv，转码→.mp4
@@ -709,7 +786,7 @@ void VideoMerger::mergeLoop(std::vector<std::string> inputs, std::string outputP
     std::filesystem::create_directories(op.parent_path());
 
     LOG_INFO(std::string("VideoMerger: 策略=") + (streamCopy ? "流拷贝" : "转码") +
-             ", 文件数=" + std::to_string(infos.size()) + ", 输出=" + finalPath);
+             ", 片段数=" + std::to_string(infos.size()) + ", 输出=" + finalPath);
 
     state_.store(State::Merging);
     transcoded_.store(!streamCopy);

@@ -191,6 +191,7 @@ set(FLUXPLAYER_SOURCES
     src/utils/CookieStore.cpp
     src/utils/DashMerger.cpp
     src/utils/VideoMerger.cpp
+    src/utils/VideoFramePreviewer.cpp
     src/utils/Downloader.cpp
     src/recorder/Recorder.cpp
     src/video/FrameInterpolator.cpp

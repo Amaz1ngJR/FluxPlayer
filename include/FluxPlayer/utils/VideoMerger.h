@@ -33,6 +33,24 @@
 namespace FluxPlayer {
 
 /**
+ * @brief 合并时间线上的一个片段
+ *
+ * 同一个 path 可以出现多次，每次作为独立片段拥有不同的入点/出点。
+ * 片段是合并时间线的基本单位（不是「文件」本身）。
+ */
+struct MergeClip {
+    std::string path;
+    double startSec = 0.0;      ///< 入点（秒），0 表示从头
+    double endSec   = -1.0;     ///< 出点（秒），-1 表示到文件末尾
+    double durationSec = 0.0;   ///< 源文件总时长（探测后填充，供 UI 与校验使用）
+
+    /// 是否为「整段」（未设置自定义截取范围）
+    bool isFullClip() const {
+        return startSec <= 0.0 && (endSec < 0.0 || endSec >= durationSec);
+    }
+};
+
+/**
  * @brief 多视频合并器
  *
  * 用法：
@@ -62,12 +80,26 @@ public:
     VideoMerger& operator=(const VideoMerger&) = delete;
 
     /**
-     * @brief 启动后台合并线程
+     * @brief 启动后台合并线程（整段合并，向后兼容旧入口）
      * @param inputs     按合并顺序排列的本地文件路径（至少 2 个）
      * @param outputPath 输出文件完整路径（扩展名会按实际策略校正为 .mkv/.mp4）
      * @return 已在运行 / 参数非法时返回 false
+     *
+     * 内部把每个路径转换为「整段」MergeClip 后委托给 clip 版本，
+     * 现有基础合并行为不变。
      */
     bool start(const std::vector<std::string>& inputs, const std::string& outputPath);
+
+    /**
+     * @brief 启动后台合并线程（支持每个片段自定义截取范围）
+     * @param clips      按合并顺序排列的片段（至少 2 个；可含同一 path 的多个片段）
+     * @param outputPath 输出文件完整路径（扩展名会按实际策略校正为 .mkv/.mp4）
+     * @return 已在运行 / 参数非法时返回 false
+     *
+     * 只要存在任意片段设置了自定义 start/end，就走「精确转码」路径（.mp4），
+     * 保证输出边界尽量贴合用户选取的画面；全部整段且参数一致时仍走流拷贝。
+     */
+    bool start(const std::vector<MergeClip>& clips, const std::string& outputPath);
 
     /// 请求取消：置原子标志，后台线程会尽快中止并删除半成品文件
     void cancel();
@@ -95,7 +127,7 @@ public:
 
 private:
     /// 后台线程主函数：探测 → 决策 → 写出
-    void mergeLoop(std::vector<std::string> inputs, std::string outputPath);
+    void mergeLoop(std::vector<MergeClip> clips, std::string outputPath);
 
     /// 设置失败状态与错误信息（线程安全）
     void fail(const std::string& msg);

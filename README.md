@@ -30,7 +30,7 @@
 - 📸 截图功能（PNG / JPEG，快捷键 P）
 - 🎥 录像功能（转封装原始流，支持 low/medium/high/original 四档质量）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
-- 🎬 多视频合并（主页 MERGE VIDEOS 入口，多选/拖放添加、调序删除；智能模式：参数一致走流拷贝极速无损，否则统一转码 H.264/AAC；输出到录制目录）
+- 🎬 多视频合并与片段截取（主页 MERGE VIDEOS 入口）：多选/拖放添加、拖拽调序、单项删除；每个片段可设 IN/OUT 截取范围并实时预览入点/出点画面；同一文件可多次添加各取一段；智能模式：全整段且参数一致走流拷贝极速无损，含截取或参数不一致时统一转码 H.264/AAC 帧级精确；输出到录制目录
 - 🔁 循环播放
 - ⏩ 播放速度控制（0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x），音频最近邻重采样变速
 - 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
@@ -73,7 +73,7 @@ FluxPlayer/
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
 │   ├── ui/               # 界面 (Window, Controller, HomeScreen, MergeScreen)
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, Downloader)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, Downloader)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档
