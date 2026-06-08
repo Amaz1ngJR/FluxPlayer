@@ -25,10 +25,12 @@ class UiContext;
  * @brief HomeScreen 运行结果
  *
  * - shouldQuit == true  → 用户关闭了窗口，程序应整体退出
- * - shouldQuit == false → mediaPath 中包含用户选择的媒体路径，应进入 Opening
+ * - openMerge  == true  → 用户点击「MERGE VIDEOS」，应进入视频合并界面
+ * - 否则 mediaPath 中包含用户选择的媒体路径，应进入 Opening
  */
 struct HomeScreenResult {
     bool shouldQuit;
+    bool openMerge = false;     ///< true 表示进入 MergeScreen 视频合并界面
     std::string mediaPath;
 };
 
@@ -93,6 +95,7 @@ private:
 
     bool dropReceived_ = false;
     std::string droppedFile_;
+    bool mergeRequested_ = false;  ///< 用户点击「MERGE VIDEOS」按钮的标志
 
     // 内置登录询问弹窗状态
     bool   loginPromptOpen_      = false;

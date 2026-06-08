@@ -30,6 +30,7 @@
 - 📸 截图功能（PNG / JPEG，快捷键 P）
 - 🎥 录像功能（转封装原始流，支持 low/medium/high/original 四档质量）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
+- 🎬 多视频合并（主页 MERGE VIDEOS 入口，多选/拖放添加、调序删除；智能模式：参数一致走流拷贝极速无损，否则统一转码 H.264/AAC；输出到录制目录）
 - 🔁 循环播放
 - ⏩ 播放速度控制（0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x），音频最近邻重采样变速
 - 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
@@ -71,8 +72,8 @@ FluxPlayer/
 │   ├── recorder/         # 录制器 (Recorder)
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
-│   ├── ui/               # 界面 (Window, Controller, HomeScreen)
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, Downloader)
+│   ├── ui/               # 界面 (Window, Controller, HomeScreen, MergeScreen)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, Downloader)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档
@@ -452,6 +453,14 @@ uiVisible=true
 showMediaInfo=true
 # showStats: 是否显示统计信息面板 (true / false)
 showStats=true
+# 说明：当前激活皮肤 ID（皮肤包目录名）。无效时回退到内置 cyberpunk-neon。
+# 取值：cyberpunk-neon 等已安装皮肤 id
+# 默认：cyberpunk-neon
+skinId=cyberpunk-neon
+# 说明：是否监听激活皮肤目录变更并热加载（无需重启即可预览皮肤修改）
+# 取值：true / false
+# 默认：true
+skinHotReload=true
 
 [Playback]
 # loopPlayback: 是否循环播放 (true / false)
@@ -478,6 +487,7 @@ screenshotFormat=png
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）
+#   多视频合并（MERGE VIDEOS）的输出文件也保存在此目录，文件名形如 FluxPlayer_Merge_<时间戳>.mkv/.mp4
 #   macOS:   ~/Library/Caches/FluxPlayer/Record
 #   Windows: %LOCALAPPDATA%\FluxPlayer\Record
 #   Linux:   ~/.cache/FluxPlayer/Record

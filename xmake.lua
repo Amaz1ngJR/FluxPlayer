@@ -195,6 +195,8 @@ target("FluxPlayer")
     add_files("src/renderer/Shader.cpp", {unity_ignored = true})
     add_files("src/ui/Window.cpp", {unity_ignored = true})
     add_files("src/ui/HomeScreen.cpp", {unity_ignored = true})
+    -- MergeScreen 同样 include <glad/glad.h> + GLFW + ImGui，需单独编译
+    add_files("src/ui/MergeScreen.cpp", {unity_ignored = true})
     -- UiContext 与 OpeningScreen 直接 include <glad/glad.h> + GLFW，跟 Controller 等其他 GL TU 不能合并
     add_files("src/ui/UiContext.cpp", {unity_ignored = true})
     add_files("src/ui/OpeningScreen.cpp", {unity_ignored = true})

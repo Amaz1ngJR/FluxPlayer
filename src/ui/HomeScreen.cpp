@@ -286,6 +286,14 @@ HomeScreenResult HomeScreen::run() {
             break;
         }
 
+        // 用户点击「MERGE VIDEOS」：返回 openMerge 标志，由 main 进入合并界面
+        if (mergeRequested_) {
+            mergeRequested_ = false;
+            result.openMerge = true;
+            ImGui::EndFrame();
+            break;
+        }
+
         // ── ImGui 帧结束 + OpenGL 渲染 ──
         ImGui::Render();  // 生成绘制数据
 
@@ -513,6 +521,41 @@ void HomeScreen::renderUI() {
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
         ImGui::TextUnformatted(drop);
         ImGui::PopStyleColor();
+    }
+
+    // 次按钮 MERGE VIDEOS：accent.secondary 描边，进入多视频合并界面
+    {
+        ImGui::Dummy(ImVec2(0, home.urlLabelGap));
+        float btnW = home.localButtonW;
+        float btnH = home.localButtonH;
+        ImGui::SetCursorPosX((contentW - btnW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+
+        ImVec4 hov = ToImVec4(sk.colors.accentSecondary); hov.w *= 0.12f;
+        ImVec4 act = ToImVec4(sk.colors.accentSecondary); act.w *= 0.25f;
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0,0,0,0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  act);
+        ImGui::PushStyleColor(ImGuiCol_Text,          ToImVec4(sk.colors.accentSecondary));
+        ImGui::PushStyleColor(ImGuiCol_Border,        ToImVec4(sk.colors.accentSecondary));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+
+        bool mergeClicked = ImGui::Button("+  MERGE VIDEOS", ImVec2(btnW, btnH));
+
+        if (ImGui::IsItemHovered()) {
+            ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
+            DrawGlowRect(ImGui::GetWindowDrawList(), bmin, bmax,
+                         sk.colors.accentSecondary, sk, sk.metrics.radius.button);
+        }
+
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(5);
+
+        if (mergeClicked) {
+            mergeRequested_ = true;
+            errorMessage_.clear();
+            LOG_INFO("MergeScreen requested");
+        }
     }
 
     ImGui::Dummy(ImVec2(0, home.sectionGap));

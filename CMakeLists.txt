@@ -177,6 +177,7 @@ set(FLUXPLAYER_SOURCES
     src/subtitle/SubtitleManager.cpp
     src/ui/Controller.cpp
     src/ui/HomeScreen.cpp
+    src/ui/MergeScreen.cpp
     src/ui/OpeningScreen.cpp
     src/ui/SkinManager.cpp
     src/ui/SkinRenderer.cpp
@@ -189,6 +190,7 @@ set(FLUXPLAYER_SOURCES
     src/utils/StreamExtractor.cpp
     src/utils/CookieStore.cpp
     src/utils/DashMerger.cpp
+    src/utils/VideoMerger.cpp
     src/utils/Downloader.cpp
     src/recorder/Recorder.cpp
     src/video/FrameInterpolator.cpp

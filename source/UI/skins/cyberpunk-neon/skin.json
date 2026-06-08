@@ -67,7 +67,7 @@
       "mainPlayButton": [80, 22],
       "iconButton": [24, 22],
       "chipButton": [76, 20],
-      "homeSourceCard": [520, 400],
+      "homeSourceCard": [520, 460],
       "openingPanel": [560, 200]
     },
     "opacity": {

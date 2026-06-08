@@ -126,7 +126,7 @@ struct SkinSize {
     float chipBtnW = 76.0f;
     float chipBtnH = 20.0f;
     float homeSourceCardW = 520.0f;
-    float homeSourceCardH = 400.0f;
+    float homeSourceCardH = 460.0f;
     float openingPanelW = 560.0f;
     float openingPanelH = 200.0f;
 };

@@ -13,6 +13,7 @@
 #include "FluxPlayer/core/MediaInfo.h"
 #include "FluxPlayer/ui/Controller.h"
 #include "FluxPlayer/ui/HomeScreen.h"
+#include "FluxPlayer/ui/MergeScreen.h"
 #include "FluxPlayer/ui/OpeningScreen.h"
 #include "FluxPlayer/ui/UiContext.h"
 #include "FluxPlayer/ui/Window.h"
@@ -282,6 +283,20 @@ int main(int argc, char* argv[]) {
             home.destroy();
 
             if (hr.shouldQuit || ui.shouldClose()) break;
+
+            // ── 视频合并界面（不进入 Player 流程，结束后回 HomeScreen） ──
+            if (hr.openMerge) {
+                MergeScreen merge(ui);
+                if (!merge.init()) {
+                    LOG_ERROR("MergeScreen init failed");
+                    break;
+                }
+                MergeScreenResult mr = merge.run();
+                merge.destroy();
+                if (mr.shouldQuit || ui.shouldClose()) break;
+                continue;  // 回到 HomeScreen
+            }
+
             pendingPath = hr.mediaPath;
             if (pendingPath.empty()) continue;
 

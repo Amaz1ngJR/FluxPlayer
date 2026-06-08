@@ -70,6 +70,7 @@ screenshotFormat=png
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）
+#   多视频合并（MERGE VIDEOS）的输出文件也保存在此目录，文件名形如 FluxPlayer_Merge_<时间戳>.mkv/.mp4
 #   macOS:   ~/Library/Caches/FluxPlayer/Record
 #   Windows: %LOCALAPPDATA%\FluxPlayer\Record
 #   Linux:   ~/.cache/FluxPlayer/Record
