@@ -172,14 +172,18 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
         return result;
     }
 
-    // seek 到目标时间前最近关键帧
+    AVRational tb = st->time_base;
+    // 0 基准归一化：用户的 timestampSec 是 0 基准，而帧 PTS / seek 走文件绝对时间轴，
+    // 部分 MP4/MOV 的流 start_time 非 0，需加偏移后 seek、解码时再减回比较。
+    double startOffset = (st->start_time != AV_NOPTS_VALUE) ? st->start_time * av_q2d(tb) : 0.0;
+
+    // seek 到目标时间前最近关键帧（目标按绝对时间轴 = 0 基准目标 + start_time 偏移）
     if (timestampSec > 0.0) {
-        int64_t target = (int64_t)(timestampSec * AV_TIME_BASE);
+        int64_t target = (int64_t)((timestampSec + startOffset) * AV_TIME_BASE);
         avformat_seek_file(fmt, -1, INT64_MIN, target, target, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(ctx);
     }
 
-    AVRational tb = st->time_base;
     AVFrame* frame = av_frame_alloc();
     AVPacket* pkt = av_packet_alloc();
     SwsContext* sws = nullptr;
@@ -199,7 +203,7 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
             while (avcodec_receive_frame(ctx, frame) >= 0) {
                 int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
                              ? frame->best_effort_timestamp : frame->pts;
-                double sec = (ts != AV_NOPTS_VALUE) ? ts * av_q2d(tb) : timestampSec;
+                double sec = (ts != AV_NOPTS_VALUE) ? ts * av_q2d(tb) - startOffset : timestampSec;
                 // 解码到目标时间附近的第一帧（>= 目标，或无时间戳时取首帧）
                 if (sec + 1e-6 < timestampSec && ts != AV_NOPTS_VALUE) { av_frame_unref(frame); continue; }
 

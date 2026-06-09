@@ -648,6 +648,8 @@ void MergeScreen::renderClipEditor(float editorW, float editorH) {
         ImGui::SliderFloat("##inSlider", &startV, 0.0f, 1.0f, "");
         ImGui::EndDisabled();
     }
+    // 紧跟 IN slider 捕获其释放状态（IsItemDeactivatedAfterEdit 只对上一个 item 有效）
+    bool inReleased = durKnown && ImGui::IsItemDeactivatedAfterEdit();
     ImGui::PopStyleColor(2);
     ImGui::SameLine();
     ImGui::TextUnformatted(formatTime(startV).c_str());
@@ -668,6 +670,8 @@ void MergeScreen::renderClipEditor(float editorW, float editorH) {
         ImGui::SliderFloat("##outSlider", &endV, 0.0f, 1.0f, "");
         ImGui::EndDisabled();
     }
+    // 紧跟 OUT slider 捕获其释放状态
+    bool outReleased = durKnown && ImGui::IsItemDeactivatedAfterEdit();
     ImGui::PopStyleColor(2);
     ImGui::SameLine();
     ImGui::TextUnformatted(formatTime(endV).c_str());
@@ -683,9 +687,9 @@ void MergeScreen::renderClipEditor(float editorW, float editorH) {
         c.clip.endSec = (endV >= dur - 1e-3f) ? -1.0 : (double)endV;  // 贴到末尾视为整段尾
         requestPreview(PreviewEdge::Out, false);
     }
-    // 鼠标释放时强制刷新一次最终帧
-    if (ImGui::IsItemDeactivatedAfterEdit() && durKnown)
-        requestPreview(PreviewEdge::Out, true);
+    // 任一滑块鼠标释放时，按对应边强制刷新一次最终帧（分别绑定，避免只刷 OUT）
+    if (inReleased)  requestPreview(PreviewEdge::In, true);
+    if (outReleased) requestPreview(PreviewEdge::Out, true);
 
     ImGui::Dummy(ImVec2(0, 4));
     // 快捷按钮

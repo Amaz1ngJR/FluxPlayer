@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 
 namespace FluxPlayer {
 
@@ -194,7 +195,8 @@ private:
     std::atomic<double> externalClockOffset_;  // 相对于起始时间的偏移
 
     // 时钟更新时间（用于计算漂移）
-    std::chrono::steady_clock::time_point audioClockUpdateTime_;
+    // 音频回调线程写、渲染线程读；用 steady_clock 纳秒计数避免跨线程读写 time_point。
+    std::atomic<int64_t> audioClockUpdateNs_;
     std::chrono::steady_clock::time_point videoClockUpdateTime_;
 
     // 暂停状态

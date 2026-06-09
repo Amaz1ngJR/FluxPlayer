@@ -25,12 +25,14 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/samplefmt.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
 
 #include <filesystem>
 #include <cmath>
+#include <algorithm>
 
 namespace FluxPlayer {
 
@@ -202,6 +204,9 @@ bool VideoMerger::start(const std::vector<MergeClip>& clips, const std::string& 
         LOG_WARN("VideoMerger: 已在运行");
         return false;
     }
+    // 上一次合并已结束（running_==false）但 thread_ 仍 joinable：必须先 join，
+    // 否则对 joinable 的 std::thread 赋值会触发 std::terminate（MERGE AGAIN 复用同一实例）。
+    if (thread_.joinable()) thread_.join();
     if (clips.size() < 2) {
         fail("Please select at least 2 clips");
         return false;
@@ -539,8 +544,18 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
     const double startSec = info.startSec;
     const double endSec   = info.endSec;       // <=0 表示无出点限制（取到末尾）
     const bool   hasEnd   = endSec > 0.0;
+
+    AVRational vInTb = in->streams[info.vIdx]->time_base;  // 输入视频流时间基
+    AVRational aInTb = (info.aIdx >= 0) ? in->streams[info.aIdx]->time_base : AVRational{1, 1};
+    // 0 基准归一化：部分 MP4/MOV 的流 start_time 非 0（含 edit list 偏移）。
+    // 关键：视频与音频用「同一基准」（视频流 start_time）归零，而非各自归零——
+    // 否则会抹掉源文件中音频相对视频的原始 A/V 偏移，导致片段轻微不同步。
+    double baseOffset = (in->streams[info.vIdx]->start_time != AV_NOPTS_VALUE)
+        ? in->streams[info.vIdx]->start_time * av_q2d(vInTb) : 0.0;
+
     if (startSec > 0.0) {
-        int64_t seekTarget = (int64_t)(startSec * AV_TIME_BASE);
+        // seek 目标按文件绝对时间轴（含基准偏移）计算
+        int64_t seekTarget = (int64_t)((startSec + baseOffset) * AV_TIME_BASE);
         avformat_seek_file(in, -1, INT64_MIN, seekTarget, seekTarget, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(vDec);
         if (aDec) avcodec_flush_buffers(aDec);
@@ -550,13 +565,10 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
     AVFrame* dstV = nullptr;       // 缩放后的目标视频帧（YUV420P, targetWxH）
     AVFrame* frame = av_frame_alloc();
     AVPacket* pkt = av_packet_alloc();
-    AVRational vInTb = in->streams[info.vIdx]->time_base;  // 输入视频流时间基
-    AVRational aInTb = (info.aIdx >= 0) ? in->streams[info.aIdx]->time_base : AVRational{1, 1};
     double maxRelSec = 0.0;            // 本片段已写出视频的最大相对时间（推进 timelineBase）
     double lastSrcSec = startSec;      // 缺时间戳时用于递推
     double frameDurSec = (info.frameRate.num > 0)
         ? av_q2d(av_inv_q(info.frameRate)) : 1.0 / 25.0;  // 缺时间戳时的回退步长
-    bool reachedEnd = false;           // 视频已到出点，停止本片段
 
     auto cleanup = [&]() {
         if (sws) sws_freeContext(sws);
@@ -569,22 +581,113 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         if (in) avformat_close_input(&in);
     };
 
-    while (!reachedEnd && av_read_frame(in, pkt) >= 0) {
+    bool videoEnd = false;   // 视频已到出点
+    bool audioEnd = !(swr);   // 无音频时直接视为音频已完成
+
+    // 音频对齐状态：每个片段首个保留的音频帧需对齐到「时间轴目标采样位置」，
+    // 以真正保留源文件的 A/V 偏移（正偏移补静音、负偏移 sample-level 丢弃），
+    // 同时把全局 FIFO 漂移钉回视频时间轴，避免跨片段累积失步。
+    bool    audioAligned = false;   // 本片段首帧是否已完成对齐
+    int64_t pendingDrop  = 0;       // 待丢弃的前导采样数（负偏移裁剪，可能跨帧）
+    double  lastAudioSrcSec = startSec;  // 音频帧缺时间戳时的递推兜底（按采样数估算时间）
+
+    // 把一帧重采样后的 FLTP 数据按对齐规则写入 FIFO（aSrcSec 为该帧 0 基准源时间）
+    auto writeAlignedAudio = [&](uint8_t** buf, int got, double aSrcSec) {
+        int offset = 0;
+        if (!audioAligned) {
+            // 该帧首样本相对片段入点的偏移（秒）；正=音频比视频晚，负=早
+            double onsetSec = aSrcSec - startSec;
+            // 目标输出采样位置（绝对，基于编码器采样率）= 时间轴基准 + onset
+            int64_t desiredPos = (int64_t)((timelineBaseSec + onsetSec) * tc.targetSampleRate + 0.5);
+            int64_t curPos = tc.aNextPts + av_audio_fifo_size(tc.fifo);
+            int64_t diff = desiredPos - curPos;
+            if (diff > 0) {
+                // 音频应更晚：补静音对齐（分块写，避免一次分配过大）
+                int64_t remain = diff;
+                while (remain > 0) {
+                    int chunk = (int)std::min<int64_t>(remain, 4096);
+                    uint8_t** sil = nullptr;
+                    av_samples_alloc_array_and_samples(&sil, nullptr, tc.targetChannels,
+                                                       chunk, AV_SAMPLE_FMT_FLTP, 0);
+                    av_samples_set_silence(sil, 0, chunk, tc.targetChannels, AV_SAMPLE_FMT_FLTP);
+                    av_audio_fifo_write(tc.fifo, (void**)sil, chunk);
+                    if (sil) { av_freep(&sil[0]); av_freep(&sil); }
+                    remain -= chunk;
+                }
+            } else if (diff < 0) {
+                pendingDrop = -diff;  // 音频偏早：丢弃前导采样（可能跨多帧）
+            }
+            audioAligned = true;
+        }
+        // 应用待丢弃的前导采样（sample-level trim）
+        if (pendingDrop > 0) {
+            int drop = (int)std::min<int64_t>(pendingDrop, got);
+            offset += drop;
+            pendingDrop -= drop;
+            got -= drop;
+            if (got <= 0) return;  // 整帧被丢
+        }
+        // FLTP 是平面格式：每个声道独立平面，按 offset 偏移指针。
+        // 用 vector 按实际声道数分配，兼容 >8 声道布局，避免固定数组越界。
+        std::vector<uint8_t*> chans(tc.targetChannels);
+        for (int ch = 0; ch < tc.targetChannels; ++ch)
+            chans[ch] = buf[ch] + (size_t)offset * sizeof(float);
+        av_audio_fifo_write(tc.fifo, (void**)chans.data(), got);
+    };
+
+    // 处理一帧已解码音频：裁剪过滤 → 重采样 → 对齐写入 FIFO → drain。返回是否到出点
+    auto handleAudioFrame = [&](AVFrame* af) -> bool {
+        int64_t ats = (af->best_effort_timestamp != AV_NOPTS_VALUE)
+                      ? af->best_effort_timestamp : af->pts;
+        double aFrameDur = (aDec->sample_rate > 0)
+            ? (double)af->nb_samples / aDec->sample_rate : 0.0;
+        // 缺时间戳时用递推兜底（上一帧时间 + 帧时长），保证 OUT 裁剪仍能触发，
+        // 否则无时间戳的音频流会一直读到 EOF，audioEnd 永不触发
+        double aSrcSec = (ats != AV_NOPTS_VALUE) ? ats * av_q2d(aInTb) - baseOffset
+                                                 : lastAudioSrcSec;
+        lastAudioSrcSec = aSrcSec + aFrameDur;  // 推进兜底基准（下一帧用）
+        if (aSrcSec + aFrameDur <= startSec) return false;          // 整帧在入点前
+        if (hasEnd && aSrcSec >= endSec)     return true;           // 整帧在出点后
+        int outSamples = (int)av_rescale_rnd(
+            swr_get_delay(swr, aDec->sample_rate) + af->nb_samples,
+            tc.targetSampleRate, aDec->sample_rate, AV_ROUND_UP);
+        uint8_t** buf = nullptr;
+        av_samples_alloc_array_and_samples(&buf, nullptr, tc.targetChannels,
+                                           outSamples, AV_SAMPLE_FMT_FLTP, 0);
+        int got = swr_convert(swr, buf, outSamples,
+                              (const uint8_t**)af->data, af->nb_samples);
+
+        // 尾部 sample-level 裁剪：若本帧跨过 endSec，只保留 endSec 之前的有效采样，
+        // 避免 A 片段尾部音频越界覆盖到 B 片段开头
+        bool reachedOut = false;
+        if (got > 0 && hasEnd && aSrcSec < endSec) {
+            int64_t keep = (int64_t)((endSec - aSrcSec) * tc.targetSampleRate + 0.5);
+            if (keep < got) { got = (int)std::max<int64_t>(0, keep); reachedOut = true; }
+        }
+
+        if (got > 0) writeAlignedAudio(buf, got, aSrcSec);
+        if (buf) { av_freep(&buf[0]); av_freep(&buf); }
+        drainAudioFifo(tc, pkt, false);
+        return reachedOut;
+    };
+
+    // 读包直到视频与音频都到出点（仅视频到点不停止音频，避免片段尾部音频被提前截断）
+    while (!(videoEnd && audioEnd) && av_read_frame(in, pkt) >= 0) {
         if (cancelFlag.load()) { cleanup(); err = "Cancelled"; return false; }
 
         // ── 视频包 ──
-        if (pkt->stream_index == info.vIdx) {
+        if (pkt->stream_index == info.vIdx && !videoEnd) {
             if (avcodec_send_packet(vDec, pkt) >= 0) {
                 while (avcodec_receive_frame(vDec, frame) >= 0) {
-                    // 帧源时间（绝对秒）；缺时间戳时按帧时长递推
+                    // 帧源时间（0 基准秒）：绝对 PTS 减去统一基准偏移；缺时间戳按帧时长递推
                     int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                  ? frame->best_effort_timestamp : frame->pts;
                     double srcSec = (ts != AV_NOPTS_VALUE)
-                                    ? ts * av_q2d(vInTb) : lastSrcSec + frameDurSec;
+                                    ? ts * av_q2d(vInTb) - baseOffset : lastSrcSec + frameDurSec;
                     lastSrcSec = srcSec;
 
                     if (srcSec < startSec - 1e-6) { av_frame_unref(frame); continue; }       // 入点前丢弃
-                    if (hasEnd && srcSec >= endSec) { reachedEnd = true; av_frame_unref(frame); break; }  // 出点截断
+                    if (hasEnd && srcSec >= endSec) { videoEnd = true; av_frame_unref(frame); break; }  // 出点截断
 
                     if (!sws) {  // 首帧惰性创建缩放器（按真实帧格式）
                         sws = sws_getContext(frame->width, frame->height, (AVPixelFormat)frame->format,
@@ -614,30 +717,10 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             }
         }
         // ── 音频包 ──
-        else if (swr && pkt->stream_index == info.aIdx) {
+        else if (swr && pkt->stream_index == info.aIdx && !audioEnd) {
             if (avcodec_send_packet(aDec, pkt) >= 0) {
                 while (avcodec_receive_frame(aDec, frame) >= 0) {
-                    // 音频按帧裁剪（首版帧级精度，误差数十毫秒）
-                    int64_t ats = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
-                                  ? frame->best_effort_timestamp : frame->pts;
-                    double aSrcSec = (ats != AV_NOPTS_VALUE) ? ats * av_q2d(aInTb) : -1.0;
-                    double aFrameDur = (aDec->sample_rate > 0)
-                        ? (double)frame->nb_samples / aDec->sample_rate : 0.0;
-                    if (aSrcSec >= 0.0) {
-                        if (aSrcSec + aFrameDur <= startSec) { av_frame_unref(frame); continue; }  // 整帧在入点前
-                        if (hasEnd && aSrcSec >= endSec) { av_frame_unref(frame); continue; }      // 出点后丢弃
-                    }
-                    int outSamples = (int)av_rescale_rnd(
-                        swr_get_delay(swr, aDec->sample_rate) + frame->nb_samples,
-                        tc.targetSampleRate, aDec->sample_rate, AV_ROUND_UP);
-                    uint8_t** buf = nullptr;
-                    av_samples_alloc_array_and_samples(&buf, nullptr, tc.targetChannels,
-                                                       outSamples, AV_SAMPLE_FMT_FLTP, 0);
-                    int got = swr_convert(swr, buf, outSamples,
-                                          (const uint8_t**)frame->data, frame->nb_samples);
-                    if (got > 0) av_audio_fifo_write(tc.fifo, (void**)buf, got);
-                    if (buf) { av_freep(&buf[0]); av_freep(&buf); }
-                    drainAudioFifo(tc, pkt, false);
+                    if (handleAudioFrame(frame)) { audioEnd = true; av_frame_unref(frame); break; }
                     av_frame_unref(frame);
                 }
             }
@@ -645,13 +728,14 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         av_packet_unref(pkt);
     }
 
-    // flush 视频解码器残留帧（仅当未到出点；音频尾部留待全部片段处理完再 flush 保证 PTS 连续）
-    if (!reachedEnd) {
+    // flush 视频解码器残留帧（仅当视频未到出点；音频尾部留待全部片段处理完再 flush 保证 PTS 连续）
+    if (!videoEnd) {
         avcodec_send_packet(vDec, nullptr);
         while (avcodec_receive_frame(vDec, frame) >= 0) {
             int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
                          ? frame->best_effort_timestamp : frame->pts;
-            double srcSec = (ts != AV_NOPTS_VALUE) ? ts * av_q2d(vInTb) : lastSrcSec + frameDurSec;
+            double srcSec = (ts != AV_NOPTS_VALUE)
+                            ? ts * av_q2d(vInTb) - baseOffset : lastSrcSec + frameDurSec;
             lastSrcSec = srcSec;
             if (srcSec < startSec - 1e-6) { av_frame_unref(frame); continue; }
             if (hasEnd && srcSec >= endSec) { av_frame_unref(frame); break; }
@@ -666,6 +750,16 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                 dstV->pts = pts;
                 encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, dstV, pkt);
             }
+            av_frame_unref(frame);
+        }
+    }
+
+    // flush 音频解码器残留帧：部分解码器内部缓存帧，不送 nullptr 会丢片段尾音。
+    // 复用 handleAudioFrame 做同样的裁剪/对齐/写入；尾部 FIFO/编码器在所有片段后统一 drain。
+    if (swr && aDec) {
+        avcodec_send_packet(aDec, nullptr);
+        while (avcodec_receive_frame(aDec, frame) >= 0) {
+            if (handleAudioFrame(frame)) { av_frame_unref(frame); break; }
             av_frame_unref(frame);
         }
     }
