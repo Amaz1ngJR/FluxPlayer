@@ -1008,6 +1008,10 @@ double Player::getDuration() const {
     return duration_;
 }
 
+AVFormatContext* Player::getFormatContext() const {
+    return demuxer_ ? demuxer_->getFormatContext() : nullptr;
+}
+
 PlayerStats Player::getStats() const {
     PlayerStats stats;
     stats.currentTime = getCurrentTime();

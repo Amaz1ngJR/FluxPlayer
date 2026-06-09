@@ -11,6 +11,7 @@
 
 // 前向声明 FFmpeg 类型，避免头文件引入平台 SDK
 struct AVFrame;
+struct AVFormatContext;
 
 namespace FluxPlayer {
 
@@ -205,6 +206,13 @@ public:
      * 用于 UI 控制器等需要访问窗口的组件
      */
     Window* getWindow() const { return window_.get(); }
+
+    /**
+     * 获取已打开流的 AVFormatContext（来自内部 Demuxer）
+     * 用于在不重复连接的情况下提取媒体信息（如网络流的编解码器）；
+     * 未打开任何媒体时返回 nullptr
+     */
+    AVFormatContext* getFormatContext() const;
 
     // ===== 设置接口 =====
 

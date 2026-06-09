@@ -86,11 +86,17 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
         LOG_INFO("Playback finished");
     });
 
-    // 媒体信息（仅本地文件可探测；网络流 / 网页流不重复连接）
+    // 媒体信息：
+    // - 本地文件：直接探测文件
+    // - 网络流 / 网页流：复用 Player 已打开的 AVFormatContext，避免重复连接
     MediaInfo mediaInfo;
     if (!isNetworkPath(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
         if (!mediaInfo.extractFromFile(mediaPath)) {
             LOG_WARN("Failed to extract media info; UI may show incomplete fields");
+        }
+    } else if (AVFormatContext* fmtCtx = player.getFormatContext()) {
+        if (!mediaInfo.extractFromContext(fmtCtx)) {
+            LOG_WARN("Failed to extract media info from open context; UI may show incomplete fields");
         }
     }
 
@@ -173,6 +179,8 @@ static std::string playMediaCli(const std::string& mediaPath) {
     MediaInfo mediaInfo;
     if (!isNetworkPath(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
         mediaInfo.extractFromFile(mediaPath);
+    } else if (AVFormatContext* fmtCtx = player.getFormatContext()) {
+        mediaInfo.extractFromContext(fmtCtx);
     }
 
     if (!player.play()) return "Failed to start playback";
