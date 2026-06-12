@@ -11,6 +11,8 @@
 #include "FluxPlayer/decoder/AudioDecoder.h"
 #include "FluxPlayer/decoder/Frame.h"
 #include "FluxPlayer/core/FrameQueue.h"
+#include "FluxPlayer/core/PacketQueue.h"
+#include "FluxPlayer/core/PTSNormalizer.h"
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/subtitle/SubtitleDecoder.h"
 #include "FluxPlayer/subtitle/SubtitleManager.h"
@@ -152,17 +154,6 @@ Player::Player()
     , videoHeight_(0)
     , videoFrameInterval_(0.04)
     , isLiveStream_(false)
-    , firstVideoFrameReceived_(false)
-    , firstAudioFrameReceived_(false)
-    , firstVideoPTS_(0.0)
-    , firstAudioPTS_(0.0)
-    , liveStreamBasePTS_(0.0)
-    , liveStreamBaseCalibrated_(false)
-    , videoFrameCount_(0)
-    , audioFrameCount_(0)
-    , liveStreamStartTime_(0.0)
-    , lastValidVideoPTS_(0.0)
-    , lastValidAudioPTS_(0.0)
     , volume_(Config::getInstance().get().volume)
     , muted_(false)
     , loopPlayback_(false)
@@ -182,6 +173,7 @@ Player::Player()
     , currentBitrate_(0.0)
 {
     frameInterpolator_ = std::make_unique<FrameInterpolator>();
+    ptsNormalizer_ = std::make_unique<PTSNormalizer>();
     LOG_INFO("Player created");
 }
 
@@ -362,11 +354,8 @@ bool Player::open(const std::string& filePath) {
     if (isLiveStream_) {
         LOG_INFO("Detected live stream, enabling special handling");
         LOG_INFO("Live stream features: PTS normalization, no seek support");
-        // 重置实时流相关状态
-        firstVideoFrameReceived_.store(false);
-        firstAudioFrameReceived_.store(false);
-        firstVideoPTS_.store(0.0);
-        firstAudioPTS_.store(0.0);
+        // 重置实时流 PTS 归一化组合状态
+        ptsNormalizer_->reset();
         // 启动预缓冲：等待队列填充到安全水位再开始渲染
         prebuffering_.store(true);
         LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
@@ -389,6 +378,15 @@ bool Player::open(const std::string& filePath) {
     audioQueue_ = std::make_unique<FrameQueue>(audioQueueSize, /*keepLast=*/false);
     LOG_INFO("Frame queues created: video=" + std::to_string(videoQueueSize) +
              ", audio=" + std::to_string(audioQueueSize));
+
+    // 创建压缩包队列（demux 线程生产，对应 decode 线程消费）。
+    // 时间基准设置见 initDecoders 之后（需要 demuxer 的流 time_base）。
+    if (!audioOnly_) {
+        videoPktQueue_ = std::make_unique<PacketQueue>();
+    }
+    if (demuxer_->getAudioStreamIndex() >= 0) {
+        audioPktQueue_ = std::make_unique<PacketQueue>();
+    }
 
     // 初始化解码器
     if (!initDecoders()) {
@@ -538,15 +536,7 @@ bool Player::play() {
 
     // 重置实时流状态
     if (isLiveStream_) {
-        firstVideoFrameReceived_.store(false);
-        firstAudioFrameReceived_.store(false);
-        firstVideoPTS_.store(0.0);
-        firstAudioPTS_.store(0.0);
-        liveStreamBasePTS_.store(0.0);
-        liveStreamBaseCalibrated_.store(false);
-        videoFrameCount_.store(0);
-        audioFrameCount_.store(0);
-        liveStreamStartTime_.store(0.0);
+        ptsNormalizer_->reset();
         lastEnqueuedVideoPTS_.store(0.0);
         sawFirstKeyframe_.store(false);
         // 启动预缓冲：等待队列填充到安全水位再开始渲染
@@ -554,11 +544,9 @@ bool Player::play() {
         LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
     }
 
-    // 启动解码线程（纯音频模式无视频队列）
-    if (videoQueue_) videoQueue_->start();
-    audioQueue_->start();
+    // 启动队列与 demux + video/audio decode 线程
     shouldQuit_.store(false);
-    decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
+    startWorkerThreads();
 
     // 启动音频输出
     if (audioOutput_) {
@@ -605,23 +593,13 @@ void Player::stop() {
     userStopped_.store(true);
     shouldQuit_.store(true);
 
-    // 终止队列等待，唤醒阻塞的解码线程
-    if (videoQueue_) videoQueue_->abort();
-    if (audioQueue_) audioQueue_->abort();
-
     // 停止音频输出
     if (audioOutput_) {
         audioOutput_->stop();
     }
 
-    // 等待线程结束
-    if (decodingThread_ && decodingThread_->joinable()) {
-        decodingThread_->join();
-    }
-
-    // 清空队列
-    if (videoQueue_) videoQueue_->flush();
-    if (audioQueue_) audioQueue_->flush();
+    // abort 队列唤醒阻塞线程，join demux + video/audio decode 线程，再清空队列
+    joinWorkerThreads(/*abortQueues=*/true);
 
     setState(PlayerState::STOPPED);
 }
@@ -653,6 +631,26 @@ bool Player::seek(double seconds) {
     lastRenderedPTS_.store(seconds);
     currentAudioFramePTS_.store(seconds);
     samplesPlayedInFrame_.store(0);
+
+    // 立即进入精确跳转模式（在 UI 线程，先于 demux 线程消费请求）：
+    // 冻结取帧（renderVideoFrame 跳过 peek）并丢弃 PTS < 目标的旧帧，使进度条立刻停在
+    // 目标位置并保持，直到到达目标的新帧到来。否则 seek 生效前的窗口里（尤其 DASH 重启
+    // 上游需数秒）旧队列里的帧继续渲染会把 lastRenderedPTS_ 拉回旧位置，进度条迟迟不跳。
+    // demux 线程的 processSeekRequest（本地路径）会在 seek demuxer 成功后重置此计时窗口。
+    decodingToTarget_.store(true);
+    decodeTargetPTS_.store(seconds);
+    seekTargetStartTime_ = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+
+    // 立即 flush packet 队列（serial++），让 enqueue 的「陈旧帧丢弃」guard 即时生效。
+    // 关键：seek() 在 UI 线程置位精确跳转，但真正的 flush 原本要等 demux 线程跑到
+    // processSeekRequest/restartDashMerger 才发生（隔几十~几百 ms）。这个窗口内 decode 线程
+    // 手里的旧位置在途帧 serial 仍与队列一致，绕过 serial guard，进而触发 enqueue 里的
+    // 「到达目标 / far-from-target 提前校准」，清除 decodingToTarget_ 并把 AV 时钟校到旧位置
+    //  —— 倒退 seek 进度条跳回、前向 seek 迟迟不动皆源于此。在此处同步 bump serial，窗口内
+    // 所有旧帧立即失配被丢弃。PacketQueue::flush 自带锁，UI 线程调用安全。
+    if (videoPktQueue_) videoPktQueue_->flush();
+    if (audioPktQueue_) audioPktQueue_->flush();
 
     LOG_INFO("  lastRenderedPTS after=" + std::to_string(lastRenderedPTS_.load()));
     LOG_INFO("  seekTarget=" + std::to_string(seconds));
@@ -690,11 +688,16 @@ void Player::run() {
         while (!window_->shouldClose() && !shouldQuit_.load()) {
             // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
             // 用 numReadable() 而非 size()：keep-last 保留的已显示帧不算"待消费"
-            // 纯音频模式等待音频队列消费完，视频模式等待视频队列消费完
-            bool queueDrained = audioOnly_
-                ? (audioQueue_->numReadable() == 0)
-                : (videoQueue_ && videoQueue_->numReadable() == 0);
-            if (decodingFinished_.load() && queueDrained) {
+            // 解码完成后，等帧队列消费完再退出（处理字幕流比视频流短等情况）。
+            // 按已启用的流组合判断：不存在的流视为已完成；存在的流需 decode 线程
+            // drain 结束（*DecodeFinished_）且对应帧队列消费干净（numReadable==0）。
+            bool videoDone = !hasVideoStream_ ||
+                (videoDecodeFinished_.load() &&
+                 (!videoQueue_ || videoQueue_->numReadable() == 0));
+            bool audioDone = !hasAudioStream_ ||
+                (audioDecodeFinished_.load() &&
+                 (!audioQueue_ || audioQueue_->numReadable() == 0));
+            if (demuxFinished_.load() && videoDone && audioDone) {
                 shouldQuit_.store(true);
                 break;
             }
@@ -940,17 +943,11 @@ bool Player::handleLoopRestart() {
     if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !userStopped_.load() && !window_->shouldClose()) {
         LOG_INFO("Loop playback enabled, restarting...");
 
-        // 等待解码线程结束
-        if (decodingThread_ && decodingThread_->joinable()) {
-            decodingThread_->join();
-        }
+        // 此时已自然 EOF：demux 线程投递 null 包后退出，decode 线程 drain 完毕退出。
+        // join 全部线程并清空队列（threads 已自行结束，无需 abort）。
+        joinWorkerThreads(/*abortQueues=*/false);
 
-        // 清空帧队列
-        if (videoQueue_) videoQueue_->flush();
-        audioQueue_->flush();
-        pendingAudioOffset_ = 0;
-
-        // seek demuxer到开头
+        // seek demuxer 到开头。线程均已 join，此处由主线程独占访问 demuxer/解码器，安全。
         demuxer_->seek(0);
         if (videoDecoder_) videoDecoder_->flush();
         if (audioDecoder_) audioDecoder_->flush();
@@ -964,12 +961,9 @@ bool Player::handleLoopRestart() {
         currentAudioFramePTS_.store(0.0);
         samplesPlayedInFrame_.store(0);
 
-        // 重启队列和解码线程（纯音频模式无视频队列）
-        if (videoQueue_) videoQueue_->start();
-        audioQueue_->start();
+        // 重启队列与三线程
         shouldQuit_.store(false);
-        decodingFinished_.store(false);  // 必须重置，否则渲染循环立即退出
-        decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
+        startWorkerThreads();
         setState(PlayerState::PLAYING);
         return true;
     }
@@ -999,8 +993,9 @@ double Player::getCurrentTime() const {
     if (isLiveStream_ && avSync_) {
         return audioOutput_ ? avSync_->getAudioClock() : avSync_->getExternalClock();
     }
-    // 返回最后实际渲染的帧的 PTS，而不是 AVSync 的时钟
-    // 这样可以避免 seek 时时钟立即更新导致的连续 seek 问题
+    // 返回最后实际渲染的帧的 PTS，而不是 AVSync 的时钟。
+    // seek 时 lastRenderedPTS_ 已被 seek() 立即设为目标值，且精确跳转期渲染冻结不会改写它，
+    // 故进度条即时停在目标 —— 无需额外针对 decodingToTarget_ 的兜底分支。
     return lastRenderedPTS_.load();
 }
 
@@ -1066,26 +1061,250 @@ void Player::setPlaybackSpeed(double speed) {
     LOG_INFO("Playback speed set to " + std::to_string(speed) + "x");
 }
 
-void Player::decodingThread() {
-    LOG_INFO("Decoding thread started");
+// ===== ffplay 式解耦：demux 线程 + 独立 video/audio 解码线程 =====
+//
+// packet 队列背压常量（对标 ffplay MAX_QUEUE_SIZE，并补充硬上限与单路保护）：
+namespace {
+constexpr int64_t kMaxQueueBytesSoft   = 15 * 1024 * 1024;  // 软上限，对齐 ffplay
+constexpr int64_t kMaxQueueBytesHard   = 64 * 1024 * 1024;  // 硬上限，防坏文件/差交织 OOM
+constexpr int64_t kMaxSingleQueueBytes = 48 * 1024 * 1024;  // 单路保护上限
+constexpr int     kMinPktFrames        = 25;                // 各流最少缓冲包数门槛
+constexpr double  kMinQueueDurationSec = 1.0;               // 各流最少缓存时长门槛
+constexpr int     kBackpressureWaitMs  = 10;                // 背压等待粒度
+constexpr int     kEofParkWaitMs        = 10;               // EOF 停泊轮询粒度（等待 seek / quit）
+}  // namespace
+
+void Player::waitForPacketSpace() {
+    // demux 线程背压：避免坏文件 / 差交织导致单路无限缓冲 OOM。
+    // 软上限：总量超阈值且各启用流都已缓冲足够（包数或时长）时短暂等待；
+    // 硬上限 / 单路上限：任意触顶都必须等待，不论交织情况。
+    for (;;) {
+        if (shouldQuit_.load()) return;
+
+        int64_t vBytes = videoPktQueue_ ? videoPktQueue_->byteSize() : 0;
+        int64_t aBytes = audioPktQueue_ ? audioPktQueue_->byteSize() : 0;
+        int64_t total = vBytes + aBytes;
+
+        // 硬上限 / 单路上限：无条件等待
+        bool hardFull = (total > kMaxQueueBytesHard) ||
+                        (vBytes > kMaxSingleQueueBytes) ||
+                        (aBytes > kMaxSingleQueueBytes);
+
+        // 软上限：总量超阈值 且 各启用流均缓冲充足（包数或时长达标）
+        bool vEnough = !videoPktQueue_ ||
+                       videoPktQueue_->size() > kMinPktFrames ||
+                       videoPktQueue_->duration() > kMinQueueDurationSec;
+        bool aEnough = !audioPktQueue_ ||
+                       audioPktQueue_->size() > kMinPktFrames ||
+                       audioPktQueue_->duration() > kMinQueueDurationSec;
+        bool softFull = (total > kMaxQueueBytesSoft) && vEnough && aEnough;
+
+        if (!hardFull && !softFull) {
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kBackpressureWaitMs));
+    }
+}
+
+void Player::demuxThread() {
+    LOG_INFO("Demux thread started");
 
     AVPacket* packet = av_packet_alloc();
-    Frame rawFrame;
-
     int readRetryCount = 0;    // 当前连续读取失败次数
     int retryDelayMs = 100;    // 当前退避间隔（ms），每次失败翻倍
 
     while (!shouldQuit_.load()) {
-        // 处理 seek 请求
+        // 处理 seek 请求（仅 demux 线程触碰 demuxer / packet 队列 serial）
         processSeekRequest();
+        if (shouldQuit_.load()) break;
 
-        // ===== 解码循环级 seek 超时保护 =====
-        // enqueueVideoFrame 的超时依赖视频帧产生；若解码器因参考帧缺失等原因
-        // 长时间不产生帧（如 HW 降级后 SW 解码器仍有错误），超时永远不触发。
-        //
-        // 此处仅清除 decodingToTarget_ 标志，让后续到达的视频/音频帧按实际 PTS
-        // 自然重新校准 AV sync（见 enqueueVideoFrame / enqueueAudioFrame）。
-        // 不在此处主动 seekTo，避免误用旧目标位置造成大幅落点偏差。
+        // 背压：packet 队列过满时等待 decode 线程消费
+        waitForPacketSpace();
+        if (shouldQuit_.load()) break;
+
+        // 流索引每轮查询：DASH seek 经 restartDashMerger 重建 demuxer 后索引可能变化
+        const int videoIdx = demuxer_->getVideoStreamIndex();
+        const int audioIdx = demuxer_->getAudioStreamIndex();
+        const int subIdx   = demuxer_->getSubtitleStreamIndex();
+
+        if (demuxer_->readPacket(packet)) {
+            readRetryCount = 0;
+            retryDelayMs = 100;
+
+            // seek 挂起期丢包：seek() 已在 UI 线程置 pending 并 flush（serial++），但本轮
+            // readPacket 可能在 flush 之前就阻塞在旧 demuxer/pipe 上、刚返回一个旧位置的包。
+            // 若 put 进队列，它会带上 flush 后的新 serial，绕过 enqueue 的 serial guard，被误判
+            // 为新流帧 → 触发 PTS 校准把 AV 时钟拉回旧位置 → 进度条跳回。直接丢弃：本轮循环
+            // 顶部的 processSeekRequest 尚未执行（下一轮才跑），旧包此刻无保留价值。
+            {
+                std::lock_guard<std::mutex> lock(seekMutex_);
+                if (seekRequest_.pending) {
+                    av_packet_unref(packet);
+                    continue;
+                }
+            }
+
+            totalBytesRead_.fetch_add(packet->size);
+
+            if (videoPktQueue_ && packet->stream_index == videoIdx) {
+                // 实时流起播追赶：丢弃首个关键帧之前的视频包。服务端 PLAY 后常推 GOP
+                // 中间帧（非关键帧），无参考帧解码必然失败且延迟一整个 GOP。等首个 IDR
+                // 起播，画面与服务端最新关键帧对齐，端到端延迟显著降低。
+                if (isLiveStream_ && !sawFirstKeyframe_.load()) {
+                    if (packet->flags & AV_PKT_FLAG_KEY) {
+                        sawFirstKeyframe_.store(true);
+                        LOG_INFO("Live stream: first keyframe received, starting decode");
+                    } else {
+                        av_packet_unref(packet);
+                        continue;
+                    }
+                }
+                // 实时流 prebuffer 期间若再次收到 IDR，重置到新 IDR 起播：flush 视频 packet
+                // 队列（serial++），video decode 线程据此 flush 解码器与帧队列从新 IDR 重启。
+                else if (isLiveStream_ && prebuffering_.load() &&
+                         (packet->flags & AV_PKT_FLAG_KEY)) {
+                    videoPktQueue_->flush();
+                    LOG_INFO("Live stream: newer keyframe arrived during prebuffer, restart from latest IDR");
+                }
+                // 录像：写入视频 packet（仅 demux 线程调用，recorderMutex_ 保护与 start/stop 并发）
+                {
+                    std::lock_guard<std::mutex> lock(recorderMutex_);
+                    if (videoRecorder_ && videoRecorder_->isRecording()) {
+                        videoRecorder_->writePacket(packet, packet->stream_index);
+                    }
+                }
+                videoPktQueue_->put(packet);  // 转移所有权，packet 返回后为空
+            } else if (audioPktQueue_ && packet->stream_index == audioIdx) {
+                // 录音：写入音频 packet
+                {
+                    std::lock_guard<std::mutex> lock(recorderMutex_);
+                    if (audioRecorder_ && audioRecorder_->isRecording()) {
+                        audioRecorder_->writePacket(packet, packet->stream_index);
+                    }
+                }
+                audioPktQueue_->put(packet);
+            } else if (subtitleDecoder_ && subtitleManager_ && packet->stream_index == subIdx) {
+                // 字幕包：同步解码，结果直接写入 SubtitleManager 供 UI 线程查询。
+                // 字幕吞吐量极低（每帧数十~数百字节），同步解码对 demux 节奏无影响。
+                auto items = subtitleDecoder_->decode(packet);
+                for (auto& it : items) {
+                    subtitleManager_->addEntry(
+                        SubtitleManager::Entry{std::move(it.text), it.startPTS, it.endPTS});
+                }
+                av_packet_unref(packet);
+            } else {
+                av_packet_unref(packet);
+            }
+        } else {
+            // readPacket 失败处理（实时流重连退避 / DASH 过渡 / 本地文件 EOF）
+            // DASH seek 重建上游、HTTP Range seek 的 CDN reseat 等过渡瞬间 readPacket 可能
+            // 短暂返回 false；任何「刚 seek 完、还没解到目标 PTS」状态下失败都不应误判为 EOF。
+            const bool isStreamingPipe = isLiveStream_ || (dashMerger_ != nullptr);
+            const bool postSeekTransient = decodingToTarget_.load();
+            if (isStreamingPipe || postSeekTransient) {
+                // ===== 实时流网络重试机制（指数退避 + 周期性完整重连） =====
+                const int MAX_READ_RETRIES = 30;
+                const int MAX_RETRY_DELAY_MS = 3000;
+                const int REOPEN_EVERY_N_RETRIES = 3;
+
+                readRetryCount++;
+                if (readRetryCount <= MAX_READ_RETRIES) {
+                    LOG_WARN("Live stream: readPacket failed, retry " +
+                             std::to_string(readRetryCount) + "/" +
+                             std::to_string(MAX_READ_RETRIES) +
+                             ", backoff " + std::to_string(retryDelayMs) + "ms");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(retryDelayMs));
+                    retryDelayMs = std::min(retryDelayMs * 2, MAX_RETRY_DELAY_MS);
+
+                    // 周期性完整重连：close + open demuxer，flush packet 队列（serial++），
+                    // 由 decode 线程据 serial 变化自行 flush 解码器与帧队列。
+                    if (isLiveStream_ &&
+                        readRetryCount % REOPEN_EVERY_N_RETRIES == 0 &&
+                        !liveReopenPath_.empty()) {
+                        LOG_INFO("Live stream: attempting full reopen (retry=" +
+                                 std::to_string(readRetryCount) + ")");
+                        demuxer_->close();
+                        bool reopened = liveReopenHeaders_.empty() && liveReopenDuration_ == 0.0
+                            ? demuxer_->open(liveReopenPath_)
+                            : demuxer_->open(liveReopenPath_, liveReopenHeaders_, liveReopenDuration_);
+                        if (reopened) {
+                            LOG_INFO("Live stream: reopen succeeded, resuming playback");
+                            if (videoPktQueue_) videoPktQueue_->flush();
+                            if (audioPktQueue_) audioPktQueue_->flush();
+                            // 重置起播追赶状态：等待下一个 IDR 重新对齐。
+                            // 不重置 PTS 基准（PTSNormalizer 保持），短暂断流不应让进度条跳回 0。
+                            sawFirstKeyframe_.store(false);
+                            readRetryCount = 0;
+                            retryDelayMs = 100;
+                        } else {
+                            LOG_WARN("Live stream: reopen failed, will keep retrying");
+                        }
+                    }
+                } else {
+                    if (isLiveStream_) {
+                        LOG_ERROR("Live stream: readPacket failed after " +
+                                  std::to_string(MAX_READ_RETRIES) + " retries, giving up");
+                        shouldQuit_.store(true);
+                        break;
+                    } else {
+                        LOG_INFO("DASH stream: readPacket failed after retries, treating as EOF");
+                        break;
+                    }
+                }
+            } else {
+                // 本地文件：readPacket 返回 false 即为真正的文件结束。
+                // 不退出线程，而是停泊等待 seek（对标 ffplay：EOF 是播放状态而非线程终点）。
+                // 先投递一次 null 包让 decode 线程 drain（run() 据此在帧消费完后结束播放）；
+                // 停泊期间持续轮询 seek 请求：一旦用户 seek，flush 队列会移除尾部 null 包并
+                // serial++，本线程从新位置恢复读取，仍存活的 decode 线程据 serial 变化重新同步。
+                // 仅 shouldQuit_（stop/quit/播放自然结束）能终结停泊。
+                LOG_INFO("End of file reached in demux thread, parking for seek");
+                demuxFinished_.store(true);
+                decodingFinished_.store(true);
+                if (videoPktQueue_) videoPktQueue_->putNullPacket(demuxer_ ? demuxer_->getVideoStreamIndex() : -1);
+                if (audioPktQueue_) audioPktQueue_->putNullPacket(demuxer_ ? demuxer_->getAudioStreamIndex() : -1);
+
+                while (!shouldQuit_.load()) {
+                    if (processSeekRequest()) {
+                        // seek 已消费：解除 EOF 停泊，重置结束标志与读取重试计数，回到读取循环
+                        demuxFinished_.store(false);
+                        decodingFinished_.store(false);
+                        readRetryCount = 0;
+                        retryDelayMs = 100;
+                        LOG_INFO("Seek during EOF park, resuming demux read");
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kEofParkWaitMs));
+                }
+                // seek 恢复 → continue 回主循环读取；shouldQuit_ → 主循环条件为假，走收尾
+                continue;
+            }
+        }
+    }
+
+    av_packet_free(&packet);
+
+    // EOF：向每个启用的 packet 队列投递 null 包，通知 decode 线程 drain 后结束。
+    // shouldQuit_（stop/quit）路径下队列已 abort，putNullPacket 会被丢弃，无副作用。
+    // null 包仅作 EOF 标记，stream_index 仅用于标识，取当前 demuxer 的索引即可。
+    demuxFinished_.store(true);
+    decodingFinished_.store(true);
+    if (videoPktQueue_) videoPktQueue_->putNullPacket(demuxer_ ? demuxer_->getVideoStreamIndex() : -1);
+    if (audioPktQueue_) audioPktQueue_->putNullPacket(demuxer_ ? demuxer_->getAudioStreamIndex() : -1);
+    LOG_INFO("Demux thread stopped");
+}
+
+void Player::videoDecodeThread() {
+    LOG_INFO("Video decode thread started");
+
+    AVPacket* packet = av_packet_alloc();
+    Frame rawFrame;
+    int lastSerial = -1;  // 上次处理的 packet serial，变化即 seek/flush 边界
+
+    while (!shouldQuit_.load()) {
+        // seek 循环级超时保护：enqueueVideoFrame 的超时依赖视频帧产生；若解码器因参考帧
+        // 缺失等长时间不产帧，超时永不触发。此处仅清除 decodingToTarget_，让后续帧按实际
+        // PTS 自然重新校准 AV sync（见 enqueueVideoFrame）。
         if (decodingToTarget_.load()) {
             double elapsed = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count()
@@ -1097,213 +1316,178 @@ void Player::decodingThread() {
             }
         }
 
-        // ===== 网络流预缓冲完成检测 =====
-        // 等待视频队列积累到 5 帧后再允许渲染线程取帧
-        checkPrebufferComplete();
+        int serial = lastSerial;
+        int ret = videoPktQueue_->get(packet, /*block=*/true, &serial);
+        if (ret == 0) {
+            break;  // abort
+        }
 
-        bool frameReceived = false;
+        // serial 变化（seek / flush / reopen）：本线程独占 flush 解码器与视频帧队列，
+        // 与生产者同线程，无竞态。
+        if (serial != lastSerial) {
+            videoDecoder_->flush();
+            if (videoQueue_) videoQueue_->flush();
+            lastEnqueuedVideoPTS_.store(0.0);
+            lastSerial = serial;
+        }
 
-        // **优先接收视频帧**（纯音频模式无视频解码器，跳过）
-        // 注意：必须优先调用receiveFrame()清空解码器缓冲区
-        if (!audioOnly_ && videoDecoder_ && videoDecoder_->receiveFrame(rawFrame)) {
-            // ===== 实时流PTS归一化 =====
+        // null 包：drain 解码器后结束
+        bool isEof = (packet->data == nullptr && packet->size == 0);
+
+        videoDecoder_->sendPacket(packet);
+        av_packet_unref(packet);
+
+        // 取尽解码器当前可输出的所有帧
+        while (videoDecoder_->receiveFrame(rawFrame)) {
             if (!normalizeVideoPTS(rawFrame)) {
-                // 帧无效（校准期间的无效PTS帧），已丢弃
-                frameReceived = true;
-                continue;
+                continue;  // 无效帧已在 normalize 内丢弃
             }
-
-            // ===== 视频帧入队（含精确跳转丢帧、队列满时内存优化） =====
-            if (!enqueueVideoFrame(rawFrame)) {
-                break;  // abort
-            }
-            frameReceived = true;
-        }
-
-        // 尝试接收音频帧
-        // 同样必须总是尝试接收，防止解码器缓冲区满
-        if (audioDecoder_) {
-            if (audioDecoder_->receiveFrame(rawFrame)) {
-                // 验证音频帧的有效性
-                AVFrame* avFrame = rawFrame.getAVFrame();
-                if (avFrame && avFrame->nb_samples > 0) {
-                    // ===== 实时流PTS归一化 =====
-                    if (!normalizeAudioPTS(rawFrame)) {
-                        // 帧无效（校准期间的无效PTS帧），已丢弃
-                        frameReceived = true;
-                        continue;
-                    }
-
-                    // ===== 音频帧入队（含跳转丢帧、S16转换） =====
-                    if (!enqueueAudioFrame(rawFrame)) {
-                        frameReceived = true;
-                        break;
-                    }
-                } else {
-                    LOG_WARN("Received invalid audio frame, nb_samples: " +
-                            std::to_string(avFrame ? avFrame->nb_samples : 0));
-                }
+            if (!enqueueVideoFrame(rawFrame, serial)) {
+                // serial 变化或 abort：放弃当前帧，回到循环顶部处理 flush
                 rawFrame.unreference();
-                frameReceived = true;
+                break;
             }
+            checkPrebufferComplete();
         }
 
-        // 如果没有接收到帧，读取新的数据包
-        if (!frameReceived) {
-            if (demuxer_->readPacket(packet)) {
-                // 读取成功，重置重试状态
-                readRetryCount = 0;
-                retryDelayMs = 100;
-
-                // 统计数据量（用于计算码率）
-                totalBytesRead_.fetch_add(packet->size);
-
-                if (packet->stream_index == demuxer_->getVideoStreamIndex()) {
-                    // 实时流起播追赶：丢弃首个关键帧之前的视频包。
-                    // 服务端 PLAY 后常推 GOP 中间帧（非关键帧），这些帧没有参考帧解码必然失败
-                    // （日志中 "Could not find ref with POC"），还会让画面延迟一整个 GOP。
-                    // 等到首个 IDR 起播，画面与服务端最新关键帧对齐，端到端延迟显著降低。
-                    if (isLiveStream_ && !sawFirstKeyframe_.load()) {
-                        if (packet->flags & AV_PKT_FLAG_KEY) {
-                            sawFirstKeyframe_.store(true);
-                            LOG_INFO("Live stream: first keyframe received, starting decode");
-                        } else {
-                            av_packet_unref(packet);
-                            continue;
-                        }
-                    }
-                    // 实时流 prebuffer 期间若再次收到 IDR，重置到新 IDR 起播：
-                    // 起播延迟最多 = 网络握手 + 1 个 GOP，避免抓到旧 GOP 的 IDR 多一整段延迟
-                    else if (isLiveStream_ && prebuffering_.load() &&
-                             (packet->flags & AV_PKT_FLAG_KEY)) {
-                        if (videoQueue_) videoQueue_->flush();
-                        if (videoDecoder_) videoDecoder_->flush();
-                        firstVideoFrameReceived_.store(false);
-                        lastEnqueuedVideoPTS_.store(0.0);
-                        LOG_INFO("Live stream: newer keyframe arrived during prebuffer, restart from latest IDR");
-                    }
-                    // 录像：写入视频 packet
-                    if (videoRecorder_ && videoRecorder_->isRecording()) {
-                        videoRecorder_->writePacket(packet, packet->stream_index);
-                    }
-                    videoDecoder_->sendPacket(packet);
-                } else if (audioDecoder_ && packet->stream_index == demuxer_->getAudioStreamIndex()) {
-                    // 录音：写入音频 packet
-                    if (audioRecorder_ && audioRecorder_->isRecording()) {
-                        audioRecorder_->writePacket(packet, packet->stream_index);
-                    }
-                    audioDecoder_->sendPacket(packet);
-                } else if (subtitleDecoder_ && subtitleManager_ &&
-                           packet->stream_index == demuxer_->getSubtitleStreamIndex()) {
-                    // 字幕包：同步解码，结果直接写入 SubtitleManager 供 UI 线程查询
-                    // 字幕吞吐量极低（每帧数十 ~ 数百字节），同步解码对性能无影响
-                    auto items = subtitleDecoder_->decode(packet);
-                    for (auto& it : items) {
-                        subtitleManager_->addEntry(
-                            SubtitleManager::Entry{std::move(it.text), it.startPTS, it.endPTS});
-                    }
-                }
-                av_packet_unref(packet);
-            } else {
-                // DASH 流 seek 时会重建上游管道，过渡瞬间 readPacket 可能短暂返回 false；
-                // HTTP Range seek（如 Bilibili 普通 mp4）也存在「seek 完成但下一次 read
-                // 立刻返回 0 字节」的过渡——CDN 需要 reseat 连接。任何「刚 seek 完、还
-                // 没解到目标 PTS」的状态下 readPacket 失败都不应误判为 EOF。
-                const bool isStreamingPipe = isLiveStream_ || (dashMerger_ != nullptr);
-                const bool postSeekTransient = decodingToTarget_.load();
-                if (isStreamingPipe || postSeekTransient) {
-                    // ===== 实时流网络重试机制（指数退避 + 周期性完整重连） =====
-                    // RTSP/RTMP/HTTP 流在网络抖动、服务端短暂断开等情况下，readPacket 会返回失败。
-                    // 单纯重试 readPacket 在 TCP 连接已死的情况下永远恢复不了（典型 RTMP 服务端踢连接），
-                    // 必须周期性 close + open 整个 demuxer 才能重建 TCP 会话。
-                    //
-                    // 退避策略：
-                    //   初始间隔 100ms，每次失败翻倍，上限 3000ms
-                    //   每 3 次普通重试做一次完整重连（reopen）
-                    //   最多重试 30 次（含重连），超过后放弃
-                    //   一旦读取成功，计数器和间隔自动重置
-                    const int MAX_READ_RETRIES = 30;         // 最大重试次数
-                    const int MAX_RETRY_DELAY_MS = 3000;     // 退避间隔上限（ms）
-                    const int REOPEN_EVERY_N_RETRIES = 3;    // 每 N 次普通重试做一次完整重连
-
-                    readRetryCount++;
-                    if (readRetryCount <= MAX_READ_RETRIES) {
-                        LOG_WARN("Live stream: readPacket failed, retry " +
-                                std::to_string(readRetryCount) + "/" +
-                                std::to_string(MAX_READ_RETRIES) +
-                                ", backoff " + std::to_string(retryDelayMs) + "ms");
-                        std::this_thread::sleep_for(std::chrono::milliseconds(retryDelayMs));
-                        // 指数退避：每次翻倍，但不超过上限
-                        retryDelayMs = std::min(retryDelayMs * 2, MAX_RETRY_DELAY_MS);
-
-                        // 周期性完整重连：close + open demuxer，flush 解码器和队列
-                        // DASH 流的 reopen 路径已在 restartDashMerger 内处理（seek 时），
-                        // 此处仅为实时流（RTSP/RTMP/HLS-live）做完整重连，避免误用过期的 liveReopenPath_
-                        if (isLiveStream_ &&
-                            readRetryCount % REOPEN_EVERY_N_RETRIES == 0 &&
-                            !liveReopenPath_.empty()) {
-                            LOG_INFO("Live stream: attempting full reopen (retry=" +
-                                     std::to_string(readRetryCount) + ")");
-                            demuxer_->close();
-                            bool reopened = liveReopenHeaders_.empty() && liveReopenDuration_ == 0.0
-                                ? demuxer_->open(liveReopenPath_)
-                                : demuxer_->open(liveReopenPath_, liveReopenHeaders_, liveReopenDuration_);
-                            if (reopened) {
-                                LOG_INFO("Live stream: reopen succeeded, resuming playback");
-                                if (videoDecoder_) videoDecoder_->flush();
-                                if (audioDecoder_) audioDecoder_->flush();
-                                if (videoQueue_) videoQueue_->flush();
-                                if (audioQueue_) audioQueue_->flush();
-                                // 重置起播追赶状态：等待下一个 IDR 重新对齐
-                                sawFirstKeyframe_.store(false);
-                                lastEnqueuedVideoPTS_.store(0.0);
-                                // 不重置 PTS 基准（liveStreamBaseCalibrated_ 保持），
-                                // 短暂断流不应让进度条跳回 0
-                                readRetryCount = 0;
-                                retryDelayMs = 100;
-                            } else {
-                                LOG_WARN("Live stream: reopen failed, will keep retrying");
-                            }
-                        }
-                    } else {
-                        if (isLiveStream_) {
-                            LOG_ERROR("Live stream: readPacket failed after " +
-                                     std::to_string(MAX_READ_RETRIES) + " retries, giving up");
-                            shouldQuit_.store(true);
-                            break;
-                        } else {
-                            // DASH 点播流：上游管道在重试上限后仍读不到包，认为流真正结束
-                            LOG_INFO("DASH stream: readPacket failed after retries, treating as EOF");
-                            decodingFinished_.store(true);
-                            break;
-                        }
-                    }
-                } else {
-                    // 本地文件：readPacket 返回 false 即为真正的文件结束
-                    // 设 decodingFinished_ 而非 shouldQuit_，让渲染循环继续消费队列剩余帧
-                    LOG_INFO("End of file reached in decoding thread");
-                    decodingFinished_.store(true);
-                    break;
-                }
-            }
+        if (isEof) {
+            break;
         }
     }
 
     av_packet_free(&packet);
-    LOG_INFO("Decoding thread stopped");
+    videoDecodeFinished_.store(true);
+    LOG_INFO("Video decode thread stopped");
+}
+
+void Player::audioDecodeThread() {
+    LOG_INFO("Audio decode thread started");
+
+    AVPacket* packet = av_packet_alloc();
+    Frame rawFrame;
+    int lastSerial = -1;
+
+    while (!shouldQuit_.load()) {
+        // seek 超时保护（纯音频模式无视频线程时由本线程兜底清除 decodingToTarget_）
+        if (decodingToTarget_.load()) {
+            double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count()
+                - seekTargetStartTime_;
+            if (elapsed > 2.0) {
+                decodingToTarget_.store(false);
+                LOG_WARN("Seek loop timeout (audio, " + std::to_string(elapsed)
+                         + "s), awaiting next frame for resync");
+            }
+        }
+
+        int serial = lastSerial;
+        int ret = audioPktQueue_->get(packet, /*block=*/true, &serial);
+        if (ret == 0) {
+            break;  // abort
+        }
+
+        if (serial != lastSerial) {
+            audioDecoder_->flush();
+            if (audioQueue_) audioQueue_->flush();
+            pendingAudioOffset_.store(0);
+            lastSerial = serial;
+        }
+
+        bool isEof = (packet->data == nullptr && packet->size == 0);
+
+        audioDecoder_->sendPacket(packet);
+        av_packet_unref(packet);
+
+        while (audioDecoder_->receiveFrame(rawFrame)) {
+            AVFrame* avFrame = rawFrame.getAVFrame();
+            if (!avFrame || avFrame->nb_samples <= 0) {
+                LOG_WARN("Received invalid audio frame, nb_samples: " +
+                         std::to_string(avFrame ? avFrame->nb_samples : 0));
+                rawFrame.unreference();
+                continue;
+            }
+            if (!normalizeAudioPTS(rawFrame)) {
+                continue;  // 无效帧已在 normalize 内丢弃
+            }
+            if (!enqueueAudioFrame(rawFrame, serial)) {
+                rawFrame.unreference();
+                break;
+            }
+            rawFrame.unreference();
+            checkPrebufferComplete();
+        }
+
+        if (isEof) {
+            break;
+        }
+    }
+
+    av_packet_free(&packet);
+    audioDecodeFinished_.store(true);
+    LOG_INFO("Audio decode thread stopped");
+}
+
+void Player::startWorkerThreads() {
+    // 重置结束标志：不存在的流标记为已完成，避免 EOF 判定等待未启动的线程
+    demuxFinished_.store(false);
+    decodingFinished_.store(false);
+    videoDecodeFinished_.store(!hasVideoStream_);
+    audioDecodeFinished_.store(!hasAudioStream_);
+
+    // 启动 packet / frame 队列
+    if (videoPktQueue_) videoPktQueue_->start();
+    if (audioPktQueue_) audioPktQueue_->start();
+    if (videoQueue_) videoQueue_->start();
+    if (audioQueue_) audioQueue_->start();
+
+    // 创建线程：demux 必建；video/audio decode 仅在对应流存在时创建
+    demuxThread_ = std::make_unique<std::thread>(&Player::demuxThread, this);
+    if (hasVideoStream_ && videoPktQueue_) {
+        videoDecodeThread_ = std::make_unique<std::thread>(&Player::videoDecodeThread, this);
+    }
+    if (hasAudioStream_ && audioPktQueue_) {
+        audioDecodeThread_ = std::make_unique<std::thread>(&Player::audioDecodeThread, this);
+    }
+}
+
+void Player::joinWorkerThreads(bool abortQueues) {
+    if (abortQueues) {
+        // 唤醒阻塞的线程：packet 队列 get、frame 队列 peekWritable 全部解除等待
+        if (videoPktQueue_) videoPktQueue_->abort();
+        if (audioPktQueue_) audioPktQueue_->abort();
+        if (videoQueue_) videoQueue_->abort();
+        if (audioQueue_) audioQueue_->abort();
+    }
+
+    // join 顺序：先停生产（demux），再停消费（decode）
+    if (demuxThread_ && demuxThread_->joinable()) demuxThread_->join();
+    if (videoDecodeThread_ && videoDecodeThread_->joinable()) videoDecodeThread_->join();
+    if (audioDecodeThread_ && audioDecodeThread_->joinable()) audioDecodeThread_->join();
+    demuxThread_.reset();
+    videoDecodeThread_.reset();
+    audioDecodeThread_.reset();
+
+    // 清空所有队列
+    if (videoPktQueue_) videoPktQueue_->flush();
+    if (audioPktQueue_) audioPktQueue_->flush();
+    if (videoQueue_) videoQueue_->flush();
+    if (audioQueue_) audioQueue_->flush();
+    pendingAudioOffset_.store(0);
 }
 
 /**
- * 解码线程辅助函数：处理 seek 请求
- * 清空解码器缓冲、帧队列、同步器，启用精确跳转模式
+ * demux 线程辅助函数：处理 seek 请求
+ *
+ * 仅 demux 线程触碰 demuxer 与 packet 队列：seek demuxer → flush 两个 packet 队列
+ * （serial++）→ 校准 avSync 与音频回调残留状态 → 设置精确跳转目标。video/audio
+ * decode 线程在下次 get() 发现 serial 变化后，各自 flush 解码器与帧队列（见方案 5.1）。
  */
-void Player::processSeekRequest() {
-    // 原子地读取并清除 seek 请求（mutex 保护，消除 TOCTOU 竞态）
+bool Player::processSeekRequest() {
     double seekTime;
     {
         std::lock_guard<std::mutex> lock(seekMutex_);
         if (!seekRequest_.pending) {
-            return;
+            return false;
         }
         seekTime = seekRequest_.target;
         seekRequest_.pending = false;
@@ -1311,52 +1495,36 @@ void Player::processSeekRequest() {
 
     LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
 
-    // DASH 流：pipe 输入不可 seek（matroska 流式生成无 cues 索引），
-    // 必须重启上游连接通过 HTTP Range 跳转
+    // DASH 流：pipe 输入不可 seek，必须重启上游连接通过 HTTP Range 跳转
     if (dashMerger_) {
         restartDashMerger(seekTime);
-        return;
+        return true;
     }
 
-    // 执行 seek（将秒转换为微秒）
     int64_t seekTimestamp = static_cast<int64_t>(seekTime * 1000000);
     if (demuxer_->seek(seekTimestamp)) {
-        // 清空解码器缓冲
-        if (videoDecoder_) videoDecoder_->flush();
-        if (audioDecoder_) {
-            audioDecoder_->flush();
-        }
-        // 字幕解码器与管理器同步清空，避免 seek 后残留旧字幕
-        if (subtitleDecoder_) {
-            subtitleDecoder_->flush();
-        }
-        if (subtitleManager_) {
-            subtitleManager_->clear();
-        }
+        // packet 队列已由 seek()（UI 线程）flush 并 bump serial，且 demux 在 pending 期间丢弃
+        // 旧包，此处队列已空，无需再 flush。仅清理 demux 线程独占、seek() 未触碰的状态：
+        // 字幕（避免 seek 后残留旧字幕）与音频回调残留偏移。
+        if (subtitleDecoder_) subtitleDecoder_->flush();
+        if (subtitleManager_) subtitleManager_->clear();
+        pendingAudioOffset_.store(0);
 
-        // 清空帧队列
-        if (videoQueue_) videoQueue_->flush();
-        audioQueue_->flush();
-
-        // 清空残留音频偏移
-        pendingAudioOffset_ = 0;
-
-        // 通知同步器更新时钟
+        // 通知同步器更新时钟，重置音频播放位置
         avSync_->seekTo(seekTime);
-
-        // 重置音频播放位置
         currentAudioFramePTS_.store(seekTime);
         samplesPlayedInFrame_.store(0);
 
         // ===== 启用精确跳转模式 =====
-        // 快速丢弃所有中间帧，直到到达目标位置
         decodingToTarget_.store(true);
         decodeTargetPTS_.store(seekTime);
-        // 记录开始时间，用于超时保护（见 enqueueVideoFrame）
         seekTargetStartTime_ = std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
     }
+    // 即使 demuxer_->seek 失败，pending 请求也已消费：返回 true 让调用方解除 EOF 停泊，
+    // 由后续读取/重试按实际位置自然恢复，避免卡在停泊态。
+    return true;
 }
 
 /**
@@ -1365,11 +1533,20 @@ void Player::processSeekRequest() {
  * 调用上下文：解码线程内（由 processSeekRequest 调用）。
  * 不能 join 解码线程自身，但可以原地停止/重建 dashMerger_ 与 demuxer_。
  *
- * 不启用 decodingToTarget_：上游已经从 seekTime 开始返回数据，第一帧 PTS
- * 就在目标附近，无需丢帧。直接通过 avSync_->seekTo 校准时钟即可。
+ * 精确跳转模式（decodingToTarget_）已由 seek() 在 UI 线程置位，跨越本函数数秒级的
+ * 上游重启全程保持：期间旧队列残帧（PTS < 目标）被丢弃、取帧冻结，进度条稳定停在目标。
+ * 本函数末尾重置 seekTargetStartTime_，使 2s 跳转超时窗口从「新数据可流入」时刻起算，
+ * 让第一帧走「到达目标」分支而非误触超时。
  */
 void Player::restartDashMerger(double seekTime) {
     LOG_INFO("restartDashMerger: seekTime=" + std::to_string(seekTime));
+
+    // packet 队列已由 seek()（UI 线程）flush 并 bump serial，且 demux 在 pending 期间丢弃旧包，
+    // 此处队列已空、decode 线程阻塞在空队列的 get() 上，无需再 flush。仅清理 demux 线程独占、
+    // seek() 未触碰的字幕与音频回调残留状态。
+    if (subtitleDecoder_) subtitleDecoder_->flush();
+    if (subtitleManager_) subtitleManager_->clear();
+    pendingAudioOffset_.store(0);
 
     // 停止旧 merger（其内部线程会被 join）
     if (dashMerger_) {
@@ -1379,46 +1556,59 @@ void Player::restartDashMerger(double seekTime) {
     // 重置 demuxer，关闭旧 pipe 读端
     demuxer_.reset();
 
-    // 用 -ss 参数重启 merger，从指定时间开始下载
-    dashMerger_ = std::make_unique<DashMerger>();
-    if (!dashMerger_->start(lastExtractedInfo_.videoUrl,
-                            lastExtractedInfo_.audioUrl,
-                            lastExtractedInfo_.headers,
-                            seekTime)) {
-        LOG_ERROR("restartDashMerger: DashMerger 启动失败");
-        triggerError("DASH 流 seek 失败");
-        setState(PlayerState::ERRORED);
-        return;
+    // 重启 merger + 打开 demuxer：bilibili 分片经代理拉取偶发瞬时失败（TLS pull error
+    // 等），单次失败不应让整个 seek 永久 ERROR。重试若干次，每次失败清理本轮残留后重来。
+    constexpr int kMaxRestartAttempts = 3;
+    bool opened = false;
+    for (int attempt = 1; attempt <= kMaxRestartAttempts && !opened; ++attempt) {
+        // 用 -ss 参数重启 merger，从指定时间开始下载
+        dashMerger_ = std::make_unique<DashMerger>();
+        if (!dashMerger_->start(lastExtractedInfo_.videoUrl,
+                                lastExtractedInfo_.audioUrl,
+                                lastExtractedInfo_.headers,
+                                seekTime)) {
+            LOG_WARN("restartDashMerger: DashMerger 启动失败 (尝试 " +
+                     std::to_string(attempt) + "/" + std::to_string(kMaxRestartAttempts) + ")");
+            dashMerger_.reset();
+            continue;
+        }
+
+        // 重新打开 demuxer 读取新 pipe
+        demuxer_ = std::make_unique<Demuxer>();
+        dashMerger_->waitReady();
+        opened = lastExtractedInfo_.headers.empty() && lastExtractedInfo_.duration == 0.0
+            ? demuxer_->open(dashMerger_->getPipeUrl())
+            : demuxer_->open(dashMerger_->getPipeUrl(),
+                             lastExtractedInfo_.headers,
+                             lastExtractedInfo_.duration);
+        if (!opened) {
+            LOG_WARN("restartDashMerger: Demuxer 打开失败 (尝试 " +
+                     std::to_string(attempt) + "/" + std::to_string(kMaxRestartAttempts) +
+                     ")，清理后重试");
+            // 清理本轮残留：merger 线程可能已因网络错误退出，demuxer 持有半开 pipe
+            demuxer_.reset();
+            if (dashMerger_) { dashMerger_->stop(); dashMerger_.reset(); }
+        }
     }
 
-    // 重新打开 demuxer 读取新 pipe
-    demuxer_ = std::make_unique<Demuxer>();
-    dashMerger_->waitReady();
-    bool opened = lastExtractedInfo_.headers.empty() && lastExtractedInfo_.duration == 0.0
-        ? demuxer_->open(dashMerger_->getPipeUrl())
-        : demuxer_->open(dashMerger_->getPipeUrl(),
-                         lastExtractedInfo_.headers,
-                         lastExtractedInfo_.duration);
     if (!opened) {
-        LOG_ERROR("restartDashMerger: Demuxer 打开失败");
+        LOG_ERROR("restartDashMerger: 重试 " + std::to_string(kMaxRestartAttempts) +
+                  " 次后仍失败，放弃 seek");
         triggerError("DASH 流 seek 失败");
         setState(PlayerState::ERRORED);
         return;
     }
-
-    // 清空解码器与队列
-    if (videoDecoder_) videoDecoder_->flush();
-    if (audioDecoder_) audioDecoder_->flush();
-    if (subtitleDecoder_) subtitleDecoder_->flush();
-    if (subtitleManager_) subtitleManager_->clear();
-    if (videoQueue_) videoQueue_->flush();
-    audioQueue_->flush();
-    pendingAudioOffset_ = 0;
 
     // 校准 AV 同步时钟到目标位置（上游已从 seekTime 开始流，PTS 保持原值）
     avSync_->seekTo(seekTime);
     currentAudioFramePTS_.store(seekTime);
     samplesPlayedInFrame_.store(0);
+
+    // 重置精确跳转计时窗口：上游重启耗时数秒，远超 2s 超时；从此刻起算，
+    // 让 decode 线程读到新数据后第一帧走「到达目标」分支，而非误判超时。
+    // decodingToTarget_ / decodeTargetPTS_ 维持 seek() 所置值不变。
+    seekTargetStartTime_ = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 
     LOG_INFO("restartDashMerger: 完成，从 " + std::to_string(seekTime) + "s 开始播放");
 }
@@ -1453,104 +1643,21 @@ bool Player::normalizeVideoPTS(Frame& rawFrame) {
         return true;
     }
 
-    double framePTS = rawFrame.getPTS();
-
-    // 检查PTS是否有效（跳过无效PTS的帧）
-    // AV_NOPTS_VALUE 是 INT64_MIN，转成 double 约为 -9.22e18
-    bool hasValidPTS = (std::isfinite(framePTS) &&
-                       framePTS > -1e15 &&  // 排除 AV_NOPTS_VALUE 及其附近的异常值
-                       framePTS < 1e15);    // 排除异常大的正值
-
-    if (!hasValidPTS) {
-        // 无效PTS帧：使用上一帧归一化PTS + 帧间隔估算
-        if (liveStreamBaseCalibrated_.load()) {
-            double estimatedPTS = lastValidVideoPTS_.load() + videoFrameInterval_;
-            lastValidVideoPTS_.store(estimatedPTS);
-            rawFrame.setPTS(estimatedPTS);
-            rawFrame.setPTSEstimated(true);
-            return true;
-        } else {
-            // 校准期间的无效帧：直接丢弃
-            rawFrame.unreference();
-            return false;
-        }
+    // 组合状态（首帧记录 + 统一基准 + 回绕 + 估算）集中在 PTSNormalizer 内以 mutex 保护，
+    // video/audio 两个 decode 线程共用，避免拆线程后多个 atomic 拼接状态竞态。
+    PTSNormalizer::Result r = ptsNormalizer_->normalizeVideo(rawFrame.getPTS(), videoFrameInterval_);
+    if (r.drop) {
+        rawFrame.unreference();
+        return false;
     }
-
-    // 有效PTS帧：进行正常的校准和归一化
-    int frameCount = videoFrameCount_.fetch_add(1);  // 递增并获取旧值
-
-    if (!firstVideoFrameReceived_.load()) {
-        // 记录第一帧的原始PTS
-        firstVideoPTS_.store(framePTS);
-        firstVideoFrameReceived_.store(true);
-        LOG_INFO("Live stream: First video PTS = " + std::to_string(framePTS));
-
-        // 如果音频也已接收到第一帧，确定统一基准
-        if (firstAudioFrameReceived_.load() && !liveStreamBaseCalibrated_.load()) {
-            double audioPTS = firstAudioPTS_.load();
-            double basePTS = std::min(framePTS, audioPTS);
-            liveStreamBasePTS_.store(basePTS);
-            liveStreamBaseCalibrated_.store(true);
-            LOG_INFO("Live stream: Unified base PTS determined = " + std::to_string(basePTS) +
-                    " (video: " + std::to_string(framePTS) +
-                    ", audio: " + std::to_string(audioPTS) + ")");
-        }
-    }
-
-    // 使用统一基准进行归一化（如果已确定）
-    if (liveStreamBaseCalibrated_.load()) {
-        double basePTS = liveStreamBasePTS_.load();
-        double normalizedPTS = framePTS - basePTS;
-
-        // 检测 PTS 回绕：如果归一化后的 PTS 突然变成大负数，说明发生了回绕
-        // RTSP 流的 RTP 时间戳是 32 位的，会溢出回绕
-        if (normalizedPTS < -10.0) {  // 负数超过 10 秒，明显异常
-            LOG_WARN("Live stream: Video PTS wrap-around detected (normalized PTS: " +
-                    std::to_string(normalizedPTS) + "), waiting for audio to recalibrate");
-            // 视频回绕时不立即重置基准，等待音频也回绕后统一处理
-            // 暂时跳过这一帧，避免负数 PTS 进入队列
-            rawFrame.unreference();
-            return false;
-        }
-
-        // 检测 PTS 异常跳变（乱序、RTP 解包错误、AV_NOPTS 残留等），用估算值代替
-        // 倒退 > 0.5s 或前跳 > 30s 都视为脏数据；估算帧不影响进度条（音频时钟驱动）
-        double lastPTS = lastValidVideoPTS_.load();
-        if (lastPTS > 0.0) {
-            double diff = normalizedPTS - lastPTS;
-            if (diff < -0.5 || diff > 30.0) {
-                double estimatedPTS = lastPTS + videoFrameInterval_;
-                LOG_WARN("Live stream: Video PTS anomaly (diff=" + std::to_string(diff) +
-                        "s), using estimated: " + std::to_string(estimatedPTS));
-                rawFrame.setPTS(estimatedPTS);
-                rawFrame.setPTSEstimated(true);
-                lastValidVideoPTS_.store(estimatedPTS);
-                return true;
-            }
-        }
-
-        framePTS = normalizedPTS;
-        LOG_DEBUG("Live stream: Video PTS normalized using unified base: " +
-                 std::to_string(framePTS + basePTS) + " -> " +
-                 std::to_string(framePTS));
-    } else {
-        // 统一基准未确定时，暂时使用视频自己的基准
-        double videBase = firstVideoPTS_.load();
-        framePTS = framePTS - videBase;
-        LOG_DEBUG("Live stream: Video PTS normalized (temporary): " +
-                 std::to_string(framePTS + videBase) + " -> " +
-                 std::to_string(framePTS));
-    }
-
-    // 更新帧的PTS为归一化后的值
-    rawFrame.setPTS(framePTS);
-    lastValidVideoPTS_.store(framePTS);
+    rawFrame.setPTS(r.pts);
+    rawFrame.setPTSEstimated(r.estimated);
     return true;
 }
 
 /**
- * 解码线程辅助函数：归一化音频帧 PTS
- * 实时流需要减去基准 PTS，处理无效 PTS 和 PTS 回绕
+ * video/audio 解码线程辅助函数：归一化音频帧 PTS
+ * 实时流减去统一基准并处理无效 PTS / 回绕，组合状态见 PTSNormalizer
  * @param rawFrame 待归一化的音频帧（会就地修改 PTS）
  * @return true 表示帧有效可继续处理，false 表示帧已丢弃应跳过
  */
@@ -1559,85 +1666,18 @@ bool Player::normalizeAudioPTS(Frame& rawFrame) {
         return true;
     }
 
-    double audioPTS = rawFrame.getPTS();
     AVFrame* avFrame = rawFrame.getAVFrame();
+    // 音频帧间隔由采样率与样本数计算，用于无效/估算帧
+    double audioFrameInterval = (audioSampleRate_ > 0 && avFrame && avFrame->nb_samples > 0)
+        ? static_cast<double>(avFrame->nb_samples) / static_cast<double>(audioSampleRate_)
+        : 0.02;  // 默认 20ms
 
-    // 检查PTS是否有效
-    bool hasValidPTS = (std::isfinite(audioPTS) &&
-                       audioPTS > -1e15 &&
-                       audioPTS < 1e15);
-
-    if (!hasValidPTS) {
-        // 无效PTS帧：使用上一帧归一化PTS + 帧间隔估算
-        if (liveStreamBaseCalibrated_.load()) {
-            // 根据采样率和帧大小计算实际帧间隔
-            double audioFrameInterval = (audioSampleRate_ > 0 && avFrame->nb_samples > 0)
-                ? static_cast<double>(avFrame->nb_samples) / static_cast<double>(audioSampleRate_)
-                : 0.02;  // 默认 20ms
-            double estimatedPTS = lastValidAudioPTS_.load() + audioFrameInterval;
-            lastValidAudioPTS_.store(estimatedPTS);
-            audioPTS = estimatedPTS;
-            rawFrame.setPTS(estimatedPTS);
-            return true;
-        } else {
-            // 校准期间的无效帧：直接丢弃
-            rawFrame.unreference();
-            return false;
-        }
+    PTSNormalizer::Result r = ptsNormalizer_->normalizeAudio(rawFrame.getPTS(), audioFrameInterval);
+    if (r.drop) {
+        rawFrame.unreference();
+        return false;
     }
-
-    // 有效PTS帧：进行正常的校准和归一化
-    int frameCount = audioFrameCount_.fetch_add(1);  // 递增并获取旧值
-
-    if (!firstAudioFrameReceived_.load()) {
-        // 记录第一帧的原始PTS
-        firstAudioPTS_.store(audioPTS);
-        firstAudioFrameReceived_.store(true);
-        LOG_INFO("Live stream: First audio PTS = " + std::to_string(audioPTS));
-
-        // 如果视频也已接收到第一帧，确定统一基准
-        if (firstVideoFrameReceived_.load() && !liveStreamBaseCalibrated_.load()) {
-            double videoPTS = firstVideoPTS_.load();
-            double basePTS = std::min(audioPTS, videoPTS);
-            liveStreamBasePTS_.store(basePTS);
-            liveStreamBaseCalibrated_.store(true);
-            LOG_INFO("Live stream: Unified base PTS determined = " + std::to_string(basePTS) +
-                    " (audio: " + std::to_string(audioPTS) +
-                    ", video: " + std::to_string(videoPTS) + ")");
-        }
-    }
-
-    // 使用统一基准进行归一化（如果已确定）
-    if (liveStreamBaseCalibrated_.load()) {
-        double basePTS = liveStreamBasePTS_.load();
-        double normalizedPTS = audioPTS - basePTS;
-
-        // 检测 PTS 回绕
-        if (normalizedPTS < -10.0) {
-            LOG_WARN("Live stream: Audio PTS wrap-around detected (normalized PTS: " +
-                    std::to_string(normalizedPTS) + "), recalibrating base");
-            liveStreamBasePTS_.store(audioPTS);
-            normalizedPTS = 0.0;
-            videoFrameCount_.store(0);
-            audioFrameCount_.store(0);
-        }
-
-        audioPTS = normalizedPTS;
-        LOG_DEBUG("Live stream: Audio PTS normalized using unified base: " +
-                 std::to_string(audioPTS + basePTS) + " -> " +
-                 std::to_string(audioPTS));
-    } else {
-        // 统一基准未确定时，暂时使用音频自己的基准
-        double audioBase = firstAudioPTS_.load();
-        audioPTS = audioPTS - audioBase;
-        LOG_DEBUG("Live stream: Audio PTS normalized (temporary): " +
-                 std::to_string(audioPTS + audioBase) + " -> " +
-                 std::to_string(audioPTS));
-    }
-
-    // 更新帧的PTS为归一化后的值
-    rawFrame.setPTS(audioPTS);
-    lastValidAudioPTS_.store(audioPTS);
+    rawFrame.setPTS(r.pts);
     return true;
 }
 
@@ -1647,8 +1687,34 @@ bool Player::normalizeAudioPTS(Frame& rawFrame) {
  * @param rawFrame 解码后的原始帧
  * @return true 表示已处理（入队或丢弃），false 表示应退出解码线程
  */
-bool Player::enqueueVideoFrame(Frame& rawFrame) {
+Frame* Player::waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial) {
+    // 可中断地等待可写帧槽：替代 FrameQueue::peekWritable 的无限阻塞。
+    // seek 时渲染暂停、帧队列不再被消费，若硬阻塞则本 decode 线程无法回到循环顶部
+    // 处理 serial 变化（flush），形成死锁。轮询 tryPeekWritable，并在以下情况放弃：
+    //   - shouldQuit_：stop/quit
+    //   - pktQueue serial 变化：发生了 seek/flush，应回到循环顶部重新对齐
+    constexpr int kPollMs = 5;
+    for (;;) {
+        Frame* w = frameQueue->tryPeekWritable();
+        if (w) return w;
+        if (shouldQuit_.load()) return nullptr;
+        if (pktQueue && pktQueue->serial() != serial) return nullptr;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+    }
+}
+
+bool Player::enqueueVideoFrame(Frame& rawFrame, int serial) {
     double framePTS = rawFrame.getPTS();
+
+    // 丢弃 seek/flush 之前的陈旧帧：该帧所属 packet 的 serial 与队列当前 serial 不一致，
+    // 说明 restartDashMerger/seek 已 flush（serial++），此帧来自旧位置。若放行，倒退 seek 时
+    // 其 PTS（远大于新目标）会被下面的精确跳转逻辑误判为「到达目标/落点偏移」，把 AV 时钟
+    // 拉回旧位置、解冻后渲染旧画面 —— 进度条跳回旧位置、迟迟不更新。serial 是区分新旧帧的
+    // 唯一可靠依据（PTS 无法区分「旧的靠后帧」与「新的合法靠后帧」）。
+    if (videoPktQueue_ && serial != videoPktQueue_->serial()) {
+        rawFrame.unreference();
+        return true;
+    }
 
     // ===== 精确跳转处理：快速丢弃所有中间帧 =====
     if (decodingToTarget_.load()) {
@@ -1705,9 +1771,9 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
         lastEnqueuedVideoPTS_.store(framePTS);
     }
 
-    // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
+    // ===== 不需要丢弃的帧：获取可写槽 -> 转换 -> 提交 =====
     // 先将 rawFrame 数据移到队列槽位，立即释放解码器内部 buffer 引用
-    // 避免 peekWritable 阻塞期间解码器 buffer pool 无法回收导致内存膨胀
+    // 避免等待期间解码器 buffer pool 无法回收导致内存膨胀
     Frame* writable = videoQueue_->tryPeekWritable();
     if (writable) {
         // 快速路径：队列有空位，直接写入
@@ -1726,15 +1792,16 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
         }
         rawFrame.unreference();
     } else {
-        // 慢速路径：队列满，先移走 rawFrame 数据释放解码器 buffer
+        // 慢速��径：队列满，先移走 rawFrame 数据释放解码器 buffer
         AVFrame* tempFrame = av_frame_alloc();
         av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
         // rawFrame 现在为空，解码器 buffer 引用已转移到 tempFrame
 
-        writable = videoQueue_->peekWritable();  // 阻塞等待，不再持有解码器 buffer
+        // 可中断等待：serial 变化（seek/flush）或 abort 时放弃当前帧
+        writable = waitWritableSlot(videoQueue_.get(), videoPktQueue_.get(), serial);
         if (!writable) {
             av_frame_free(&tempFrame);
-            return false;  // abort
+            return false;  // 放弃当前帧，回到循环顶部处理 flush / 退出
         }
         if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
             writable->setPTS(framePTS);
@@ -1749,14 +1816,23 @@ bool Player::enqueueVideoFrame(Frame& rawFrame) {
 }
 
 /**
- * 解码线程辅助函数：将音频帧入队
- * 转换为 S16 格式后入队，处理精确跳转丢帧逻辑
+ * video decode 线程辅助函数：将音频帧入队（仅当无独立音频流由 audio 线程调用，
+ * 实际由 audio decode 线程调用）。转换为 S16 格式后入队，处理精确跳转丢帧逻辑。
  * @param rawFrame 解码后的原始帧
- * @return true 表示已处理（入队或丢弃），false 表示应退出解码线程
+ * @param serial   该帧所属 packet serial，队列满轮询期间 serial 变化即放弃
+ * @return true 表示已处理（入队或丢弃），false 表示应放弃当前帧（退出/serial 变化）
  */
-bool Player::enqueueAudioFrame(Frame& rawFrame) {
+bool Player::enqueueAudioFrame(Frame& rawFrame, int serial) {
     double audioPTS = rawFrame.getPTS();
     AVFrame* avFrame = rawFrame.getAVFrame();
+
+    // 丢弃 seek/flush 之前的陈旧帧（与 enqueueVideoFrame 同理）：倒退 seek 时旧位置音频帧
+    // （PTS 远大于新目标）会触发下面的「far from target」提前重校准，把时钟拉回旧位置、
+    // 解冻精确跳转，导致进度条跳回。serial 不一致即为陈旧帧，直接丢弃。
+    if (audioPktQueue_ && serial != audioPktQueue_->serial()) {
+        rawFrame.unreference();
+        return true;
+    }
 
     // ===== 音频跳转：丢弃目标位置之前的所有音频帧 =====
     // 注意：音频不需要显示第一帧，直接快速丢弃到目标位置即可
@@ -1782,20 +1858,19 @@ bool Player::enqueueAudioFrame(Frame& rawFrame) {
         }
     }
 
-    // ===== 不需要丢弃的帧：获取可写槽 → 转换 → 提交 =====
-    // 音频队列由平台音频线程实时消费，阻塞时间极短
-    // 同样先尝试非阻塞，避免持有解码器 buffer 期间阻塞
+    // ===== 不需要丢弃的帧：���取可写槽 -> 转换 -> 提交 =====
+    // 音频队列由平台音频线程实时消费，阻塞时间极短；同样先尝试非阻塞
     Frame* audioWritable = audioQueue_->tryPeekWritable();
     if (!audioWritable) {
-        // 队列满：先释放 rawFrame，再阻塞等待
+        // 队列满：先释放 rawFrame，再可中断等待
         double savedPTS = rawFrame.getPTS();
         AVFrame* tempAudio = av_frame_alloc();
         av_frame_move_ref(tempAudio, rawFrame.getAVFrame());
 
-        audioWritable = audioQueue_->peekWritable();
+        audioWritable = waitWritableSlot(audioQueue_.get(), audioPktQueue_.get(), serial);
         if (!audioWritable) {
             av_frame_free(&tempAudio);
-            return false;
+            return false;  // 放弃当前帧
         }
         if (audioDecoder_->convertToS16(tempAudio, *audioWritable)) {
             audioWritable->setPTS(savedPTS);
@@ -1847,19 +1922,17 @@ void Player::cleanup() {
     // 停止所有线程
     shouldQuit_.store(true);
 
-    // 终止队列等待，唤醒可能阻塞在 peekWritable 的解码线程
-    if (videoQueue_) videoQueue_->abort();
-    if (audioQueue_) audioQueue_->abort();
-
-    // 停止录制
-    if (videoRecorder_ && videoRecorder_->isRecording()) videoRecorder_->stop();
-    if (audioRecorder_ && audioRecorder_->isRecording()) audioRecorder_->stop();
-    videoRecorder_.reset();
-    audioRecorder_.reset();
-
-    if (decodingThread_ && decodingThread_->joinable()) {
-        decodingThread_->join();
+    // 停止录制（先停录制再 join，避免 demux 线程 join 后录制器仍被引用）
+    {
+        std::lock_guard<std::mutex> lock(recorderMutex_);
+        if (videoRecorder_ && videoRecorder_->isRecording()) videoRecorder_->stop();
+        if (audioRecorder_ && audioRecorder_->isRecording()) audioRecorder_->stop();
+        videoRecorder_.reset();
+        audioRecorder_.reset();
     }
+
+    // abort 队列唤醒阻塞线程，join demux + video/audio decode 三线程并清空队列
+    joinWorkerThreads(/*abortQueues=*/true);
 
     // 清理组件
     avSync_.reset();
@@ -1873,6 +1946,9 @@ void Player::cleanup() {
     }
     audioDecoder_.reset();
     videoDecoder_.reset();
+    // packet 队列在解码器之后释放（解码器线程已 join，无人再访问）
+    videoPktQueue_.reset();
+    audioPktQueue_.reset();
     // 字幕模块必须在 demuxer_ 之前释放（SubtitleDecoder 不直接依赖 demuxer，
     // 但 subtitleManager_ 的 Entry 被 Controller 引用，顺序释放保险起见）
     subtitleDecoder_.reset();
@@ -2086,6 +2162,26 @@ bool Player::initDecoders() {
         }
     }
 
+    // 记录启用的流，并为对应 packet 队列设置时间基准（duration() 背压用）。
+    // EOF 判定按已启用的流组合判断，避免等待一个从未启动的 decode 线程。
+    hasVideoStream_ = (videoDecoder_ != nullptr);
+    hasAudioStream_ = (audioDecoder_ != nullptr);
+
+    if (hasVideoStream_ && videoPktQueue_) {
+        AVStream* vs = demuxer_->getVideoStream();
+        if (vs) videoPktQueue_->setTimeBase(vs->time_base);
+    } else {
+        // 无视频解码器：不需要视频 packet 队列（纯音频模式或视频流缺失）
+        videoPktQueue_.reset();
+    }
+    if (hasAudioStream_ && audioPktQueue_) {
+        AVStream* as = demuxer_->getAudioStream();
+        if (as) audioPktQueue_->setTimeBase(as->time_base);
+    } else {
+        // 音频解码器初始化失败：丢弃音频 packet 队列，不创建音频 decode 线程
+        audioPktQueue_.reset();
+    }
+
     LOG_INFO("Decoders initialized successfully");
     return true;
 }
@@ -2122,7 +2218,7 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     // 从队列读取 inputNeeded 字节
     while (inputFilled < inputNeeded) {
         Frame* audioFrame = audioQueue_ ? audioQueue_->peek() : nullptr;
-        size_t frameOffset = pendingAudioOffset_;
+        size_t frameOffset = pendingAudioOffset_.load();
 
         if (!audioFrame) {
             int underruns = audioUnderrunCount_.fetch_add(1) + 1;
@@ -2137,7 +2233,17 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         AVFrame* avFrame = audioFrame->getAVFrame();
         if (!avFrame || !avFrame->data[0] || avFrame->nb_samples <= 0) {
             audioQueue_->next();
-            pendingAudioOffset_ = 0;
+            pendingAudioOffset_.store(0);
+            continue;
+        }
+
+        size_t frameDataSize = static_cast<size_t>(avFrame->nb_samples) * frameBytes;
+        // 边界保护：seek 时 audio decode 线程可能在回调读取间隙 flush 队列并清零偏移，
+        // 旧的 frameOffset 可能越过新队头帧的数据范围。越界则丢弃该帧重新对齐，
+        // 避免 memcpy 读越界。
+        if (frameOffset >= frameDataSize) {
+            audioQueue_->next();
+            pendingAudioOffset_.store(0);
             continue;
         }
 
@@ -2150,7 +2256,6 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
             hasValidFrame = true;
         }
 
-        size_t frameDataSize = static_cast<size_t>(avFrame->nb_samples) * frameBytes;
         size_t remainingFrameData = frameDataSize - frameOffset;
         size_t bytesToCopy = std::min(remainingFrameData, inputNeeded - inputFilled);
 
@@ -2158,11 +2263,11 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         inputFilled += bytesToCopy;
 
         if (bytesToCopy < remainingFrameData) {
-            pendingAudioOffset_ = frameOffset + bytesToCopy;
+            pendingAudioOffset_.store(frameOffset + bytesToCopy);
             break;
         } else {
             audioQueue_->next();
-            pendingAudioOffset_ = 0;
+            pendingAudioOffset_.store(0);
         }
     }
 
@@ -2361,12 +2466,10 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
         return false;
     }
 
-    // 停止解码线程，重置解复用器
-    // 先 flush 队列解除解码线程的阻塞（pause 后消费者停止，解码线程可能卡在 push）
+    // 停止 worker 线程，重置解复用器。abort 队列解除 decode 线程在帧队列/packet
+    // 队列上的阻塞（pause 后消费者停止，decode 线程可能卡在写入）。
     shouldQuit_.store(true);
-    if (videoQueue_) videoQueue_->flush();
-    if (audioQueue_) audioQueue_->flush();
-    if (decodingThread_ && decodingThread_->joinable()) decodingThread_->join();
+    joinWorkerThreads(/*abortQueues=*/true);
     shouldQuit_.store(false);
 
     if (dashMerger_) { dashMerger_->stop(); dashMerger_.reset(); }
@@ -2401,6 +2504,11 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     // 用新流的 codec 参数重新初始化解码器（画质切换后编码参数可能不同）
     videoDecoder_.reset();
     audioDecoder_.reset();
+    // 确保 packet 队列存在（首次 open 后已创建；此处兜底新流出现新音轨等情况）。
+    // initDecoders 会按实际流设置 time_base 或在流缺失时 reset。
+    if (!audioOnly_ && !videoPktQueue_) videoPktQueue_ = std::make_unique<PacketQueue>();
+    if (demuxer_->getAudioStreamIndex() >= 0 && !audioPktQueue_)
+        audioPktQueue_ = std::make_unique<PacketQueue>();
     if (!initDecoders()) {
         LOG_ERROR("switchQuality: 解码器初始化失败");
         setState(PlayerState::ERRORED);
@@ -2412,10 +2520,9 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
         renderer_->setVideoSize(videoWidth_, videoHeight_);
     }
 
-    if (videoQueue_) videoQueue_->flush();
-    audioQueue_->flush();
-
-    // 在解码线程启动前直接 seek，避免通过异步机制产生竞态
+    // 在 worker 线程启动前直接 seek，避免异步机制竞态。不用 decodingToTarget_：
+    // seek 在线程启动前完成，demux 从目标位置开始读，decode 线程首个 packet 的
+    // serial 变化会触发一次 flush（队列已空，无副作用）。
     if (seekTime > 0.0) {
         // DASH 流：merger 已用 -ss seekTime 启动，pipe 不可 seek，只更新时钟
         if (!info.isDash) {
@@ -2427,7 +2534,7 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
         samplesPlayedInFrame_.store(0);
     }
 
-    decodingThread_ = std::make_unique<std::thread>(&Player::decodingThread, this);
+    startWorkerThreads();
 
     // 恢复音频输出（pause() 暂停了它，不恢复则音频时钟不推进，视频也卡死）
     if (audioOutput_) {

@@ -11,6 +11,31 @@
 
 namespace FluxPlayer {
 
+namespace {
+// 判断 avformat_open_input 后是否已无需 find_stream_info。
+// DASH pipe（DashMerger 输出的 Matroska）写头时已带完整 codecpar（含 extradata）+ 帧率，
+// 解析容器头即得全部流信息。此时 find_stream_info 只会从管道再读包/试解码一帧来"确认"，
+// 而读包速度受限于 merger 从远程下载 —— 这正是 seek 后探测段长达数秒的根源。
+// 仅当所有音视频流的 codecpar 关键字段就绪才跳过；否则回退到正常探测，保证健壮。
+bool streamInfoReadyForPipe(const std::string& filename, AVFormatContext* ctx) {
+    if (filename.rfind("pipe:", 0) != 0 || !ctx) {
+        return false;
+    }
+    bool sawAV = false;
+    for (unsigned i = 0; i < ctx->nb_streams; ++i) {
+        AVCodecParameters* cp = ctx->streams[i]->codecpar;
+        if (cp->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (cp->codec_id == AV_CODEC_ID_NONE || cp->width <= 0 || cp->height <= 0) return false;
+            sawAV = true;
+        } else if (cp->codec_type == AVMEDIA_TYPE_AUDIO) {
+            if (cp->codec_id == AV_CODEC_ID_NONE || cp->sample_rate <= 0) return false;
+            sawAV = true;
+        }
+    }
+    return sawAV;
+}
+}  // namespace
+
 Demuxer::Demuxer()
     : m_formatCtx(nullptr)
     , m_videoStreamIndex(-1)
@@ -51,11 +76,17 @@ bool Demuxer::open(const std::string& filename) {
     // 步骤3：探测流信息（读取文件头若干包，解析每条流的编解码器参数）
     // probesize/analyzeduration 已通过 avformat_open_input 的 options 写入 format context，
     // find_stream_info 会自动使用，无需再传（且其第二参数是 per-stream 数组，传单个会越界）
-    ret = avformat_find_stream_info(m_formatCtx, nullptr);
-    if (ret < 0) {
-        LOG_ERROR("Failed to find stream information");
-        close();
-        return false;
+    // DASH pipe 且容器头已自描述时跳过 find_stream_info（见 streamInfoReadyForPipe），
+    // 消除探测段从管道读包/试解码的网络等待。否则正常探测保证健壮。
+    if (streamInfoReadyForPipe(filename, m_formatCtx)) {
+        LOG_DEBUG("Pipe: container header self-describing, skipping find_stream_info");
+    } else {
+        ret = avformat_find_stream_info(m_formatCtx, nullptr);
+        if (ret < 0) {
+            LOG_ERROR("Failed to find stream information");
+            close();
+            return false;
+        }
     }
     LOG_DEBUG("Stream information found, total streams: " + std::to_string(m_formatCtx->nb_streams));
 
@@ -75,16 +106,32 @@ bool Demuxer::open(const std::string& filename) {
  * 本地文件返回 nullptr，网络流按协议差异化设置重连、超时、缓冲等参数
  */
 AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) const {
+    const bool isPipe = (filename.find("pipe:") == 0);
     const bool isNetwork = (filename.find("rtsp://") == 0 ||
                             filename.find("rtmp://") == 0 ||
                             filename.find("http://") == 0 ||
                             filename.find("https://") == 0);
-    if (!isNetwork) {
+    if (!isNetwork && !isPipe) {
         return nullptr;
     }
 
-    LOG_INFO("Detected network stream, setting options");
     AVDictionary* options = nullptr;
+
+    // === DASH pipe 专用选项 ===
+    // DashMerger 把 h264+aac 实时混流为 Matroska/WebM 写入 pipe（getPipeUrl 返回 pipe:N）。
+    // DashMerger 写 MKV header 时已带全部编解码参数（含 extradata）与帧率，header 完全自描述，
+    // find_stream_info 读完 header 即可定下所有流信息，无需再从管道读大量包估算 fps。
+    // probesize 是探测期最多读取的字节数：调小让其读完 header 即返回。这是 DASH seek 提速关键 ——
+    // 之前 2MB 意味着要等 merger 从远程下完 2MB 4K 数据（受带宽限制达数秒）才返回。
+    // 256KB 足够覆盖 MKV header + 少量包，且远小于下载瓶颈。
+    if (isPipe) {
+        av_dict_set(&options, "probesize", "262144", 0);       // 256 KB（默认 5 MB）
+        av_dict_set(&options, "analyzeduration", "500000", 0); // 500ms（默认 5s）
+        LOG_DEBUG("Pipe options: fast probe (probesize=256KB, analyze=500ms)");
+        return options;
+    }
+
+    LOG_INFO("Detected network stream, setting options");
 
     // 通用选项：减少缓冲延迟
     av_dict_set(&options, "max_delay", "500000", 0);
@@ -430,11 +477,17 @@ bool Demuxer::open(const std::string& filename,
         return false;
     }
 
-    ret = avformat_find_stream_info(m_formatCtx, nullptr);
-    if (ret < 0) {
-        LOG_ERROR("Failed to find stream info");
-        close();
-        return false;
+    // DASH pipe 且容器头已自描述全部流信息时，跳过 find_stream_info —— 它会从管道再读包/
+    // 试解码（受 merger 下载速度限制，是 seek 探测段数秒延迟的根源）。否则正常探测保证健壮。
+    if (streamInfoReadyForPipe(filename, m_formatCtx)) {
+        LOG_DEBUG("Pipe: container header self-describing, skipping find_stream_info");
+    } else {
+        ret = avformat_find_stream_info(m_formatCtx, nullptr);
+        if (ret < 0) {
+            LOG_ERROR("Failed to find stream info");
+            close();
+            return false;
+        }
     }
 
     // pipe 流无法从容器头读取 duration，手动注入避免被误判为直播流

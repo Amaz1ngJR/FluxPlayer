@@ -8,7 +8,9 @@
 </div>
 
 
-基于 FFmpeg + OpenGL 的跨平台视频播放器，使用 C++17 开发。支持本地文件播放、网络流（RTSP/RTMP/HTTP/HLS）播放，以及 B站、YouTube 等网页视频直接播放，具备完整的音视频同步、GPU 渲染和 ImGui 控制界面。
+基于 FFmpeg + OpenGL 的跨平台桌面视频播放器，使用 C++17 开发，覆盖 macOS / Windows / Linux 三端。从本地文件、纯音频，到 RTSP/RTMP/HTTP/HLS/DASH 网络流，再到 B站、YouTube 等 1000+ 平台的网页视频，都能直接打开播放。
+
+核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、硬件加速解码（VideoToolbox / CUDA / D3D11VA / DXVA2）及 NV12 零拷贝直通、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。界面由 Dear ImGui 构建，配套语义 token 驱动、支持热加载的皮肤系统。
 
 ## 功能特性
 
@@ -18,12 +20,12 @@
 - 🔊 跨平台音频输出（macOS AudioToolbox / Windows WinMM / Linux ALSA）
 - 🎛️ ImGui 控制界面（播放控制、进度条、音量、媒体信息、统计面板）
 - 📂 支持文件拖放打开
-- ⏱️ 音视频同步（音频时钟 / 视频时钟 / 外部时钟三种模式）
+- ⏱️ 音视频同步（自适应主时钟：有音频用音频时钟、无音频退回外部时钟），音频时钟回调间隙实时插值消除阶梯跳变
 - 🚀 FFmpeg 多线程解码，YUV420P 源帧零拷贝直通渲染
 - ⚡ 硬件加速解码（macOS VideoToolbox / Windows CUDA(NVDEC)、D3D11VA、DXVA2），默认开启，自动降级
 - 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU；CUDA 后端自动解交错兼容
 - 📡 RTSP/RTMP/HLS 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
-- 🌊 网络流自适应缓冲：环形帧队列（对标 ffplay FrameQueue），本地 4 帧 / 网络 8 帧，预缓冲 5 帧起播
+- 🌊 网络流自适应缓冲：解耦的 PacketQueue（serial 序号 + 字节/时长背压）+ 环形帧队列（对标 ffplay），本地 4 帧 / 网络 8 帧，预缓冲 5 帧起播
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看，运行时热更新日志级别
 - ⚙️ INI 配置文件，支持热重载
@@ -67,12 +69,13 @@ FluxPlayer/
 ├── src/                  # 源代码
 │   ├── main.cpp
 │   ├── audio/            # 音频输出 (AudioOutput)
-│   ├── core/             # 播放器核心 (Player, AVSync, MediaInfo)
+│   ├── core/             # 播放器核心 (Player, AVSync, MediaInfo, FrameQueue, PacketQueue, PTSNormalizer)
 │   ├── decoder/          # 解码器 (Demuxer, VideoDecoder, AudioDecoder, Frame)
 │   ├── recorder/         # 录制器 (Recorder)
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
-│   ├── ui/               # 界面 (Window, Controller, HomeScreen, MergeScreen)
+│   ├── video/            # 视频后处理 (FrameInterpolator 帧插值)
+│   ├── ui/               # 界面 (Window, Controller, HomeScreen, MergeScreen, OpeningScreen, UiContext, Skin/SkinManager/SkinRenderer 皮肤系统)
 │   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, Downloader)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
@@ -250,7 +253,7 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 ```powershell
 .\scripts\package_windows.ps1
-# 输出：dist\FluxPlayer-0.1.0-Setup.exe
+# 输出：dist\FluxPlayer-0.4.0-Setup.exe
 ```
 
 脚本流程：图标处理（优先用 `source\pic.ico`，否则用 ImageMagick 从 `source\pic.png` 转换）→ cmake Release 构建 → Inno Setup 打包（含桌面快捷方式选项）。
@@ -265,8 +268,17 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 ### 启动方式
 
-- 无参数启动：进入 HomeScreen 主界面，可点击按钮选择文件、拖放文件或输入网络 URL
-- 带参数启动：`FluxPlayer <文件路径或URL>` 直接播放
+- **无参数启动**：进入 HomeScreen 主界面，提供三种入口：
+  - `OPEN LOCAL FILE`：弹出文件选择对话框打开本地视频 / 音频
+  - 直接把文件拖放到窗口（提示 *or drag & drop a file here*）
+  - `NETWORK URL` 输入框：粘贴网络流地址或网页视频地址后回车 / 点 `OPEN URL`
+  - `MERGE VIDEOS`：进入多视频合并界面（见下文）
+- **带参数启动**：`FluxPlayer <文件路径或URL>` 直接播放，跳过主界面
+
+### 本地文件与纯音频
+
+- 支持的容器 / 编解码见下方「支持格式」。打开后自动建立解码 → 队列 → 渲染 / 音频流水线。
+- 检测到媒体无视频流时自动进入**纯音频模式**：展示内嵌封面（ID3 / M4A ATTACHED_PIC），无封面时显示默认图片。
 
 ### 网页视频播放
 
@@ -287,6 +299,20 @@ https://www.youtube.com/watch?v=...
 播放网页视频时，工具栏会出现：
 - **画质按钮**：切换 360P / 480P / 720P / 1080P，切换后自动 seek 到原位置
 - **Download 按钮**：下载当前视频，弹出目录选择后后台下载；下载中显示进度条（百分比/速度/文件大小/ETA），支持暂停/恢复/取消，取消时自动清理未完成的临时文件
+
+### 多视频合并与片段截取
+
+主界面点击 `MERGE VIDEOS` 进入独立的合成界面，流程如下：
+
+1. **添加片段**：点 `+ ADD` 多选文件，或直接拖放视频到窗口；每个文件作为一个片段加入左侧列表，同一文件可多次添加各取一段。
+2. **调序 / 删除**：拖拽列表项调整合并顺序，行首 `X` 删除单项，`CLEAR` 清空。
+3. **截取范围**：选中片段后，右栏用 `IN` / `OUT` 滑块设定入点 / 出点，旁边实时预览对应帧画面（拖动有 0.1s 防抖，松手立即刷新）；不设范围则使用整段（列表显示 `[full]`）。
+4. **开始合并**：底部 `START MERGE`（至少需 2 个片段）。智能选择策略：
+   - 全部整段且参数一致 → **流拷贝**，极速无损
+   - 含截取或参数不一致 → 统一转码 **H.264 / AAC**，帧级精确对齐
+5. **输出**：保存到录制目录，文件名形如 `FluxPlayer_Merge_<时间戳>.mp4`；合并完成后可 `MERGE AGAIN` 复用界面，或 `BACK` 返回主界面。
+
+> 部分片段无音频时，输出为纯视频并给出提示。
 
 ### 快捷键
 
@@ -617,8 +643,8 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 
 ### 架构设计
 
-- 多线程架构：解码线程 + 渲染线程 + 音频回调线程分离，通过线程安全的帧队列通信
-- 模块解耦：Demuxer → Decoder → FrameQueue → Renderer / AudioOutput 流水线式处理
+- 多线程架构（ffplay 式解耦）：demux 读包线程 + 独立 video/audio 解码线程 + 主渲染线程 + 平台音频回调线程，通过线程安全的 PacketQueue / FrameQueue 通信，彻底消除「视频帧队列满饿死音频」的结构性死锁
+- 模块解耦：Demuxer → PacketQueue → Decoder → FrameQueue → Renderer / AudioOutput 流水线式处理
 - 状态机管理：Player 通过 `PlayerState` 枚举管理 IDLE → OPENING → PLAYING → PAUSED → STOPPED 状态转换
 
 ### 视频渲染
@@ -642,7 +668,8 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 ### 音视频同步
 
 - VSync 驱动渲染循环，基于主时钟 PTS 比较决定帧显示时机
-- 本地文件使用外部时钟（系统时钟），实时流同样使用外部时钟
+- 主时钟自适应选择：有音频时以音频时钟为主（音频回调按真实采样率推进，视频追随，最稳）；无音频或音频输出失败时退回外部时钟（墙钟）
+- 音频主时钟在回调间隙基于 steady_clock 实时插值，消除按音频缓冲周期（~25ms）阶梯跳变导致的画面卡顿；插值上限 0.1s 防止音频线程卡死时时钟外推跑飞
 - VSync 驱动每帧取一帧渲染，无效 PTS 帧基于帧间隔估算补偿
 - 音频帧部分消费残留缓冲，避免数据丢失导致播放速度异常
 

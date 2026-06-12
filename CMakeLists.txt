@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.4.0 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.5.0 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -166,6 +166,8 @@ set(FLUXPLAYER_SOURCES
     src/core/AVSync.cpp
     src/core/FrameQueue.cpp
     src/core/MediaInfo.cpp
+    src/core/PacketQueue.cpp
+    src/core/PTSNormalizer.cpp
     src/core/Player.cpp
     src/decoder/AudioDecoder.cpp
     src/decoder/Demuxer.cpp

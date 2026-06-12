@@ -24,6 +24,8 @@ class AudioDecoder;
 class AVSync;
 class Frame;
 class FrameQueue;
+class PacketQueue;
+class PTSNormalizer;
 class AudioOutput;
 class Controller;
 class Recorder;
@@ -342,16 +344,52 @@ public:
 
 private:
     /**
-     * 解码线程函数
-     * 负责从文件读取数据包并解码
+     * demux 线程函数
+     * 只负责从 demuxer 读包，按流分发到 videoPktQueue_ / audioPktQueue_，
+     * 字幕包同步解码，处理 seek / DASH 重启 / 直播重连 / 录制 writePacket。
+     * 不触碰任何解码器（解码器由各自 decode 线程独占）。
      */
-    void decodingThread();
+    void demuxThread();
+
+    /**
+     * video 解码线程函数
+     * 从 videoPktQueue_ 取包送 videoDecoder_ 解码，归一化 PTS 后入 videoQueue_。
+     * 观察 packet 的 serial 变化（seek/flush 边界）自行 flush 解码器与帧队列。
+     */
+    void videoDecodeThread();
+
+    /**
+     * audio 解码线程函数
+     * 从 audioPktQueue_ 取包送 audioDecoder_ 解码，归一化 PTS 后入 audioQueue_。
+     * 观察 packet 的 serial 变化（seek/flush 边界）自行 flush 解码器与帧队列。
+     */
+    void audioDecodeThread();
+
+    /**
+     * demux 线程辅助函数：背压等待
+     * 当 packet 队列总量超过软/硬上限且各流缓冲充足时，短暂等待 decode 线程消费，
+     * 避免坏文件 / 差交织导致单路无限缓冲 OOM。
+     */
+    void waitForPacketSpace();
+
+    /**
+     * 启动 packet/frame 队列并创建 demux + video/audio decode 线程
+     * 由 play / handleLoopRestart / switchQuality 复用，统一线程生命周期管理。
+     */
+    void startWorkerThreads();
+
+    /**
+     * 终止队列并 join 所有 worker 线程（demux + video/audio decode）
+     * 由 stop / cleanup / handleLoopRestart / switchQuality 复用。
+     * @param abortQueues true 时先 abort 队列唤醒阻塞线程（stop/cleanup 场景）
+     */
+    void joinWorkerThreads(bool abortQueues);
 
     /**
      * 解码线程辅助函数：处理 seek 请求
      * 清空解码器、帧队列、同步器，启动精确跳转模式
      */
-    void processSeekRequest();
+    bool processSeekRequest();
 
     /**
      * @brief DASH 流 seek：停止当前 DashMerger，用 -ss 重启从 seekTime 开始下载
@@ -388,23 +426,34 @@ private:
      * 解码线程辅助函数：将视频帧入队
      * 处理精确跳转丢帧、队列满时的内存优化
      * @param rawFrame 解码后的原始帧
-     * @return true 表示已处理（入队或丢弃），false 表示应退出线程
+     * @param serial   该帧所属的 packet serial，队列满轮询期间若 serial 变化
+     *                 （seek/flush）立即放弃入队，让 video decode 线程回到循环顶部
+     *                 处理 flush
+     * @return true 表示已处理（入队或丢弃），false 表示应放弃当前帧（退出/serial 变化）
      */
-    bool enqueueVideoFrame(Frame& rawFrame);
+    bool enqueueVideoFrame(Frame& rawFrame, int serial);
 
     /**
      * 解码线程辅助函数：将音频帧入队
      * 转换为 S16 格式后入队，处理精确跳转丢帧
      * @param rawFrame 解码后的原始帧
-     * @return true 表示已处理（入队或丢弃），false 表示应退出线程
+     * @param serial   该帧所属的 packet serial，含义同 enqueueVideoFrame
+     * @return true 表示已处理（入队或丢弃），false 表示应放弃当前帧（退出/serial 变化）
      */
-    bool enqueueAudioFrame(Frame& rawFrame);
+    bool enqueueAudioFrame(Frame& rawFrame, int serial);
 
     /**
-     * 渲染线程函数
-     * 负责从帧队列取帧并渲染
+     * @brief 取一个可写帧槽，队列满时可中断地轮询等待
+     *
+     * 替代 FrameQueue::peekWritable 的无限阻塞：seek 时渲染暂停，帧队列不再被消费，
+     * 若硬阻塞则 decode 线程无法回到循环顶部处理 serial 变化（死锁）。本函数轮询
+     * tryPeekWritable，并在 shouldQuit_ 或 pktQueue serial 变化时返回 nullptr。
+     * @param frameQueue 目标帧队列
+     * @param pktQueue   该流的 packet 队列（用于检测 serial 变化）
+     * @param serial     调用方当前处理的 serial
+     * @return 可写帧槽；应放弃时返回 nullptr
      */
-    void renderingThread();
+    Frame* waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial);
 
     /**
      * run() 辅助函数：从队列取帧并渲染一帧视频
@@ -465,7 +514,7 @@ private:
     std::atomic<PlayerState> state_;
     std::atomic<bool> shouldQuit_;
     std::atomic<bool> userStopped_{false}; ///< 用户主动 Stop，循环播放不重启
-    std::atomic<bool> decodingFinished_;  ///< 解码线程已读完所有数据（队列可能仍有剩余帧）
+    std::atomic<bool> decodingFinished_;  ///< demux 线程已读完所有数据（解码线程可能仍在 drain，队列可能仍有剩余帧）
     // Seek 请求（mutex 保护，避免 seekRequested_/seekTarget_ 两个 atomic 的 TOCTOU 竞态）
     struct SeekRequest {
         bool pending = false;   ///< 是否有待处理的 seek 请求
@@ -494,19 +543,13 @@ private:
 
     // 实时流处理
     bool isLiveStream_;                            // 是否为实时流
-    std::atomic<bool> firstVideoFrameReceived_;   // 是否已接收第一帧视频
-    std::atomic<bool> firstAudioFrameReceived_;   // 是否已接收第一帧音频
-    std::atomic<double> firstVideoPTS_;           // 第一帧视频的原始 PTS
-    std::atomic<double> firstAudioPTS_;           // 第一帧音频的原始 PTS
-    std::atomic<double> liveStreamBasePTS_;       // 统一的PTS基准（音视频共用，取两者最小值）
-    std::atomic<bool> liveStreamBaseCalibrated_;  // 统一基准是否已确定
-    std::atomic<int> videoFrameCount_;            // 已接收的视频帧计数（用于稳定基准）
-    std::atomic<int> audioFrameCount_;            // 已接收的音频帧计数（用于稳定基准）
-    std::atomic<double> liveStreamStartTime_;     // 实时流开始播放的系统时间
-    std::atomic<double> lastValidVideoPTS_;         // 最后一个有效的归一化视频 PTS
-    std::atomic<double> lastValidAudioPTS_;         // 最后一个有效的归一化音频 PTS
-    std::atomic<double> lastEnqueuedVideoPTS_{0.0}; // 最后一个入队视频帧的 PTS，强制队列内单调递增防止进度条跳变
-    std::atomic<bool> sawFirstKeyframe_{false};     // 实时流：是否已收到第一个关键帧（IDR），起播阶段丢弃 IDR 之前的视频包以追到最新画面
+    // 实时流 PTS 归一化的组合状态（首帧记录 + 统一基准 + 回绕 + reset）集中到
+    // PTSNormalizer，由 video/audio 两个 decode 线程共用并以内部 mutex 保护，
+    // 避免拆线程后多个 atomic 拼接状态出现竞态。
+    std::unique_ptr<PTSNormalizer> ptsNormalizer_;
+    // 以下两个仅由各自的单一线程访问，保留为原子量即可：
+    std::atomic<double> lastEnqueuedVideoPTS_{0.0}; // 最后一个入队视频帧的 PTS，强制队列内单调递增防止进度条跳变（仅 video decode 线程写）
+    std::atomic<bool> sawFirstKeyframe_{false};     // 实时流：是否已收到第一个关键帧（IDR），起播阶段丢弃 IDR 之前的视频包以追到最新画面（仅 demux 线程读写）
 
     // 播放速率控制
     std::atomic<double> playbackRate_{1.0};     // 当前播放速率（0.5 ~ 2.0）
@@ -543,7 +586,10 @@ private:
 
     // 音频帧残留偏移（处理部分消费的帧）
     // 帧本身保留在 audioQueue_ 中（不 next()），下次 peek() 返回同一帧
-    size_t pendingAudioOffset_;                  // 当前队头帧已消费的字节偏移
+    // 帧本身保留在 audioQueue_ 中（不 next()），下次 peek() 返回同一帧。
+    // 平台音频线程读写；audio decode 线程 seek flush 时也会清零，故用原子量，
+    // 且回调内对其做边界保护，避免 flush 后旧偏移越界访问新帧。
+    std::atomic<size_t> pendingAudioOffset_;     // 当前队头帧已消费的字节偏移
 
     // 音频缓冲延迟管理
     double audioBufferDelay_;                     // 动态计算的音频缓冲延迟（秒）
@@ -577,19 +623,37 @@ private:
     // 录制器
     std::unique_ptr<Recorder> videoRecorder_;
     std::unique_ptr<Recorder> audioRecorder_;
+    // 录制器只在 demux 线程 writePacket，但 start/stop 来自 UI/控制线程，
+    // 用此锁保护录制器的创建/销毁与 demux 线程的 writePacket 之间的并发。
+    std::mutex recorderMutex_;
 
     // 字幕模块（无字幕流时保持为空指针）
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
     std::unique_ptr<SubtitleManager> subtitleManager_;
 
     bool audioOnly_{false};  ///< 纯音频模式（无视频流时为 true）
+    bool hasVideoStream_{false};  ///< 当前媒体是否含视频流（EOF 判定用）
+    bool hasAudioStream_{false};  ///< 当前媒体是否含音频流（EOF 判定用）
 
     /// 纯音频模式：提取封面图并上传到渲染器
     void loadCoverImage();
 
-    // 线程相关
-    std::unique_ptr<std::thread> decodingThread_;
-    std::unique_ptr<std::thread> renderingThread_;
+    // ===== 线程相关（ffplay 式解耦：demux + 独立 video/audio 解码线程） =====
+    std::unique_ptr<std::thread> demuxThread_;        ///< 读包分发线程
+    std::unique_ptr<std::thread> videoDecodeThread_;  ///< 视频解码线程（纯音频模式不创建）
+    std::unique_ptr<std::thread> audioDecodeThread_;  ///< 音频解码线程（无音频流时不创建）
+
+    // 各线程结束标志（EOF 判定）：
+    // - demuxFinished_：demux 线程读到 EOF 并已向各 packet 队列投递 null 包
+    // - videoDecodeFinished_ / audioDecodeFinished_：对应 decode 线程已 drain 完毕退出
+    // 不存在的流，其 finished 标志在 play() 中初始化为 true，避免 EOF 判定永远等待
+    std::atomic<bool> demuxFinished_{false};
+    std::atomic<bool> videoDecodeFinished_{false};
+    std::atomic<bool> audioDecodeFinished_{false};
+
+    // 压缩包队列（demux 线程生产，对应 decode 线程消费，serial 标记 flush 边界）
+    std::unique_ptr<PacketQueue> videoPktQueue_;
+    std::unique_ptr<PacketQueue> audioPktQueue_;
 
     // 帧队列（环形缓冲 + condition_variable 背压，对标 ffplay FrameQueue）
     // 视频队列启用 keep-last（暂停/截图时保留最后帧），音频队列不启用
