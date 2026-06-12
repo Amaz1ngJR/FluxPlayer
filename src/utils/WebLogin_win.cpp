@@ -195,7 +195,7 @@ NetscapeCookie convertCookie(ICoreWebView2Cookie* c) {
 }
 
 // ───────────────────────────────────────────────
-// 登录窗���状态：随窗口生命周期持有
+// 登录窗口状态：随窗口生命周期持有
 // ───────────────────────────────────────────────
 struct LoginContext {
     HWND hwnd = nullptr;

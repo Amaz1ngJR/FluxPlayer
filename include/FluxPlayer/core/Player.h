@@ -381,9 +381,20 @@ private:
     /**
      * 终止队列并 join 所有 worker 线程（demux + video/audio decode）
      * 由 stop / cleanup / handleLoopRestart / switchQuality 复用。
-     * @param abortQueues true 时先 abort 队列唤醒阻塞线程（stop/cleanup 场景）
+     * @param abortQueues true 时先 abort 队列唤醒阻塞/停泊线程（stop/cleanup/EOF 场景）
+     *
+     * 注意（v0.5.1）：改造后 decode 线程 EOF 不再自然退出而是停泊在 PacketQueue::get()，
+     * 仅 shouldQuit_ 无法唤醒它们。凡是需要 join 可能处于 EOF 停泊态的 worker 的调用点，
+     * 必须传 abortQueues=true，否则 join 死锁。
      */
     void joinWorkerThreads(bool abortQueues);
+
+    /**
+     * run() 自然 EOF（非循环播放）退出时收尾 worker 线程。
+     * 改造后 decode 线程 EOF 停泊不退出，需主动 abort+join，使 EOF 退出路径自身闭合，
+     * 不依赖调用方随后调用 close()。内部即 joinWorkerThreads(abortQueues=true)。
+     */
+    void shutdownWorkersForEof();
 
     /**
      * 解码线程辅助函数：处理 seek 请求
@@ -527,9 +538,10 @@ private:
     // 精确跳转控制（用于从关键帧解码到目标位置）
     std::atomic<bool> decodingToTarget_;   // 是否正在解码到目标位置
     std::atomic<double> decodeTargetPTS_;  // 目标 PTS
-    // seek 开始的 wall clock（steady_clock 秒），用于超时保护
-    // 仅在解码线程读写，无需原子操作
-    double seekTargetStartTime_{0.0};
+    // seek 开始的 wall clock（steady_clock 纳秒），用于超时保护。
+    // UI 线程（seek）、demux 线程（processSeekRequest/restartDashMerger）写，
+    // video/audio decode 线程读 → 必须原子，避免跨线程读写普通 double 的 UB。
+    std::atomic<int64_t> seekTargetStartNs_{0};
 
     // 媒体信息
     std::string filePath_;
@@ -623,9 +635,10 @@ private:
     // 录制器
     std::unique_ptr<Recorder> videoRecorder_;
     std::unique_ptr<Recorder> audioRecorder_;
-    // 录制器只在 demux 线程 writePacket，但 start/stop 来自 UI/控制线程，
-    // 用此锁保护录制器的创建/销毁与 demux 线程的 writePacket 之间的并发。
-    std::mutex recorderMutex_;
+    // 录制器在 demux 线程 writePacket，但 start/stop/query 来自 UI/控制线程。
+    // 用此锁保护录制器的创建/销毁/查询与 demux 线程 writePacket 之间的所有并发访问
+    // （v0.5.1：start/stop/query 全部进锁，与 writePacket 串行）。const 查询需持锁 → mutable。
+    mutable std::mutex recorderMutex_;
 
     // 字幕模块（无字幕流时保持为空指针）
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
@@ -643,13 +656,15 @@ private:
     std::unique_ptr<std::thread> videoDecodeThread_;  ///< 视频解码线程（纯音频模式不创建）
     std::unique_ptr<std::thread> audioDecodeThread_;  ///< 音频解码线程（无音频流时不创建）
 
-    // 各线程结束标志（EOF 判定）：
-    // - demuxFinished_：demux 线程读到 EOF 并已向各 packet 队列投递 null 包
-    // - videoDecodeFinished_ / audioDecodeFinished_：对应 decode 线程已 drain 完毕退出
-    // 不存在的流，其 finished 标志在 play() 中初始化为 true，避免 EOF 判定永远等待
+    // 各线程结束/停泊标志（EOF 判定）：
+    // - demuxFinished_：demux 线程读到 EOF 并已向各 packet 队列投递 null 包（seek 恢复时清零）
+    // - videoDrainedEof_ / audioDrainedEof_：对应 decode 线程已 drain 完残留帧并停泊
+    //   （v0.5.1：EOF 后 decode 线程不再退出，而是设此标志后回到 get() 停泊，等 seek 唤醒；
+    //    serial 变化恢复消费时清零。线程真正退出只发生在 abort/shouldQuit_）
+    // 不存在的流，其标志在 startWorkerThreads 中初始化为 true，避免 EOF 判定永远等待
     std::atomic<bool> demuxFinished_{false};
-    std::atomic<bool> videoDecodeFinished_{false};
-    std::atomic<bool> audioDecodeFinished_{false};
+    std::atomic<bool> videoDrainedEof_{false};
+    std::atomic<bool> audioDrainedEof_{false};
 
     // 压缩包队列（demux 线程生产，对应 decode 线程消费，serial 标记 flush 边界）
     std::unique_ptr<PacketQueue> videoPktQueue_;

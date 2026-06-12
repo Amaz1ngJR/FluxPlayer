@@ -1,7 +1,9 @@
 #include "FluxPlayer/core/AVSync.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <mutex>
 
 namespace FluxPlayer {
 
@@ -20,9 +22,12 @@ AVSync::AVSync(ClockType clockType)
     : clockType_(clockType)
     , audioClock_(0.0)
     , videoClock_(0.0)
-    , externalClockBase_(std::chrono::steady_clock::now())
+    , externalClockBaseNs_(steadyNowNs())
     , externalClockOffset_(0.0)
+    , extClockRate_(1.0)
+    , extClockPaused_(false)
     , audioClockUpdateNs_(steadyNowNs())
+    , videoClockUpdateNs_(steadyNowNs())
     , paused_(false)
     , pauseStartTime_(0.0)
     , averageFrameDelay_(0.04)  // 默认 25 fps
@@ -42,7 +47,7 @@ void AVSync::updateAudioClock(double pts) {
 
 void AVSync::updateVideoClock(double pts) {
     videoClock_.store(pts);
-    videoClockUpdateTime_ = std::chrono::steady_clock::now();
+    videoClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
     LOG_DEBUG("Video clock updated: " + std::to_string(pts));
 }
 
@@ -63,25 +68,31 @@ double AVSync::getAudioClock() const {
 }
 
 double AVSync::getVideoClock() const {
-    if (paused_) {
-        return videoClock_.load();
-    }
     return videoClock_.load();
 }
 
 double AVSync::getExternalClock() const {
-    if (paused_) {
-        return externalClockOffset_.load();
+    int64_t baseNs;
+    double offset, rate;
+    bool paused;
+    {
+        std::lock_guard<std::mutex> lk(extClockMutex_);
+        baseNs = externalClockBaseNs_;
+        offset = externalClockOffset_;
+        rate   = extClockRate_;
+        paused = extClockPaused_;       // 来自同一快照，不读全局 paused_
     }
-
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration<double>(now - externalClockBase_).count();
+    if (paused) {
+        return offset;
+    }
+    double elapsed = static_cast<double>(steadyNowNs() - baseNs) / 1'000'000'000.0;
+    if (elapsed < 0.0) elapsed = 0.0;
     // 变速时外部时钟按速率推进，驱动视频帧以正确速率显示
-    return externalClockOffset_.load() + elapsed * playbackRate_.load();
+    return offset + elapsed * rate;
 }
 
 double AVSync::getMasterClock() const {
-    switch (clockType_) {
+    switch (clockType_.load(std::memory_order_relaxed)) {
         case ClockType::AUDIO_CLOCK:
             return getAudioClock();
         case ClockType::VIDEO_CLOCK:
@@ -198,12 +209,17 @@ void AVSync::reset() {
     LOG_INFO("AVSync reset");
     audioClock_.store(0.0);
     videoClock_.store(0.0);
-    externalClockBase_ = std::chrono::steady_clock::now();
-    externalClockOffset_.store(0.0);
+    {
+        std::lock_guard<std::mutex> lk(extClockMutex_);
+        externalClockBaseNs_ = steadyNowNs();
+        externalClockOffset_ = 0.0;
+        extClockRate_        = playbackRate_.load();
+        extClockPaused_      = false;
+    }
     audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
-    videoClockUpdateTime_ = std::chrono::steady_clock::now();
+    videoClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
     paused_.store(false);
-    pauseStartTime_ = 0.0;
+    pauseStartTime_.store(0.0);
     averageFrameDelay_.store(0.04);
 }
 
@@ -211,21 +227,33 @@ void AVSync::reset() {
  * 仅重置外部时钟基准，不动音视频时钟。
  * prebuffer 期间 external clock 已按系统时间走了若干毫秒，恢复播放时如果不重置，
  * 视频帧 PTS（从 0 开始归一化）会立刻满足 "PTS <= masterClock"，导致渲染线程一次性消化掉所有缓冲帧。
+ * 调用上下文：decode 线程（checkPrebufferComplete）→ 与 render 读 external clock 并发，靠 extClockMutex_ 保护。
  */
 void AVSync::resetExternalClock() {
-    externalClockBase_ = std::chrono::steady_clock::now();
-    externalClockOffset_.store(0.0);
+    std::lock_guard<std::mutex> lk(extClockMutex_);
+    externalClockBaseNs_ = steadyNowNs();
+    externalClockOffset_ = 0.0;
+    // rate/paused 维持现状（仅重置基准，不改变速率与暂停态）
 }
 
 void AVSync::pause() {
     if (!paused_.load()) {
         LOG_INFO("AVSync paused");
-        // 必须在设置 paused_ 之前读取时钟，否则 getExternalClock()
-        // 会因为 paused_==true 返回旧的 offset 而非当前实际值
+        // 必须在置 extClockPaused_ 之前读取时钟当前值，否则读到的是冻结后的旧 offset
         double currentAudio = getAudioClock();
-        pauseStartTime_ = getMasterClock();
+        double master = getMasterClock();
+        pauseStartTime_.store(master);
         audioClock_.store(currentAudio);
         audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
+        {
+            // external clock 冻结在当前值：offset = 当前 external clock，paused=true
+            std::lock_guard<std::mutex> lk(extClockMutex_);
+            double elapsed = static_cast<double>(steadyNowNs() - externalClockBaseNs_) / 1e9;
+            if (elapsed < 0.0) elapsed = 0.0;
+            externalClockOffset_ = externalClockOffset_ + elapsed * extClockRate_;
+            externalClockBaseNs_ = steadyNowNs();
+            extClockPaused_      = true;
+        }
         paused_.store(true);
     }
 }
@@ -233,26 +261,33 @@ void AVSync::pause() {
 void AVSync::resume() {
     if (paused_.load()) {
         LOG_INFO("AVSync resumed");
-
-        // 必须在设置 paused_=false 之前更新时钟基准，
-        // 否则 getExternalClock() 会用旧的 base 计算出错误值
-        externalClockBase_ = std::chrono::steady_clock::now();
-        externalClockOffset_.store(pauseStartTime_);
+        {
+            // 从 pauseStartTime_ 处继续：offset = 暂停时主时钟值，重置 base，解除 paused
+            std::lock_guard<std::mutex> lk(extClockMutex_);
+            externalClockBaseNs_ = steadyNowNs();
+            externalClockOffset_ = pauseStartTime_.load();
+            extClockRate_        = playbackRate_.load();
+            extClockPaused_      = false;
+        }
         audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
         paused_.store(false);
     }
 }
 
 void AVSync::setPlaybackRate(double rate) {
-    if (!paused_) {
+    if (!paused_.load()) {
         // 速率切换前先锁定当前时钟值，避免 elapsed * newRate 导致时钟跳变
         double currentAudio = getAudioClock();
         audioClock_.store(currentAudio);
         audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
 
-        double current = getExternalClock();
-        externalClockBase_ = std::chrono::steady_clock::now();
-        externalClockOffset_.store(current);
+        // external clock：先结算到当前值再换 base + 新速率，保证连续
+        std::lock_guard<std::mutex> lk(extClockMutex_);
+        double elapsed = static_cast<double>(steadyNowNs() - externalClockBaseNs_) / 1e9;
+        if (elapsed < 0.0) elapsed = 0.0;
+        externalClockOffset_ = externalClockOffset_ + elapsed * extClockRate_;
+        externalClockBaseNs_ = steadyNowNs();
+        extClockRate_        = rate;
     }
     playbackRate_.store(rate);
 }
@@ -262,11 +297,15 @@ void AVSync::seekTo(double seekTime) {
 
     audioClock_.store(seekTime);
     videoClock_.store(seekTime);
-    externalClockBase_ = std::chrono::steady_clock::now();
-    externalClockOffset_.store(seekTime);
-
+    {
+        std::lock_guard<std::mutex> lk(extClockMutex_);
+        externalClockBaseNs_ = steadyNowNs();
+        externalClockOffset_ = seekTime;
+        extClockRate_        = playbackRate_.load();
+        // 不改变 extClockPaused_：seek 不改变暂停态（暂停中 seek 仍冻结在 seekTime）
+    }
     audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
-    videoClockUpdateTime_ = std::chrono::steady_clock::now();
+    videoClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
 }
 
 double AVSync::getClockDiff() const {

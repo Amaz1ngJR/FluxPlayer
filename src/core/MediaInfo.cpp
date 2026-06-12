@@ -121,7 +121,7 @@ StreamInfo MediaInfo::getAudioStreamInfo(int index) const {
     if (it != audioStreams_.end()) {
         return it->second;
     }
-    return StreamInfo();  // 返回空的��信息
+    return StreamInfo();  // 返回空的流信息
 }
 
 std::string MediaInfo::getMetadata(const std::string& key) const {

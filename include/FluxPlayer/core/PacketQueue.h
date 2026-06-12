@@ -61,7 +61,7 @@ public:
     bool put(AVPacket* pkt);
 
     /**
-     * @brief 入��一个 EOF 标记包（data=NULL, size=0）
+     * @brief 入队一个 EOF 标记包（data=NULL, size=0）
      *
      * 解码线程取到该包后向解码器送入 drain 信号，取尽残留帧后结束。
      * @param streamIndex 该 EOF 标记所属流索引（写入包的 stream_index）

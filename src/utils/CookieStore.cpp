@@ -58,7 +58,7 @@ std::vector<std::string> splitTab(const std::string& line) {
     return out;
 }
 
-// 把单条 cookie 序列化为 Netscape 文件���的一行（不含尾随换行）
+// 把单条 cookie 序列化为 Netscape 文件中的一行（不含尾随换行）
 std::string serializeLine(const NetscapeCookie& c) {
     std::ostringstream oss;
     if (c.httpOnly) oss << "#HttpOnly_";

@@ -53,7 +53,7 @@ private:
      * @param frame1 前一帧
      * @param frame2 后一帧
      * @param alpha 混合权重
-     * @return 混合后的帧，失败返�� nullptr
+     * @return 混合后的帧，失败返回 nullptr
      */
     Frame* blendFrames(const Frame* frame1, const Frame* frame2, double alpha);
 

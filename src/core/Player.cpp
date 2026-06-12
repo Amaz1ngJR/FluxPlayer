@@ -42,6 +42,13 @@ namespace FluxPlayer {
 
 namespace {
 
+/// 当前 steady_clock 纳秒计数（seek 超时窗口用，跨线程原子读写的统一时基）
+/// 注：命名带 player 前缀，避免与 AVSync.cpp 匿名命名空间同名函数在 unity build 下重定义
+inline int64_t playerSteadyNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 /**
  * 用 FFmpeg 将任意格式图片数据解码为 RGBA 像素
  * @param data    图片原始字节
@@ -639,8 +646,7 @@ bool Player::seek(double seconds) {
     // demux 线程的 processSeekRequest（本地路径）会在 seek demuxer 成功后重置此计时窗口。
     decodingToTarget_.store(true);
     decodeTargetPTS_.store(seconds);
-    seekTargetStartTime_ = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    seekTargetStartNs_.store(playerSteadyNowNs(), std::memory_order_release);
 
     // 立即 flush packet 队列（serial++），让 enqueue 的「陈旧帧丢弃」guard 即时生效。
     // 关键：seek() 在 UI 线程置位精确跳转，但真正的 flush 原本要等 demux 线程跑到
@@ -686,16 +692,16 @@ void Player::run() {
         size_t lastBytesRead = 0;     // 上次统计码率时的累计字节数
 
         while (!window_->shouldClose() && !shouldQuit_.load()) {
-            // 解码完成后，等视频队列消费完再退出（处理字幕流比视频流短等情况）
-            // 用 numReadable() 而非 size()：keep-last 保留的已显示帧不算"待消费"
             // 解码完成后，等帧队列消费完再退出（处理字幕流比视频流短等情况）。
             // 按已启用的流组合判断：不存在的流视为已完成；存在的流需 decode 线程
-            // drain 结束（*DecodeFinished_）且对应帧队列消费干净（numReadable==0）。
+            // 已 drain（*DrainedEof_，EOF 后停泊但仍存活）且对应帧队列消费干净（numReadable==0）。
+            // 暂停在 EOF（队列仍有帧、render 停止消费）时 numReadable!=0，不会误判结束，
+            // 用户此时仍可 seek 唤醒停泊的三线程。
             bool videoDone = !hasVideoStream_ ||
-                (videoDecodeFinished_.load() &&
+                (videoDrainedEof_.load() &&
                  (!videoQueue_ || videoQueue_->numReadable() == 0));
             bool audioDone = !hasAudioStream_ ||
-                (audioDecodeFinished_.load() &&
+                (audioDrainedEof_.load() &&
                  (!audioQueue_ || audioQueue_->numReadable() == 0));
             if (demuxFinished_.load() && videoDone && audioDone) {
                 shouldQuit_.store(true);
@@ -737,6 +743,9 @@ void Player::run() {
 
         // 检查是否需要循环播放
         if (!handleLoopRestart()) {
+            // 非循环：自然 EOF 退出。改造后 decode 线程 EOF 停泊不退出，主动 abort+join
+            // 收尾，使退出路径自身闭合，不依赖调用方随后 close()。
+            shutdownWorkersForEof();
             shouldLoop = false;
         }
     }
@@ -749,6 +758,10 @@ void Player::run() {
  */
 void Player::renderVideoFrame(double& lastFrameTime) {
     if (state_ == PlayerState::PLAYING) {
+        // leasedFrame 持有对队列槽位帧的独立引用（peekRef 在锁内 av_frame_ref）：
+        // 渲染期间即便 decode 线程 flush 视频队列，这份引用的数据仍有效。
+        // frame 指向 leasedFrame（有效时），下方原有 frame->... 逻辑不变。
+        Frame leasedFrame;
         Frame* frame = nullptr;
 
         // ===== 预缓冲期间不取帧，等待队列填充到安全水位 =====
@@ -768,20 +781,14 @@ void Player::renderVideoFrame(double& lastFrameTime) {
         // 在解码到目标位置的过程中，不从队列取帧，保持显示上一帧
         if (!decodingToTarget_.load()) {
             // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
-            Frame* peeked = videoQueue_->peek();
-            if (peeked) {
-                double nextPTS = peeked->getPTS();
+            // peekRef 取独立引用看 PTS，不消费；到显示时间才 consume() 推进 keep-last。
+            if (videoQueue_->peekRef(leasedFrame)) {
+                double nextPTS = leasedFrame.getPTS();
                 double masterClock = avSync_->getMasterClock();
                 // 下一帧的 PTS <= 主时钟，说明该显示了
                 if (nextPTS <= masterClock + 0.005) {
-                    frame = peeked;
-                    videoQueue_->next();  // 推进读索引（keep-last 首次只标记 shown）
-                    // keep-last 机制：next() 释放旧帧后 peek() 可能返回同一帧
-                    // 需要再次 next() 标记为 shown，才能在下次迭代中正确获取新帧
-                    Frame* dup = videoQueue_->peek();
-                    if (dup == frame) {
-                        videoQueue_->next();
-                    }
+                    frame = &leasedFrame;     // leasedFrame 持有独立引用，渲染全程有效
+                    videoQueue_->consume();   // 一次原子操作推进 keep-last 状态机
                 } else {
                     // 还没到显示时间：短暂 sleep 避免主循环空转把 FPS 推到 100+
                     // sleep 时长取剩余时间的 80%，留出 swapBuffers/UI 的余量；
@@ -943,9 +950,9 @@ bool Player::handleLoopRestart() {
     if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !userStopped_.load() && !window_->shouldClose()) {
         LOG_INFO("Loop playback enabled, restarting...");
 
-        // 此时已自然 EOF：demux 线程投递 null 包后退出，decode 线程 drain 完毕退出。
-        // join 全部线程并清空队列（threads 已自行结束，无需 abort）。
-        joinWorkerThreads(/*abortQueues=*/false);
+        // 自然 EOF 后 decode 线程不再退出而是停泊在 get()，仅 shouldQuit_ 无法唤醒。
+        // 必须 abort 队列才能让停泊线程退出，否则下面 join 会死锁。
+        joinWorkerThreads(/*abortQueues=*/true);
 
         // seek demuxer 到开头。线程均已 join，此处由主线程独占访问 demuxer/解码器，安全。
         demuxer_->seek(0);
@@ -1253,11 +1260,12 @@ void Player::demuxThread() {
                 }
             } else {
                 // 本地文件：readPacket 返回 false 即为真正的文件结束。
-                // 不退出线程，而是停泊等待 seek（对标 ffplay：EOF 是播放状态而非线程终点）。
-                // 先投递一次 null 包让 decode 线程 drain（run() 据此在帧消费完后结束播放）；
-                // 停泊期间持续轮询 seek 请求：一旦用户 seek，flush 队列会移除尾部 null 包并
-                // serial++，本线程从新位置恢复读取，仍存活的 decode 线程据 serial 变化重新同步。
-                // 仅 shouldQuit_（stop/quit/播放自然结束）能终结停泊。
+                // demux 不退出线程，而是停泊等待 seek（对标 ffplay：EOF 是播放状态而非线程终点）。
+                // 投递一次 null 包让 decode 线程 drain 完残留帧后**同样停泊**（设 *DrainedEof_，
+                // 不退出）——run() 据 *DrainedEof_ + 帧队列消费干净判定播放结束。
+                // 停泊期间持续轮询 seek：一旦用户 seek，flush 队列移除尾部 null 包并 serial++，
+                // demux 从新位置恢复读取，停泊的 decode 线程被新 serial 的包唤醒、清 drainedEof
+                // 重新消费。仅 shouldQuit_（stop/quit/播放自然结束触发的 abort）能终结停泊。
                 LOG_INFO("End of file reached in demux thread, parking for seek");
                 demuxFinished_.store(true);
                 decodingFinished_.store(true);
@@ -1284,8 +1292,9 @@ void Player::demuxThread() {
 
     av_packet_free(&packet);
 
-    // EOF：向每个启用的 packet 队列投递 null 包，通知 decode 线程 drain 后结束。
-    // shouldQuit_（stop/quit）路径下队列已 abort，putNullPacket 会被丢弃，无副作用。
+    // EOF：向每个启用的 packet 队列投递 null 包，通知 decode 线程 drain 后停泊。
+    // 此路径仅在 demux 主循环因 shouldQuit_ 退出（stop/quit）或 DASH/直播放弃重试 break
+    // 时到达。shouldQuit_ 路径下队列已 abort，putNullPacket 被丢弃，无副作用。
     // null 包仅作 EOF 标记，stream_index 仅用于标识，取当前 demuxer 的索引即可。
     demuxFinished_.store(true);
     decodingFinished_.store(true);
@@ -1306,9 +1315,8 @@ void Player::videoDecodeThread() {
         // 缺失等长时间不产帧，超时永不触发。此处仅清除 decodingToTarget_，让后续帧按实际
         // PTS 自然重新校准 AV sync（见 enqueueVideoFrame）。
         if (decodingToTarget_.load()) {
-            double elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count()
-                - seekTargetStartTime_;
+            double elapsed = static_cast<double>(
+                playerSteadyNowNs() - seekTargetStartNs_.load(std::memory_order_acquire)) / 1e9;
             if (elapsed > 2.0) {
                 decodingToTarget_.store(false);
                 LOG_WARN("Seek loop timeout (" + std::to_string(elapsed)
@@ -1323,15 +1331,16 @@ void Player::videoDecodeThread() {
         }
 
         // serial 变化（seek / flush / reopen）：本线程独占 flush 解码器与视频帧队列，
-        // 与生产者同线程，无竞态。
+        // 与生产者同线程，无竞态。serial 变化也意味着 EOF 停泊被 seek 解除 → 清 drainedEof。
         if (serial != lastSerial) {
             videoDecoder_->flush();
             if (videoQueue_) videoQueue_->flush();
             lastEnqueuedVideoPTS_.store(0.0);
+            videoDrainedEof_.store(false);  // 退出 EOF 停泊态，恢复消费
             lastSerial = serial;
         }
 
-        // null 包：drain 解码器后结束
+        // null 包：drain 解码器后停泊（不退出线程）
         bool isEof = (packet->data == nullptr && packet->size == 0);
 
         videoDecoder_->sendPacket(packet);
@@ -1351,12 +1360,15 @@ void Player::videoDecodeThread() {
         }
 
         if (isEof) {
-            break;
+            // EOF：残留帧已 drain 完，标记停泊。不 break——回到循环顶部 get(block=true)
+            // 阻塞在空队列上等待 seek 唤醒（新 serial 的包到达）或 abort（shouldQuit_/stop）。
+            // 这样 EOF 后 seek 恢复时本线程仍存活，能消费 demux 恢复读取的新包。
+            videoDrainedEof_.store(true);
         }
     }
 
     av_packet_free(&packet);
-    videoDecodeFinished_.store(true);
+    videoDrainedEof_.store(true);
     LOG_INFO("Video decode thread stopped");
 }
 
@@ -1370,9 +1382,8 @@ void Player::audioDecodeThread() {
     while (!shouldQuit_.load()) {
         // seek 超时保护（纯音频模式无视频线程时由本线程兜底清除 decodingToTarget_）
         if (decodingToTarget_.load()) {
-            double elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count()
-                - seekTargetStartTime_;
+            double elapsed = static_cast<double>(
+                playerSteadyNowNs() - seekTargetStartNs_.load(std::memory_order_acquire)) / 1e9;
             if (elapsed > 2.0) {
                 decodingToTarget_.store(false);
                 LOG_WARN("Seek loop timeout (audio, " + std::to_string(elapsed)
@@ -1390,6 +1401,7 @@ void Player::audioDecodeThread() {
             audioDecoder_->flush();
             if (audioQueue_) audioQueue_->flush();
             pendingAudioOffset_.store(0);
+            audioDrainedEof_.store(false);  // 退出 EOF 停泊态，恢复消费
             lastSerial = serial;
         }
 
@@ -1418,21 +1430,22 @@ void Player::audioDecodeThread() {
         }
 
         if (isEof) {
-            break;
+            // EOF：drain 完毕，标记停泊。不 break——回到 get(block=true) 等 seek 唤醒或 abort。
+            audioDrainedEof_.store(true);
         }
     }
 
     av_packet_free(&packet);
-    audioDecodeFinished_.store(true);
+    audioDrainedEof_.store(true);
     LOG_INFO("Audio decode thread stopped");
 }
 
 void Player::startWorkerThreads() {
-    // 重置结束标志：不存在的流标记为已完成，避免 EOF 判定等待未启动的线程
+    // 重置结束/停泊标志：不存在的流标记为已 drained，避免 EOF 判定等待未启动的线程
     demuxFinished_.store(false);
     decodingFinished_.store(false);
-    videoDecodeFinished_.store(!hasVideoStream_);
-    audioDecodeFinished_.store(!hasAudioStream_);
+    videoDrainedEof_.store(!hasVideoStream_);
+    audioDrainedEof_.store(!hasAudioStream_);
 
     // 启动 packet / frame 队列
     if (videoPktQueue_) videoPktQueue_->start();
@@ -1473,6 +1486,14 @@ void Player::joinWorkerThreads(bool abortQueues) {
     if (videoQueue_) videoQueue_->flush();
     if (audioQueue_) audioQueue_->flush();
     pendingAudioOffset_.store(0);
+}
+
+void Player::shutdownWorkersForEof() {
+    // 自然 EOF（非循环）收尾：改造后 decode 线程 EOF 停泊在 get() 不退出，仅 shouldQuit_
+    // 无法唤醒它们；必须 abort 队列才能让 get() 返回 0、线程退出。此处主动 abort+join，
+    // 使 EOF 退出路径自身闭合，不依赖调用方随后调用 close()。后续 close() 对已 reset 的
+    // 线程对象幂等（joinable 检查为假，跳过）。
+    joinWorkerThreads(/*abortQueues=*/true);
 }
 
 /**
@@ -1518,8 +1539,7 @@ bool Player::processSeekRequest() {
         // ===== 启用精确跳转模式 =====
         decodingToTarget_.store(true);
         decodeTargetPTS_.store(seekTime);
-        seekTargetStartTime_ = std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        seekTargetStartNs_.store(playerSteadyNowNs(), std::memory_order_release);
         LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
     }
     // 即使 demuxer_->seek 失败，pending 请求也已消费：返回 true 让调用方解除 EOF 停泊，
@@ -1535,7 +1555,7 @@ bool Player::processSeekRequest() {
  *
  * 精确跳转模式（decodingToTarget_）已由 seek() 在 UI 线程置位，跨越本函数数秒级的
  * 上游重启全程保持：期间旧队列残帧（PTS < 目标）被丢弃、取帧冻结，进度条稳定停在目标。
- * 本函数末尾重置 seekTargetStartTime_，使 2s 跳转超时窗口从「新数据可流入」时刻起算，
+ * 本函数末尾重置 seekTargetStartNs_，使 2s 跳转超时窗口从「新数据可流入」时刻起算，
  * 让第一帧走「到达目标」分支而非误触超时。
  */
 void Player::restartDashMerger(double seekTime) {
@@ -1607,8 +1627,7 @@ void Player::restartDashMerger(double seekTime) {
     // 重置精确跳转计时窗口：上游重启耗时数秒，远超 2s 超时；从此刻起算，
     // 让 decode 线程读到新数据后第一帧走「到达目标」分支，而非误判超时。
     // decodingToTarget_ / decodeTargetPTS_ 维持 seek() 所置值不变。
-    seekTargetStartTime_ = std::chrono::duration<double>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    seekTargetStartNs_.store(playerSteadyNowNs(), std::memory_order_release);
 
     LOG_INFO("restartDashMerger: 完成，从 " + std::to_string(seekTime) + "s 开始播放");
 }
@@ -1723,9 +1742,8 @@ bool Player::enqueueVideoFrame(Frame& rawFrame, int serial) {
         if (framePTS < targetPTS - 0.001) {  // 允许1ms的误差
             // 超时保护：seek 落点远早于目标时（如文件损坏导致 FFmpeg 回退到更早位置），
             // 避免长时间丢帧卡住，超过 2 秒后放弃精确跳转，从当前帧开始播放
-            double elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count()
-                - seekTargetStartTime_;
+            double elapsed = static_cast<double>(
+                playerSteadyNowNs() - seekTargetStartNs_.load(std::memory_order_acquire)) / 1e9;
             if (elapsed > 2.0) {
                 decodingToTarget_.store(false);
                 // 超时后重新校准 AV 同步时钟到实际位置，
@@ -1792,7 +1810,7 @@ bool Player::enqueueVideoFrame(Frame& rawFrame, int serial) {
         }
         rawFrame.unreference();
     } else {
-        // 慢速��径：队列满，先移走 rawFrame 数据释放解码器 buffer
+        // 慢速路径：队列满，先移走 rawFrame 数据释放解码器 buffer
         AVFrame* tempFrame = av_frame_alloc();
         av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
         // rawFrame 现在为空，解码器 buffer 引用已转移到 tempFrame
@@ -1858,7 +1876,7 @@ bool Player::enqueueAudioFrame(Frame& rawFrame, int serial) {
         }
     }
 
-    // ===== 不需要丢弃的帧：���取可写槽 -> 转换 -> 提交 =====
+    // ===== 不需要丢弃的帧：获取可写槽 -> 转换 -> 提交 =====
     // 音频队列由平台音频线程实时消费，阻塞时间极短；同样先尝试非阻塞
     Frame* audioWritable = audioQueue_->tryPeekWritable();
     if (!audioWritable) {
@@ -2073,11 +2091,12 @@ bool Player::initWindowAndRenderer() {
                     break;
                 case GLFW_KEY_P:
                     {
-                        // 从视频队列的 keep-last 槽获取最后渲染的帧（不阻塞渲染线程）
-                        Frame* lastFrame = videoQueue_ ? videoQueue_->peekLast() : nullptr;
-                        if (lastFrame) {
+                        // 从视频队列的 keep-last 槽获取最后渲染帧的独立引用（不阻塞渲染线程，
+                        // 也不被并发 flush 影响）。leased 持有引用，saveFrame 期间数据有效。
+                        Frame leased;
+                        if (videoQueue_ && videoQueue_->peekLastRef(leased)) {
                             auto& cfg = Config::getInstance().get();
-                            Screenshot::saveFrame(lastFrame, cfg.screenshotDir, cfg.screenshotFormat);
+                            Screenshot::saveFrame(&leased, cfg.screenshotDir, cfg.screenshotFormat);
                         } else {
                             LOG_WARN("Screenshot: no frame available");
                         }
@@ -2215,12 +2234,15 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     bool hasValidFrame = false;
     size_t queueDepth = 0;
 
-    // 从队列读取 inputNeeded 字节
+    // 从队列读取 inputNeeded 字节。leasedAudio 复用一份消费者持有的 Frame：
+    // peekRef 在锁内 av_frame_ref 出独立引用，回调读 data[0] 期间即便 audio decode
+    // 线程 seek flush 队列，这份引用的数据仍有效，不会读到被 unref 的 buffer。
+    Frame leasedAudio;
     while (inputFilled < inputNeeded) {
-        Frame* audioFrame = audioQueue_ ? audioQueue_->peek() : nullptr;
+        bool hasFrame = audioQueue_ ? audioQueue_->peekRef(leasedAudio) : false;
         size_t frameOffset = pendingAudioOffset_.load();
 
-        if (!audioFrame) {
+        if (!hasFrame) {
             int underruns = audioUnderrunCount_.fetch_add(1) + 1;
             if (underruns % 10 == 1) {
                 LOG_WARN("Audio underrun detected, count: " + std::to_string(underruns));
@@ -2230,7 +2252,7 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         }
 
         queueDepth = audioQueue_->size();
-        AVFrame* avFrame = audioFrame->getAVFrame();
+        AVFrame* avFrame = leasedAudio.getAVFrame();
         if (!avFrame || !avFrame->data[0] || avFrame->nb_samples <= 0) {
             audioQueue_->next();
             pendingAudioOffset_.store(0);
@@ -2248,7 +2270,7 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         }
 
         if (!hasValidFrame) {
-            double framePTS = audioFrame->getPTS();
+            double framePTS = leasedAudio.getPTS();
             if (frameOffset > 0) {
                 framePTS += static_cast<double>(frameOffset) / frameBytes / audioSampleRate_;
             }
@@ -2306,11 +2328,6 @@ void Player::startVideoRecording() {
         LOG_WARN("Cannot record video: no video stream");
         return;
     }
-    if (videoRecorder_ && videoRecorder_->isRecording()) {
-        LOG_WARN("Video recording already in progress");
-        return;
-    }
-
     auto& cfg = Config::getInstance().get();
     auto quality = Recorder::parseQuality(cfg.recordQuality);
 
@@ -2338,6 +2355,12 @@ void Player::startVideoRecording() {
     std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
     std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + "." + ext;
 
+    // 录制器创建/销毁与 demux 线程 writePacket 串行（v0.5.1：start/stop/query 全程持锁）
+    std::lock_guard<std::mutex> lock(recorderMutex_);
+    if (videoRecorder_ && videoRecorder_->isRecording()) {
+        LOG_WARN("Video recording already in progress");
+        return;
+    }
     videoRecorder_ = std::make_unique<Recorder>();
     if (!videoRecorder_->start(outputPath, Recorder::Mode::VIDEO_ONLY, quality,
                                 demuxer_->getFormatContext(),
@@ -2349,6 +2372,7 @@ void Player::startVideoRecording() {
 }
 
 void Player::stopVideoRecording() {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     if (videoRecorder_ && videoRecorder_->isRecording()) {
         videoRecorder_->stop();
         LOG_INFO("Video recording stopped");
@@ -2360,11 +2384,6 @@ void Player::startAudioRecording() {
         LOG_WARN("Cannot record audio: no audio stream");
         return;
     }
-    if (audioRecorder_ && audioRecorder_->isRecording()) {
-        LOG_WARN("Audio recording already in progress");
-        return;
-    }
-
     auto& cfg = Config::getInstance().get();
 
     auto now = std::chrono::system_clock::now();
@@ -2379,6 +2398,12 @@ void Player::startAudioRecording() {
     std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
     std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + ".m4a";
 
+    // 录制器创建/销毁与 demux 线程 writePacket 串行（v0.5.1：start/stop/query 全程持锁）
+    std::lock_guard<std::mutex> lock(recorderMutex_);
+    if (audioRecorder_ && audioRecorder_->isRecording()) {
+        LOG_WARN("Audio recording already in progress");
+        return;
+    }
     audioRecorder_ = std::make_unique<Recorder>();
     if (!audioRecorder_->start(outputPath, Recorder::Mode::AUDIO_ONLY, Recorder::Quality::ORIGINAL,
                                 demuxer_->getFormatContext(),
@@ -2390,6 +2415,7 @@ void Player::startAudioRecording() {
 }
 
 void Player::stopAudioRecording() {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     if (audioRecorder_ && audioRecorder_->isRecording()) {
         audioRecorder_->stop();
         LOG_INFO("Audio recording stopped");
@@ -2397,26 +2423,32 @@ void Player::stopAudioRecording() {
 }
 
 bool Player::isVideoRecording() const {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     return videoRecorder_ && videoRecorder_->isRecording();
 }
 
 bool Player::isAudioRecording() const {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     return audioRecorder_ && audioRecorder_->isRecording();
 }
 
 double Player::getVideoRecordingTime() const {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     return videoRecorder_ ? videoRecorder_->getElapsedSeconds() : 0.0;
 }
 
 double Player::getAudioRecordingTime() const {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     return audioRecorder_ ? audioRecorder_->getElapsedSeconds() : 0.0;
 }
 
 int64_t Player::getVideoRecordingSize() const {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     return videoRecorder_ ? videoRecorder_->getFileSize() : 0;
 }
 
 int64_t Player::getAudioRecordingSize() const {
+    std::lock_guard<std::mutex> lock(recorderMutex_);
     return audioRecorder_ ? audioRecorder_->getFileSize() : 0;
 }
 

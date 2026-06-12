@@ -168,6 +168,22 @@ public:
      */
     void reference(AVFrame* src);
 
+    /**
+     * @brief 从另一个 Frame 增持其数据引用，并拷贝全部元数据
+     *
+     * 用于 FrameQueue 的"引用持有"消费契约（见 v0.5.1 方案 2.1）：消费者在队列
+     * 锁内对队列槽位帧调用本方法，得到一份**独立引用**——底层 AVFrame buffer 的
+     * 引用计数 +1。此后即便生产者 flush/unreference 了队列那一份，buffer 在本帧
+     * 释放前始终有效，消除"锁外持裸指针访问被并发 unref 数据"的竞态。
+     *
+     * 内部：先 unreference() 释放自身旧引用 → av_frame_ref 增持 src 的 buffer
+     * 引用 → 拷贝全部元数据（pts / duration / type / ptsEstimated）。
+     * 若后续 Frame 新增元数据字段，必须一并在此拷贝，否则截图/字幕/估算帧判断丢信息。
+     *
+     * @param src 源帧（不修改其引用计数语义之外的状态）
+     */
+    void refFrom(const Frame& src);
+
     /** @brief 解除对数据的引用，释放帧缓冲区 */
     void unreference();
 

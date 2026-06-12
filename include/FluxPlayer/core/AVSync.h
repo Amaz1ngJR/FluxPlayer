@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 
 namespace FluxPlayer {
 
@@ -41,12 +42,12 @@ public:
     /**
      * 设置时钟类型
      */
-    void setClockType(ClockType type) { clockType_ = type; }
+    void setClockType(ClockType type) { clockType_.store(type, std::memory_order_relaxed); }
 
     /**
      * 获取当前时钟类型
      */
-    ClockType getClockType() const { return clockType_; }
+    ClockType getClockType() const { return clockType_.load(std::memory_order_relaxed); }
 
     // ===== 时钟管理 =====
 
@@ -183,25 +184,34 @@ private:
     void updateAverageDelay(double delay);
 
 private:
-    // 时钟类型
-    ClockType clockType_;
+    // 时钟类型（setClockType 写 / getMasterClock 读，跨线程 → 原子标量）
+    std::atomic<ClockType> clockType_;
 
     // 时钟值（PTS）
     std::atomic<double> audioClock_;
     std::atomic<double> videoClock_;
 
-    // 外部时钟（系统时钟）
-    std::chrono::steady_clock::time_point externalClockBase_;
-    std::atomic<double> externalClockOffset_;  // 相对于起始时间的偏移
+    // ===== external clock 状态组（v0.5.1：必须一起读/写，由 extClockMutex_ 保护）=====
+    // base（起算时刻 ns）+ offset（起算时的时钟值）+ rate（速率快照）+ paused 四者
+    // 组合算出 external clock。拆成独立原子会出现「新 base + 旧 offset」错配，跳变
+    // 无天然上限（offset 可达几千秒）。getExternalClock 仅帧率级调用，用 mutex 打包
+    // 组合一致性，成本可接受。pause 判定读本组的 extClockPaused_，不读全局 paused_。
+    mutable std::mutex extClockMutex_;
+    int64_t externalClockBaseNs_{0};      // 起算时刻（steady_clock ns）
+    double  externalClockOffset_{0.0};    // 起算时的时钟值（秒）
+    double  extClockRate_{1.0};           // external clock 视角的速率快照
+    bool    extClockPaused_{false};       // 本组自己的 paused 快照（不与 paused_ 混用）
 
     // 时钟更新时间（用于计算漂移）
     // 音频回调线程写、渲染线程读；用 steady_clock 纳秒计数避免跨线程读写 time_point。
     std::atomic<int64_t> audioClockUpdateNs_;
-    std::chrono::steady_clock::time_point videoClockUpdateTime_;
+    // 视频时钟更新时刻：updateVideoClock 写（解码/渲染线程），改纳秒原子避免 time_point 撕裂读
+    std::atomic<int64_t> videoClockUpdateNs_;
 
-    // 暂停状态
+    // 暂停状态（isPaused / computeFrameDelay / shouldDropFrame 等非 external-clock 组合
+    // 计算路径使用；external clock 的暂停判定走 extClockPaused_）
     std::atomic<bool> paused_;
-    double pauseStartTime_;  // 暂停开始时的时钟值
+    std::atomic<double> pauseStartTime_;  // 暂停开始时的主时钟值（pause 写 / resume 读）
 
     // 统计信息
     std::atomic<double> averageFrameDelay_;

@@ -44,7 +44,7 @@ void ApplyImGuiStyle(const SkinSnapshot& s);
  * @param max      右下
  * @param fill     面板填充色（通常用 colors.bgPanel / bgPanelTransparent）
  * @param border   边框色（通常用 colors.linePrimary / lineSubtle）
- * @param s        皮肤快��（用于读 metrics.radius.panel 与 decoration.cutCorners）
+ * @param s        皮肤快照（用于读 metrics.radius.panel 与 decoration.cutCorners）
  */
 void DrawSkinFrame(ImDrawList* dl, ImVec2 min, ImVec2 max,
                    const SkinColor& fill, const SkinColor& border,

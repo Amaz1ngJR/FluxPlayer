@@ -1586,7 +1586,7 @@ void settingsHint(const char* text, const SkinSnapshot* snap) {
  * 当前页面滚动区域，头尾（标题、状态栏）固定在窗口顶部/底部。
  *
  * 控件值变更走「Config::getMutable() 修改 + Config::save() + 必要时同步运行时」三步走，
- * 与 Loop Playback 一致；字符串输��用成员 char 缓冲，编辑完成后才落盘。
+ * 与 Loop Playback 一致；字符串输入用成员 char 缓冲，编辑完成后才落盘。
  */
 void Controller::renderSettingsModal() {
     auto skSnap = SkinManager::instance().current();
@@ -1632,7 +1632,7 @@ void Controller::renderSettingsModal() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(settingsUi.itemGapX, settingsUi.itemGapY));
 
-    // 关键：用 bgPanel（不透明）+ 自��义 alpha=0.97，避免 bgPanelTransparent 的 0.88 让文字发灰
+    // 关键：用 bgPanel（不透明）+ 自定义 alpha=0.97，避免 bgPanelTransparent 的 0.88 让文字发灰
     if (skSnap) {
         ImVec4 dialogBg = ToImVec4(skSnap->colors.bgPanel);
         dialogBg.w = settingsUi.panelAlpha;

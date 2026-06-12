@@ -24,12 +24,14 @@ class Frame;
  * @brief 固定大小环形帧队列
  *
  * 内部预分配 Frame 数组，通过读写索引管理环形缓冲。
- * 帧的所有权由队列管理，外部通过指针访问帧数据。
+ * 帧的所有权由队列管理。
  *
- * 线程模型：
+ * 线程模型（v0.5.1 引用持有契约）：
  * - 单生产者（解码线程）：peekWritable() → 填充帧 → push()
- * - 单消费者（渲染/音频线程）：peek() → 使用帧 → next()
- * - flush/abort 可从任意线程调用
+ * - 单消费者（渲染/音频线程）：peekRef(out) → 使用 out（独立引用）→ consume()/next()
+ *   消费者拿到的是对槽位帧 av_frame_ref 出的**独立引用**，生命周期由引用计数管理，
+ *   生产者 flush/unreference 不会让消费者手里的数据失效。
+ * - flush/abort 可从任意线程调用：只减队列那一份引用，消费者持有的引用不受影响。
  */
 class FrameQueue {
 public:
@@ -58,7 +60,7 @@ public:
     /**
      * @brief 非阻塞版 peekWritable：队列满时立即返回 nullptr
      *
-     * 用于单解码线程处理多个流的场景——视频队列满时不阻塞���
+     * 用于单解码线程处理多个流的场景——视频队列满时不阻塞，
      * 让出时间片处理音频，避免 A/V 失步。
      *
      * @return 可写帧指针；队列满或 abort 时返回 nullptr
@@ -75,29 +77,45 @@ public:
     // ==================== 消费者接口（渲染/音频线程调用） ====================
 
     /**
-     * @brief 获取下一个可读的帧（非阻塞）
+     * @brief 取下一个可读帧的独立引用（非阻塞，不消费）
      *
-     * 如果 keep-last 启用，首次 peek 返回当前帧但不消费。
-     * 队列空时返回 nullptr。
+     * 在内部锁内对队列槽位帧调用 out.refFrom()，使 out 持有一份独立引用。
+     * 返回后即便生产者 flush/unreference 队列，out 手里的数据仍有效，直到 out
+     * 下次被 refFrom 覆盖或析构。
      *
-     * @return 可读帧指针，队列空时返回 nullptr
+     * keep-last 启用时，首个未消费的"新帧"在 (rindex + rindexShown?1:0) 处。
+     *
+     * @param out  接收引用的消费者帧（调用方持有，可跨多次调用复用）
+     * @return true：out 已填充有效帧。
+     *         false：队列空——此时**已对 out 调用 unreference()** 清空，
+     *                调用方不会拿到上一次的陈旧帧。
      */
-    Frame* peek();
+    bool peekRef(Frame& out);
 
     /**
-     * @brief 获取 keep-last 保留的最后一帧（用于截图/暂停重绘）
+     * @brief 取 keep-last 保留的最后一帧的独立引用（用于截图/暂停重绘）
      *
-     * 仅在 keepLast=true 且至少渲染过一帧时有效。
-     *
-     * @return 最后渲染的帧指针，无效时返回 nullptr
+     * 仅在 keepLast=true 且至少消费过一帧时有效。语义同 peekRef：
+     * 成功填充 out 返回 true；无效时对 out unreference() 并返回 false。
      */
-    Frame* peekLast();
+    bool peekLastRef(Frame& out);
 
     /**
-     * @brief 释放当前帧，推进读索引
+     * @brief 消费当前已显示的一帧，推进 keep-last 状态机（视频队列用）
      *
-     * keep-last 模式下，首次调用只标记 shown（不释放槽），
-     * 再次调用才真正释放并前进 rindex。
+     * 把"显示一帧"建模为单次原子操作，取代旧 next()+dup-peek+再 next() 那套靠
+     * 裸指针相等判断的脆弱逻辑。两种 keep-last 状态：
+     * - !rindexShown_：当前 rindex 帧首次显示，仅标记 shown，不释放槽、不前进。
+     * - rindexShown_（或非 keep-last）：释放旧 rindex 帧、前进、新 rindex 标记 shown。
+     * 调用一次 = 推进一帧，并始终保留刚显示的那帧作为 keep-last。
+     */
+    void consume();
+
+    /**
+     * @brief 释放当前帧，推进读索引（音频队列用，keepLast=false）
+     *
+     * keep-last 模式下首次调用只标记 shown，再次调用才真正释放并前进 rindex。
+     * 音频队列 keepLast=false，等价于纯前进语义。
      */
     void next();
 

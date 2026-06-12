@@ -43,7 +43,7 @@ public:
     /**
      * @brief 归一化一帧视频 PTS
      * @param rawPTS        解码器输出的原始 PTS（秒）
-     * @param frameInterval 视频帧间隔（秒），���于无效/异常帧的估算
+     * @param frameInterval 视频帧间隔（秒），用于无效/异常帧的估算
      * @return 归一化结果，见 Result
      */
     Result normalizeVideo(double rawPTS, double frameInterval);

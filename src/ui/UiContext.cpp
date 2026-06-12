@@ -92,7 +92,7 @@ bool UiContext::init(int width, int height, const std::string& title) {
     // 默认 dark 兜底（皮肤再覆盖一次）
     ImGui::StyleColorsDark();
 
-    // 字体必须在 OpenGL3 后端 init 之前加���
+    // 字体必须在 OpenGL3 后端 init 之前加载
     loadFonts();
 
     // GLFW 后端

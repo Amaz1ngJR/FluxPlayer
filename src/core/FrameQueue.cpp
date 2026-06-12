@@ -54,25 +54,28 @@ void FrameQueue::push() {
     notEmpty_.notify_one();
 }
 
-Frame* FrameQueue::peek() {
+bool FrameQueue::peekRef(Frame& out) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // keep-last 模式：rindex_shown 表示当前 rindex 帧已经渲染过，
-    // 实际可消费的"新帧"数量为 size - rindex_shown
     int readable = size_ - (keepLast_ && rindexShown_ ? 1 : 0);
     if (readable <= 0) {
-        return nullptr;
+        // 队列空：清空 out，避免调用方误用上一次 lease 的陈旧帧
+        out.unreference();
+        return false;
     }
-    // keep-last 模式下，已 shown 的帧占用 rindex_，新帧在 (rindex_ + 1) % maxSize_
     int idx = (rindex_ + (keepLast_ && rindexShown_ ? 1 : 0)) % maxSize_;
-    return &queue_[idx];
+    // 锁内增持独立引用：返回后生产者 flush/unreference 不影响 out 的数据
+    out.refFrom(queue_[idx]);
+    return true;
 }
 
-Frame* FrameQueue::peekLast() {
+bool FrameQueue::peekLastRef(Frame& out) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!keepLast_ || !rindexShown_) {
-        return nullptr;
+        out.unreference();
+        return false;
     }
-    return &queue_[rindex_];
+    out.refFrom(queue_[rindex_]);
+    return true;
 }
 
 void FrameQueue::next() {
@@ -93,6 +96,32 @@ void FrameQueue::next() {
         }
     }
     notFull_.notify_one();
+}
+
+void FrameQueue::consume() {
+    bool freedSlot = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (keepLast_ && !rindexShown_) {
+            // 状态 A：当前 rindex 帧首次显示。仅标记 shown，不释放槽、不前进、size 不减。
+            // 该帧成为 keep-last 保留帧，供 peekLastRef/暂停重绘使用。未腾出空位，不 notify。
+            rindexShown_ = true;
+            return;
+        }
+        // 状态 B：keepLast && rindexShown_（或非 keep-last 队列）。
+        // 当前显示的是逻辑上的"下一帧"，释放旧 rindex 帧、前进，并把新落到 rindex 的帧
+        // 标记为 shown（它就是刚显示的这帧），始终保留刚显示帧作为 keep-last。
+        queue_[rindex_].unreference();
+        rindex_ = (rindex_ + 1) % maxSize_;
+        --size_;
+        if (keepLast_) {
+            rindexShown_ = true;
+        }
+        freedSlot = true;
+    }
+    if (freedSlot) {
+        notFull_.notify_one();  // 腾出一个槽，唤醒等待的生产者
+    }
 }
 
 void FrameQueue::flush() {
