@@ -19,19 +19,17 @@ namespace FluxPlayer {
 
 Recorder::Recorder()
     : outputFmtCtx_(nullptr)
-    , videoEncCtx_(nullptr)
     , inputVideoIdx_(-1)
     , inputAudioIdx_(-1)
     , outputVideoIdx_(-1)
     , outputAudioIdx_(-1)
     , inputVideoTb_{0, 1}
     , inputAudioTb_{0, 1}
-    , firstVideoDts_(AV_NOPTS_VALUE)
-    , firstAudioDts_(AV_NOPTS_VALUE)
-    , gotFirstVideoPkt_(false)
-    , gotFirstAudioPkt_(false)
-    , mode_(Mode::VIDEO_ONLY)
-    , quality_(Quality::ORIGINAL)
+    , started_(false)
+    , startSec_(0.0)
+    , startVideoOffsetTs_(0)
+    , startAudioOffsetTs_(0)
+    , mode_(Mode::VIDEO)
     , recording_(false)
 {
 }
@@ -42,14 +40,7 @@ Recorder::~Recorder() {
     }
 }
 
-Recorder::Quality Recorder::parseQuality(const std::string& str) {
-    if (str == "low") return Quality::LOW;
-    if (str == "medium") return Quality::MEDIUM;
-    if (str == "high") return Quality::HIGH;
-    return Quality::ORIGINAL;
-}
-
-bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
+bool Recorder::start(const std::string& outputPath, Mode mode,
                       AVFormatContext* inputFmtCtx, int videoStreamIdx, int audioStreamIdx) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -59,7 +50,6 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
     }
 
     mode_ = mode;
-    quality_ = quality;
     inputVideoIdx_ = videoStreamIdx;
     inputAudioIdx_ = audioStreamIdx;
     outputPath_ = outputPath;
@@ -70,7 +60,7 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
 
     // 创建输出格式上下文
     const char* format = nullptr;
-    if (mode == Mode::AUDIO_ONLY) {
+    if (mode == Mode::AUDIO) {
         // 检测源音频编码是否兼容 M4A（ipod）容器
         AVStream* inAudio = inputFmtCtx->streams[audioStreamIdx];
         AVCodecID audioCodecId = inAudio->codecpar->codec_id;
@@ -84,7 +74,7 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
             LOG_INFO("Audio codec not compatible with M4A, using MKA: " + outputPath_);
         }
     }
-    // VIDEO_ONLY 模式：根据文件扩展名自动推断格式
+    // VIDEO 模式：根据文件扩展名自动推断格式
 
     int ret = avformat_alloc_output_context2(&outputFmtCtx_, nullptr, format, outputPath_.c_str());
     if (ret < 0 || !outputFmtCtx_) {
@@ -95,7 +85,7 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
     }
 
     // 创建输出流
-    if (mode == Mode::VIDEO_ONLY) {
+    if (mode == Mode::VIDEO) {
         // 视频流
         AVStream* inVideoStream = inputFmtCtx->streams[videoStreamIdx];
         AVStream* outVideoStream = avformat_new_stream(outputFmtCtx_, nullptr);
@@ -108,59 +98,29 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
         outputVideoIdx_ = outVideoStream->index;
         inputVideoTb_ = inVideoStream->time_base;
 
-        if (quality == Quality::ORIGINAL) {
-            // 转封装模式：直接拷贝编解码器参数
-            avcodec_parameters_copy(outVideoStream->codecpar, inVideoStream->codecpar);
-            outVideoStream->time_base = inVideoStream->time_base;
-            // 清除 codec_tag，让 muxer 自动选择
-            outVideoStream->codecpar->codec_tag = 0;
-        } else {
-            // 重编码模式：创建 H.264 编码器
-            const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-            if (!codec) {
-                LOG_ERROR("H.264 encoder not found");
-                avformat_free_context(outputFmtCtx_);
-                outputFmtCtx_ = nullptr;
-                return false;
+        // 转封装：直接拷贝编解码器参数（无损、零 CPU，不重编码）
+        avcodec_parameters_copy(outVideoStream->codecpar, inVideoStream->codecpar);
+        outVideoStream->time_base = inVideoStream->time_base;
+        // 清除 codec_tag，让 muxer 自动选择
+        outVideoStream->codecpar->codec_tag = 0;
+
+        // 若源有音频流：VIDEO 模式一并复用音频（转封装拷贝），使录像产物含音轨。
+        // 音频随视频容器（mp4/mkv），无需单独兼容性判断。
+        if (audioStreamIdx >= 0 && audioStreamIdx < (int)inputFmtCtx->nb_streams) {
+            AVStream* inAudioStream = inputFmtCtx->streams[audioStreamIdx];
+            AVStream* outAudioStream = avformat_new_stream(outputFmtCtx_, nullptr);
+            if (outAudioStream) {
+                outputAudioIdx_ = outAudioStream->index;
+                inputAudioTb_ = inAudioStream->time_base;
+                avcodec_parameters_copy(outAudioStream->codecpar, inAudioStream->codecpar);
+                outAudioStream->time_base = inAudioStream->time_base;
+                outAudioStream->codecpar->codec_tag = 0;
+            } else {
+                LOG_WARN("VIDEO record: failed to create audio stream, recording video only");
             }
-
-            videoEncCtx_ = avcodec_alloc_context3(codec);
-            videoEncCtx_->width = inVideoStream->codecpar->width;
-            videoEncCtx_->height = inVideoStream->codecpar->height;
-            videoEncCtx_->pix_fmt = AV_PIX_FMT_YUV420P;
-            videoEncCtx_->time_base = {1, 25};  // 假设 25fps，后续可从输入流获取
-            videoEncCtx_->framerate = {25, 1};
-
-            // 根据质量设置码率和 CRF
-            if (quality == Quality::LOW) {
-                videoEncCtx_->bit_rate = 1000000;  // 1Mbps
-                av_opt_set(videoEncCtx_->priv_data, "crf", "28", 0);
-            } else if (quality == Quality::MEDIUM) {
-                videoEncCtx_->bit_rate = 4000000;  // 4Mbps
-                av_opt_set(videoEncCtx_->priv_data, "crf", "23", 0);
-            } else if (quality == Quality::HIGH) {
-                videoEncCtx_->bit_rate = 8000000;  // 8Mbps
-                av_opt_set(videoEncCtx_->priv_data, "crf", "18", 0);
-            }
-
-            av_opt_set(videoEncCtx_->priv_data, "preset", "medium", 0);
-
-            int encRet = avcodec_open2(videoEncCtx_, codec, nullptr);
-            if (encRet < 0) {
-                char errBuf[AV_ERROR_MAX_STRING_SIZE];
-                av_strerror(encRet, errBuf, sizeof(errBuf));
-                LOG_ERROR("Failed to open H.264 encoder: " + std::string(errBuf));
-                avcodec_free_context(&videoEncCtx_);
-                avformat_free_context(outputFmtCtx_);
-                outputFmtCtx_ = nullptr;
-                return false;
-            }
-
-            avcodec_parameters_from_context(outVideoStream->codecpar, videoEncCtx_);
-            outVideoStream->time_base = videoEncCtx_->time_base;
         }
     } else {
-        // 音频流（AUDIO_ONLY）
+        // 音频流（AUDIO 模式）
         AVStream* inAudioStream = inputFmtCtx->streams[audioStreamIdx];
         AVStream* outAudioStream = avformat_new_stream(outputFmtCtx_, nullptr);
         if (!outAudioStream) {
@@ -187,7 +147,6 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
             char errBuf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, errBuf, sizeof(errBuf));
             LOG_ERROR("Failed to open output file: " + outputPath_ + " (" + errBuf + ")");
-            if (videoEncCtx_) avcodec_free_context(&videoEncCtx_);
             avformat_free_context(outputFmtCtx_);
             outputFmtCtx_ = nullptr;
             return false;
@@ -200,7 +159,6 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
         LOG_ERROR("Failed to write output header: " + std::string(errBuf));
-        if (videoEncCtx_) avcodec_free_context(&videoEncCtx_);
         avio_closep(&outputFmtCtx_->pb);
         avformat_free_context(outputFmtCtx_);
         outputFmtCtx_ = nullptr;
@@ -209,58 +167,85 @@ bool Recorder::start(const std::string& outputPath, Mode mode, Quality quality,
 
     recording_.store(true);
     startTime_ = std::chrono::steady_clock::now();
-    gotFirstVideoPkt_ = false;
-    gotFirstAudioPkt_ = false;
+    started_ = false;
+    startSec_ = 0.0;
+    startVideoOffsetTs_ = 0;
+    startAudioOffsetTs_ = 0;
 
     LOG_INFO("Recorder started: " + outputPath_);
     return true;
 }
-
-// PLACEHOLDER_WRITE_PACKET
 
 bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
     if (!recording_.load() || !outputFmtCtx_) return false;
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 确定输出流索引
-    int outputStreamIdx = -1;
-    AVRational inputTb, outputTb;
+    const bool isVideoInput = (inputStreamIdx == inputVideoIdx_);
+    const bool isAudioInput = (inputStreamIdx == inputAudioIdx_);
 
-    if (mode_ == Mode::VIDEO_ONLY && inputStreamIdx == inputVideoIdx_) {
+    // 路由：按输入流索引映射到对应输出流。未建立对应输出流则忽略该包。
+    int outputStreamIdx = -1;
+    AVRational inputTb{0, 1};
+    int64_t* startOffsetTs = nullptr;
+    if (isVideoInput && outputVideoIdx_ >= 0) {
         outputStreamIdx = outputVideoIdx_;
         inputTb = inputVideoTb_;
-        outputTb = outputFmtCtx_->streams[outputVideoIdx_]->time_base;
-
-        // 记录首包 DTS，用于时间戳归零
-        if (!gotFirstVideoPkt_) {
-            firstVideoDts_ = (packet->dts != AV_NOPTS_VALUE) ? packet->dts : packet->pts;
-            gotFirstVideoPkt_ = true;
-        }
-    } else if (mode_ == Mode::AUDIO_ONLY && inputStreamIdx == inputAudioIdx_) {
+        startOffsetTs = &startVideoOffsetTs_;
+    } else if (isAudioInput && outputAudioIdx_ >= 0) {
         outputStreamIdx = outputAudioIdx_;
         inputTb = inputAudioTb_;
-        outputTb = outputFmtCtx_->streams[outputAudioIdx_]->time_base;
-
-        if (!gotFirstAudioPkt_) {
-            firstAudioDts_ = (packet->dts != AV_NOPTS_VALUE) ? packet->dts : packet->pts;
-            gotFirstAudioPkt_ = true;
-        }
+        startOffsetTs = &startAudioOffsetTs_;
     } else {
-        return false;  // 不匹配的流，忽略
+        return false;  // 不匹配/无对应输出流，忽略
+    }
+
+    // 起录对齐：
+    // - VIDEO 模式必须从首个视频关键帧（IDR）起录，否则录制文件以 mid-GOP 帧开头，
+    //   外部播放器缺参考帧无法解码（co-located POC 缺失）。起录前丢弃所有包（含音频）。
+    // - AUDIO 模式以首个音频包起录。
+    // 起录瞬间用该包 DTS（无则 PTS）换算成秒 startSec_，作为 A/V 共用原点，
+    // 再换算出各流在自身 time_base 下的偏移，避免分别归零导致音画失步。
+    if (!started_) {
+        const bool startOnThis =
+            (mode_ == Mode::VIDEO && isVideoInput && (packet->flags & AV_PKT_FLAG_KEY)) ||
+            (mode_ == Mode::AUDIO && isAudioInput);
+        if (!startOnThis) {
+            return true;  // 起录前的包：丢弃（视为已处理，避免上层误判失败）
+        }
+        int64_t startTs = (packet->dts != AV_NOPTS_VALUE) ? packet->dts : packet->pts;
+        if (startTs == AV_NOPTS_VALUE) startTs = 0;
+        startSec_ = static_cast<double>(startTs) * av_q2d(inputTb);
+        if (inputVideoTb_.num > 0)
+            startVideoOffsetTs_ = av_rescale_q(static_cast<int64_t>(startSec_ * AV_TIME_BASE),
+                                               AVRational{1, AV_TIME_BASE}, inputVideoTb_);
+        if (inputAudioTb_.num > 0)
+            startAudioOffsetTs_ = av_rescale_q(static_cast<int64_t>(startSec_ * AV_TIME_BASE),
+                                               AVRational{1, AV_TIME_BASE}, inputAudioTb_);
+        started_ = true;
+        LOG_INFO("Recorder: start aligned at " + std::to_string(startSec_) + "s");
+    }
+
+    AVRational outputTb = outputFmtCtx_->streams[outputStreamIdx]->time_base;
+    int64_t offset = startOffsetTs ? *startOffsetTs : 0;
+
+    // 丢弃早于起录原点的包（如起录后才到达的、属于更早位置的音频），保持输出 DTS 单调非负
+    int64_t refTs = (packet->dts != AV_NOPTS_VALUE) ? packet->dts : packet->pts;
+    if (refTs != AV_NOPTS_VALUE && refTs < offset) {
+        return true;
     }
 
     // 拷贝 packet
     AVPacket* pkt = av_packet_clone(packet);
+    if (!pkt) return false;
     pkt->stream_index = outputStreamIdx;
 
-    // 时间戳归零并转换 time_base
-    int64_t firstDts = (mode_ == Mode::VIDEO_ONLY) ? firstVideoDts_ : firstAudioDts_;
+    // 时间戳：减去本流起点偏移后换算到输出 time_base
     if (pkt->pts != AV_NOPTS_VALUE) {
-        pkt->pts = av_rescale_q(pkt->pts - firstDts, inputTb, outputTb);
+        pkt->pts = av_rescale_q(pkt->pts - offset, inputTb, outputTb);
     }
     if (pkt->dts != AV_NOPTS_VALUE) {
-        pkt->dts = av_rescale_q(pkt->dts - firstDts, inputTb, outputTb);
+        pkt->dts = av_rescale_q(pkt->dts - offset, inputTb, outputTb);
     }
     pkt->duration = av_rescale_q(pkt->duration, inputTb, outputTb);
     pkt->pos = -1;
@@ -277,49 +262,6 @@ bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
     return true;
 }
 
-bool Recorder::writeVideoFrame(AVFrame* frame) {
-    if (!recording_.load() || !videoEncCtx_) return false;
-
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    int ret = avcodec_send_frame(videoEncCtx_, frame);
-    if (ret < 0) {
-        char errBuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to send frame to encoder: " + std::string(errBuf));
-        return false;
-    }
-
-    while (ret >= 0) {
-        AVPacket* pkt = av_packet_alloc();
-        ret = avcodec_receive_packet(videoEncCtx_, pkt);
-        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-            av_packet_free(&pkt);
-            break;
-        } else if (ret < 0) {
-            char errBuf[AV_ERROR_MAX_STRING_SIZE];
-            av_strerror(ret, errBuf, sizeof(errBuf));
-            LOG_ERROR("Failed to receive packet from encoder: " + std::string(errBuf));
-            av_packet_free(&pkt);
-            return false;
-        }
-
-        pkt->stream_index = outputVideoIdx_;
-        av_packet_rescale_ts(pkt, videoEncCtx_->time_base, outputFmtCtx_->streams[outputVideoIdx_]->time_base);
-
-        ret = av_interleaved_write_frame(outputFmtCtx_, pkt);
-        av_packet_free(&pkt);
-
-        if (ret < 0) {
-            char errBuf[AV_ERROR_MAX_STRING_SIZE];
-            av_strerror(ret, errBuf, sizeof(errBuf));
-            LOG_ERROR("Failed to write encoded packet: " + std::string(errBuf));
-            return false;
-        }
-    }
-    return true;
-}
-
 void Recorder::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -331,11 +273,6 @@ void Recorder::stop() {
     // 关闭文件
     if (!(outputFmtCtx_->oformat->flags & AVFMT_NOFILE)) {
         avio_closep(&outputFmtCtx_->pb);
-    }
-
-    // 释放编码器
-    if (videoEncCtx_) {
-        avcodec_free_context(&videoEncCtx_);
     }
 
     // 释放格式上下文

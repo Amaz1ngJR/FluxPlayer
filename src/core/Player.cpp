@@ -1182,11 +1182,16 @@ void Player::demuxThread() {
                 }
                 videoPktQueue_->put(packet);  // 转移所有权，packet 返回后为空
             } else if (audioPktQueue_ && packet->stream_index == audioIdx) {
-                // 录音：写入音频 packet
+                // 录制：音频包同时喂给音频录制器（纯录音）和视频录制器（录像复用音轨）。
+                // 两者都在 recorderMutex_ 内，与 start/stop 串行。视频录制器在起录关键帧
+                // 之前会自行丢弃音频包（见 Recorder::writePacket），无需在此判断。
                 {
                     std::lock_guard<std::mutex> lock(recorderMutex_);
                     if (audioRecorder_ && audioRecorder_->isRecording()) {
                         audioRecorder_->writePacket(packet, packet->stream_index);
+                    }
+                    if (videoRecorder_ && videoRecorder_->isRecording()) {
+                        videoRecorder_->writePacket(packet, packet->stream_index);
                     }
                 }
                 audioPktQueue_->put(packet);
@@ -2329,14 +2334,12 @@ void Player::startVideoRecording() {
         return;
     }
     auto& cfg = Config::getInstance().get();
-    auto quality = Recorder::parseQuality(cfg.recordQuality);
 
-    // 确定输出扩展名
+    // 确定输出扩展名（录像一律转封装）：直播统一 mp4；本地文件保留源格式
     std::string ext;
-    if (isLiveStream_ || quality != Recorder::Quality::ORIGINAL) {
+    if (isLiveStream_) {
         ext = "mp4";
     } else {
-        // 本地文件保留源格式
         std::string src = filePath_;
         auto dotPos = src.rfind('.');
         ext = (dotPos != std::string::npos) ? src.substr(dotPos + 1) : "mp4";
@@ -2362,7 +2365,7 @@ void Player::startVideoRecording() {
         return;
     }
     videoRecorder_ = std::make_unique<Recorder>();
-    if (!videoRecorder_->start(outputPath, Recorder::Mode::VIDEO_ONLY, quality,
+    if (!videoRecorder_->start(outputPath, Recorder::Mode::VIDEO,
                                 demuxer_->getFormatContext(),
                                 demuxer_->getVideoStreamIndex(),
                                 demuxer_->getAudioStreamIndex())) {
@@ -2405,7 +2408,7 @@ void Player::startAudioRecording() {
         return;
     }
     audioRecorder_ = std::make_unique<Recorder>();
-    if (!audioRecorder_->start(outputPath, Recorder::Mode::AUDIO_ONLY, Recorder::Quality::ORIGINAL,
+    if (!audioRecorder_->start(outputPath, Recorder::Mode::AUDIO,
                                 demuxer_->getFormatContext(),
                                 demuxer_->getVideoStreamIndex(),
                                 demuxer_->getAudioStreamIndex())) {

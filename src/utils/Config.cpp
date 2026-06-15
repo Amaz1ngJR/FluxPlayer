@@ -175,7 +175,6 @@ bool Config::load() {
                 else if (key == "screenshotDir") settings_.screenshotDir = value;
                 else if (key == "screenshotFormat") settings_.screenshotFormat = value;
                 else if (key == "recordDir") settings_.recordDir = value;
-                else if (key == "recordQuality") settings_.recordQuality = value;
                 else if (key == "hwaccel") settings_.hwaccel = (value == "true" || value == "1");
                 else if (key == "subtitleEnabled") settings_.subtitleEnabled = (value == "true" || value == "1");
                 else if (key == "subtitleFontScale") {
@@ -269,8 +268,7 @@ bool Config::save() {
     file << "screenshotDir=" << settings_.screenshotDir << "\n";
     file << "screenshotFormat=" << settings_.screenshotFormat << "\n\n";
     file << "[Record]\n";
-    file << "recordDir=" << settings_.recordDir << "\n";
-    file << "recordQuality=" << settings_.recordQuality << "\n\n";
+    file << "recordDir=" << settings_.recordDir << "\n\n";
     file << "[Decoder]\n";
     file << "# hwaccel: 是否启用硬件加速解码 (true / false)\n";
     file << "# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2\n";

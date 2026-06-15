@@ -458,13 +458,17 @@ void HomeScreen::renderUI() {
         dl->AddLine(ImVec2(midX + tw*0.5f + 8.0f, lineY), ImVec2(midX + tw*0.5f + lineLen, lineY), lineCol, 1.0f);
     }
 
-    // 副标题
+    // 副标题（包含版本号）
     {
-        const char* sub = "// MEDIA PLAYER SYSTEM //";
-        float sw = ImGui::CalcTextSize(sub).x;
+        std::string versionText = std::string("Version") + FLUXPLAYER_VERSION;
+#ifdef _DEBUG
+        versionText += "-dev";
+#endif
+        std::string sub = "// By Amaz1ng " + versionText + " //";
+        float sw = ImGui::CalcTextSize(sub.c_str()).x;
         ImGui::SetCursorPosX((contentW - sw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
-        ImGui::TextUnformatted(sub);
+        ImGui::TextUnformatted(sub.c_str());
         ImGui::PopStyleColor();
     }
 

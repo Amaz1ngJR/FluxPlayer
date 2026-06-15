@@ -4,9 +4,12 @@
 -- 启用 debug/release 两种构建模式（通过 xmake f -m debug/release 切换）
 add_rules("mode.debug", "mode.release")
 
+-- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
+local version = "0.5.1"
+
 -- 项目基本信息
 set_project("FluxPlayer")
-set_version("0.5.1")
+set_version(version)
 set_languages("cxx17")  -- 要求 C++17 标准
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
@@ -180,6 +183,9 @@ target("FluxPlayer")
 
     -- 声明依赖的静态库（会自动传递头文件路径）
     add_deps("glfw_local", "glad_local", "imgui_local", "tinyfiledialogs_local")
+
+    -- 传递版本号宏到代码（引用开头定义的 version 变量）
+    add_defines("FLUXPLAYER_VERSION=\"" .. version .. "\"")
 
     -- 预编译头（PCH）：把常用的 STL 头和 Logger.h 预先编译好，
     -- 后续每个 .cpp 直接复用，避免重复解析，显著加快编译速度

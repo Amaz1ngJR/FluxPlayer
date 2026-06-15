@@ -230,6 +230,11 @@ if(EXISTS "${YTDLP_BUNDLED_PATH}")
         YTDLP_BUNDLED_PATH="${YTDLP_BUNDLED_PATH}")
 endif()
 
+# 传递版本号宏到代码（从 project VERSION 读取，用于 UI 显示和打包）
+target_compile_definitions(FluxPlayer PRIVATE
+    FLUXPLAYER_VERSION="${CMAKE_PROJECT_VERSION}"
+)
+
 # 预编译头（PCH）：把常用的 STL 头和 Logger.h 预先编译好，
 # 后续每个 .cpp 直接复用，避免重复解析，显著加快编译速度
 target_precompile_headers(FluxPlayer PRIVATE "include/FluxPlayer/pch.h")

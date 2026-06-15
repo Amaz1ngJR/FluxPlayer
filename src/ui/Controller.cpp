@@ -1864,15 +1864,7 @@ void Controller::renderSettingsModal() {
                 cfgInst.save();
             }
         }
-
-        const char* kQual[] = {"low", "medium", "high", "original"};
-        int qIdx = 3;
-        for (int i = 0; i < 4; ++i) if (s.recordQuality == kQual[i]) { qIdx = i; break; }
-        ImGui::SetNextItemWidth(pageContentW * settingsUi.mediumFieldRatio);
-        if (ImGui::Combo("Record Quality", &qIdx, kQual, IM_ARRAYSIZE(kQual))) {
-            s.recordQuality = kQual[qIdx];
-            cfgInst.save();
-        }
+        // 录制一律转封装（无损、零 CPU），无画质选项。
     }
 
     ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));
