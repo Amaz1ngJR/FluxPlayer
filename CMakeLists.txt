@@ -175,7 +175,9 @@ endif()
 
 # add_executable：将源文件编译并链接为可执行程序
 if(WIN32)
-    add_executable(FluxPlayer WIN32 ${FLUXPLAYER_SOURCES})
+    # source/app.rc 把 source/pic.ico 嵌入 exe，让资源管理器/任务栏/快捷方式都显示图标
+    # （缺此步快捷方式图标为空白）。windres 默认在 .rc 所在目录搜索 pic.ico。
+    add_executable(FluxPlayer WIN32 ${FLUXPLAYER_SOURCES} source/app.rc)
 else()
 add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
 endif()

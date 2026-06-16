@@ -211,6 +211,9 @@ target("FluxPlayer")
     -- WebView2 头依赖大量 Windows COM 宏，与其他 .cpp 合并会触发宏冲突
     if is_plat("windows") then
         add_files("src/utils/WebLogin_win.cpp", {unity_ignored = true})
+        -- 资源脚本：把 source/pic.ico 嵌入 exe，让资源管理器/任务栏/快捷方式都显示图标
+        -- （缺此步快捷方式图标为空白）。windres 默认在 .rc 所在目录搜索 pic.ico。
+        add_files("source/app.rc")
     end
 
     -- 项目头文件搜索路径

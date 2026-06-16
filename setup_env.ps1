@@ -1,7 +1,7 @@
 # setup_env.ps1 — Windows MinGW + xmake 环境配置脚本
 # 安装xmake : 
 #Invoke-WebRequest `
-#  -Uri "https://github.com/xmake-io/xmake/releases/download/v3.0.9/xmake-bundle-v3.0.9.win64.exe" `
+#  -Uri "https://github.com/xmake-io/xmake/releases/download/v2.9.9/xmake-bundle-v2.9.9.win64.exe" `
 #  -OutFile "D:\tools\xmake.exe"
 # 使用方式：在 PowerShell 中运行 D:\tools\setup_env.ps1
 # 首次使用需执行：Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
@@ -42,13 +42,19 @@ Write-Host "Checking xmake..." -ForegroundColor Cyan
 $xmake_version = xmake --version 2>&1
 if ($LASTEXITCODE -ne 0) { Write-Error "xmake not found!"; exit 1 }
 Write-Host $xmake_version[0] -ForegroundColor Green
+if ($xmake_version[0] -notmatch "xmake v2\.9\.") {
+    Write-Error "FluxPlayer currently requires xmake 2.9.x. xmake 3.x can fail with: cannot import module: private.check.checkers.cuda.devlink"
+    Write-Error "Install xmake 2.9.x, then rerun this script."
+    exit 1
+}
 
 Write-Host ""
 Write-Host "All tools are ready!" -ForegroundColor Green
 
 # 配置 xmake 使用 MinGW
 Write-Host "Configuring xmake with MinGW toolchain..." -ForegroundColor Cyan
-xmake f -p windows --toolchain=mingw --mingw="D:\tools\mingw64" --cross="x86_64-w64-mingw32-" -c -y
+New-Item -Path ".xmake\windows\x64" -ItemType Directory -Force | Out-Null
+xmake f -p windows --toolchain=mingw --mingw="D:\tools\mingw64" --cross="x86_64-w64-mingw32-" -y
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "xmake configuration succeeded!" -ForegroundColor Green

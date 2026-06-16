@@ -45,11 +45,11 @@ Type: files;          Name: "{app}\imgui.ini"
 Type: filesandordirs; Name: "{app}"
 
 [Icons]
-; 开始菜单快捷方式
-Name: "{group}\FluxPlayer";         Filename: "{app}\FluxPlayer.exe"
+; 开始菜单快捷方式（IconFilename 显式指向 exe 内嵌图标，避免依赖默认解析）
+Name: "{group}\FluxPlayer";         Filename: "{app}\FluxPlayer.exe"; IconFilename: "{app}\FluxPlayer.exe"
 Name: "{group}\Uninstall";          Filename: "{uninstallexe}"
 ; 桌面快捷方式（可选，由 Tasks 控制）
-Name: "{commondesktop}\FluxPlayer"; Filename: "{app}\FluxPlayer.exe"; Tasks: desktopicon
+Name: "{commondesktop}\FluxPlayer"; Filename: "{app}\FluxPlayer.exe"; IconFilename: "{app}\FluxPlayer.exe"; Tasks: desktopicon
 
 [Tasks]
 ; 安装向导中显示的可选任务

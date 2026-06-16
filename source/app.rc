@@ -1,0 +1,6 @@
+// Windows 可执行文件资源脚本：把应用图标嵌入 FluxPlayer.exe，
+// 使资源管理器、任务栏、快捷方式都显示图标（缺此步快捷方式图标为空白）。
+//
+// 图标 ID 用 1：Windows 取 exe 内 ID 最小的 ICON 作为程序默认图标。
+// 路径相对本 .rc 文件所在目录（source/），windres / rc.exe 默认在此搜索。
+IDI_ICON1 ICON "pic.ico"
