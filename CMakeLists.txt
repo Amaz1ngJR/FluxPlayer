@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.5.1 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.6.0 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -160,53 +160,17 @@ target_include_directories(tinyfiledialogs PUBLIC third_party/tinyfiledialogs)
 # ========================
 # 5. FluxPlayer 主程序
 # ========================
-set(FLUXPLAYER_SOURCES
-    src/main.cpp
-    src/audio/AudioOutput.cpp
-    src/core/AVSync.cpp
-    src/core/FrameQueue.cpp
-    src/core/MediaInfo.cpp
-    src/core/PacketQueue.cpp
-    src/core/PTSNormalizer.cpp
-    src/core/Player.cpp
-    src/decoder/AudioDecoder.cpp
-    src/decoder/Demuxer.cpp
-    src/decoder/Frame.cpp
-    src/decoder/VideoDecoder.cpp
-    src/renderer/GLRenderer.cpp
-    src/renderer/Shader.cpp
-    src/subtitle/SubtitleDecoder.cpp
-    src/subtitle/SubtitleManager.cpp
-    src/ui/Controller.cpp
-    src/ui/HomeScreen.cpp
-    src/ui/MergeScreen.cpp
-    src/ui/OpeningScreen.cpp
-    src/ui/SkinManager.cpp
-    src/ui/SkinRenderer.cpp
-    src/ui/UiContext.cpp
-    src/ui/Window.cpp
-    src/utils/Config.cpp
-    src/utils/Logger.cpp
-    src/utils/Screenshot.cpp
-    src/utils/Timer.cpp
-    src/utils/StreamExtractor.cpp
-    src/utils/CookieStore.cpp
-    src/utils/DashMerger.cpp
-    src/utils/VideoMerger.cpp
-    src/utils/VideoFramePreviewer.cpp
-    src/utils/Downloader.cpp
-    src/recorder/Recorder.cpp
-    src/video/FrameInterpolator.cpp
-)
+# CONFIGURE_DEPENDS：新增/删除 .cpp 时 cmake --build 自动重新 glob，无需手动 cmake
+file(GLOB_RECURSE FLUXPLAYER_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
-# 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)
+# 平台相关 WebLogin：glob 会抓入两个实现，先移除非本平台的，再追加 .mm
 if(APPLE)
+    list(REMOVE_ITEM FLUXPLAYER_SOURCES "${CMAKE_SOURCE_DIR}/src/utils/WebLogin_win.cpp")
     list(APPEND FLUXPLAYER_SOURCES src/utils/WebLogin_mac.mm)
-    # Objective-C++ 文件禁用 ARC，与项目内其他原生代码风格一致
     set_source_files_properties(src/utils/WebLogin_mac.mm
         PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
 elseif(WIN32)
-    list(APPEND FLUXPLAYER_SOURCES src/utils/WebLogin_win.cpp)
+    # WebLogin_win.cpp 已被 glob 收录，WebLogin_mac.mm 是 .mm 不在 glob 里，无需处理
 endif()
 
 # add_executable：将源文件编译并链接为可执行程序

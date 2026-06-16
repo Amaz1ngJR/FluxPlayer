@@ -460,7 +460,7 @@ void HomeScreen::renderUI() {
 
     // 副标题（包含版本号）
     {
-        std::string versionText = std::string("Version") + FLUXPLAYER_VERSION;
+        std::string versionText = std::string("Version ") + FLUXPLAYER_VERSION;
 #ifdef _DEBUG
         versionText += "-dev";
 #endif

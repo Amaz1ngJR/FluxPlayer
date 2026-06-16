@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "FluxPlayer/utils/StreamExtractor.h"  // ExtractedStream（DASH 流 seek 重启复用）
+#include "FluxPlayer/core/PlayerState.h"        // PlayerState 枚举
 
 // 前向声明 FFmpeg 类型，避免头文件引入平台 SDK
 struct AVFrame;
@@ -33,19 +34,13 @@ class SubtitleDecoder;
 class SubtitleManager;
 class FrameInterpolator;
 class DashMerger;
-
-/**
- * 播放器状态枚举
- */
-enum class PlayerState {
-    IDLE,        // 空闲状态（未加载任何媒体）
-    EXTRACTING,  // 正在通过 yt-dlp 提取网页视频流信息
-    OPENING,     // 正在打开媒体文件
-    PLAYING,     // 播放中
-    PAUSED,      // 暂停
-    STOPPED,     // 停止（已加载但未播放）
-    ERRORED      // 错误状态
-};
+class CommandQueue;
+class RecordingService;
+class ClockController;
+class QueueManager;
+class StateManager;
+class DemuxWorker;
+class DecodeWorker;
 
 /**
  * 播放器统计信息
@@ -71,6 +66,21 @@ struct PlayerStats {
  * - 提供播放器事件回调接口
  */
 class Player {
+    // 命令类需访问 *Internal() 方法
+    friend struct PlayerCommand;
+    friend struct SeekCommand;
+    friend struct PauseCommand;
+    friend struct ResumeCommand;
+    friend struct StopCommand;
+    friend struct SetSpeedCommand;
+    friend struct SwitchQualityCommand;
+    friend struct StartRecordingCommand;
+    friend struct StopRecordingCommand;
+
+    // Worker 类需访问 Player 私有线程方法
+    friend class DemuxWorker;
+    friend class DecodeWorker;
+
 public:
     Player();
     ~Player();
@@ -170,7 +180,7 @@ public:
     /**
      * 获取当前播放状态
      */
-    PlayerState getState() const { return state_; }
+    PlayerState getState() const;
 
     /// 获取最近一次打开的网页 URL（用于画质切换和下载）
     const std::string& getLastPageUrl() const { return lastPageUrl_; }
@@ -181,12 +191,12 @@ public:
     /**
      * 是否正在播放
      */
-    bool isPlaying() const { return state_ == PlayerState::PLAYING; }
+    bool isPlaying() const;
 
     /**
      * 是否已暂停
      */
-    bool isPaused() const { return state_ == PlayerState::PAUSED; }
+    bool isPaused() const;
 
     /**
      * 获取当前播放时间（秒）
@@ -343,34 +353,40 @@ public:
     bool hasSubtitleStream() const { return subtitleDecoder_ != nullptr; }
 
 private:
+    // ===== 命令队列与控制流 =====
+
+    /**
+     * 泵取并执行命令队列中的所有待处理命令
+     *
+     * 由控制线程（主循环 run()）每帧调用，串行执行本帧投递的所有命令。
+     * 控制线程每帧调用，串行执行本帧投递的所有命令。
+     */
+    void pumpCommands();
+
+    /**
+     * 命令 execute() 调用的内部执行方法
+     *
+     * 公开方法（seek/pause/...）在后续阶段会改为「投递命令」，命令 execute()
+     * 调用这些 *Internal() 方法真正落地，从而消除递归。这些方法
+     * 委托给现有公开方法的实现，行为完全不变。
+     */
+    void seekInternal(double seconds);
+    void pauseInternal();
+    void resumeInternal();
+    void stopInternal();
+    void setPlaybackSpeedInternal(double speed);
+    void switchQualityInternal(const std::string& formatId, double seekTime);
+    void startVideoRecordingInternal();
+    void stopVideoRecordingInternal();
+    void startAudioRecordingInternal();
+    void stopAudioRecordingInternal();
+
     /**
      * demux 线程函数
      * 只负责从 demuxer 读包，按流分发到 videoPktQueue_ / audioPktQueue_，
      * 字幕包同步解码，处理 seek / DASH 重启 / 直播重连 / 录制 writePacket。
      * 不触碰任何解码器（解码器由各自 decode 线程独占）。
      */
-    void demuxThread();
-
-    /**
-     * video 解码线程函数
-     * 从 videoPktQueue_ 取包送 videoDecoder_ 解码，归一化 PTS 后入 videoQueue_。
-     * 观察 packet 的 serial 变化（seek/flush 边界）自行 flush 解码器与帧队列。
-     */
-    void videoDecodeThread();
-
-    /**
-     * audio 解码线程函数
-     * 从 audioPktQueue_ 取包送 audioDecoder_ 解码，归一化 PTS 后入 audioQueue_。
-     * 观察 packet 的 serial 变化（seek/flush 边界）自行 flush 解码器与帧队列。
-     */
-    void audioDecodeThread();
-
-    /**
-     * demux 线程辅助函数：背压等待
-     * 当 packet 队列总量超过软/硬上限且各流缓冲充足时，短暂等待 decode 线程消费，
-     * 避免坏文件 / 差交织导致单路无限缓冲 OOM。
-     */
-    void waitForPacketSpace();
 
     /**
      * 启动 packet/frame 队列并创建 demux + video/audio decode 线程
@@ -395,76 +411,6 @@ private:
      * 不依赖调用方随后调用 close()。内部即 joinWorkerThreads(abortQueues=true)。
      */
     void shutdownWorkersForEof();
-
-    /**
-     * 解码线程辅助函数：处理 seek 请求
-     * 清空解码器、帧队列、同步器，启动精确跳转模式
-     */
-    bool processSeekRequest();
-
-    /**
-     * @brief DASH 流 seek：停止当前 DashMerger，用 -ss 重启从 seekTime 开始下载
-     *
-     * pipe 输入对 FFmpeg 不可 seek，matroska 容器在流式生成时无 cues 索引，
-     * 因此 DASH 流不能通过 demuxer_->seek 实现跳转。此方法绕过 demuxer，
-     * 通过重启上游连接（HTTP Range）实现真正的 seek。
-     */
-    void restartDashMerger(double seekTime);
-
-    /**
-     * 解码线程辅助函数：检查预缓冲是否完成
-     * 网络流启动时等待视频队列积累到 5 帧后再允许渲染
-     */
-    void checkPrebufferComplete();
-
-    /**
-     * 解码线程辅助函数：归一化视频帧 PTS
-     * 实时流需要减去基准 PTS，处理无效 PTS 和回绕
-     * @param rawFrame 待归一化的视频帧
-     * @return true 表示帧有效，false 表示应丢弃
-     */
-    bool normalizeVideoPTS(Frame& rawFrame);
-
-    /**
-     * 解码线程辅助函数：归一化音频帧 PTS
-     * 实时流需要减去基准 PTS，处理无效 PTS 和回绕
-     * @param rawFrame 待归一化的音频帧
-     * @return true 表示帧有效，false 表示应丢弃
-     */
-    bool normalizeAudioPTS(Frame& rawFrame);
-
-    /**
-     * 解码线程辅助函数：将视频帧入队
-     * 处理精确跳转丢帧、队列满时的内存优化
-     * @param rawFrame 解码后的原始帧
-     * @param serial   该帧所属的 packet serial，队列满轮询期间若 serial 变化
-     *                 （seek/flush）立即放弃入队，让 video decode 线程回到循环顶部
-     *                 处理 flush
-     * @return true 表示已处理（入队或丢弃），false 表示应放弃当前帧（退出/serial 变化）
-     */
-    bool enqueueVideoFrame(Frame& rawFrame, int serial);
-
-    /**
-     * 解码线程辅助函数：将音频帧入队
-     * 转换为 S16 格式后入队，处理精确跳转丢帧
-     * @param rawFrame 解码后的原始帧
-     * @param serial   该帧所属的 packet serial，含义同 enqueueVideoFrame
-     * @return true 表示已处理（入队或丢弃），false 表示应放弃当前帧（退出/serial 变化）
-     */
-    bool enqueueAudioFrame(Frame& rawFrame, int serial);
-
-    /**
-     * @brief 取一个可写帧槽，队列满时可中断地轮询等待
-     *
-     * 替代 FrameQueue::peekWritable 的无限阻塞：seek 时渲染暂停，帧队列不再被消费，
-     * 若硬阻塞则 decode 线程无法回到循环顶部处理 serial 变化（死锁）。本函数轮询
-     * tryPeekWritable，并在 shouldQuit_ 或 pktQueue serial 变化时返回 nullptr。
-     * @param frameQueue 目标帧队列
-     * @param pktQueue   该流的 packet 队列（用于检测 serial 变化）
-     * @param serial     调用方当前处理的 serial
-     * @return 可写帧槽；应放弃时返回 nullptr
-     */
-    Frame* waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial);
 
     /**
      * run() 辅助函数：从队列取帧并渲染一帧视频
@@ -521,27 +467,15 @@ private:
     size_t audioOutputCallback(uint8_t* buffer, size_t bufferSize);
 
 private:
-    // 播放器状态
-    std::atomic<PlayerState> state_;
+    // ===== 命令队列 =====
+    std::unique_ptr<CommandQueue> commandQueue_;  ///< 控制命令队列（UI 线程投递，控制线程执行）
+
+    // 播放器状态（收口到 StateManager）
+    std::unique_ptr<StateManager> stateManager_;
     std::atomic<bool> shouldQuit_;
     std::atomic<bool> userStopped_{false}; ///< 用户主动 Stop，循环播放不重启
     std::atomic<bool> decodingFinished_;  ///< demux 线程已读完所有数据（解码线程可能仍在 drain，队列可能仍有剩余帧）
-    // Seek 请求（mutex 保护，避免 seekRequested_/seekTarget_ 两个 atomic 的 TOCTOU 竞态）
-    struct SeekRequest {
-        bool pending = false;   ///< 是否有待处理的 seek 请求
-        double target = 0.0;    ///< seek 目标时间（秒）
-    };
-    SeekRequest seekRequest_;           ///< 当前 seek 请求（受 seekMutex_ 保护）
-    mutable std::mutex seekMutex_;      ///< 保护 seekRequest_ 的互斥锁
     std::atomic<double> lastRenderedPTS_;  // 最后实际渲染的帧的 PTS
-
-    // 精确跳转控制（用于从关键帧解码到目标位置）
-    std::atomic<bool> decodingToTarget_;   // 是否正在解码到目标位置
-    std::atomic<double> decodeTargetPTS_;  // 目标 PTS
-    // seek 开始的 wall clock（steady_clock 纳秒），用于超时保护。
-    // UI 线程（seek）、demux 线程（processSeekRequest/restartDashMerger）写，
-    // video/audio decode 线程读 → 必须原子，避免跨线程读写普通 double 的 UB。
-    std::atomic<int64_t> seekTargetStartNs_{0};
 
     // 媒体信息
     std::string filePath_;
@@ -597,7 +531,6 @@ private:
     int audioChannels_;                           // 音频声道数
 
     // 音频帧残留偏移（处理部分消费的帧）
-    // 帧本身保留在 audioQueue_ 中（不 next()），下次 peek() 返回同一帧
     // 帧本身保留在 audioQueue_ 中（不 next()），下次 peek() 返回同一帧。
     // 平台音频线程读写；audio decode 线程 seek flush 时也会清零，故用原子量，
     // 且回调内对其做边界保护，避免 flush 后旧偏移越界访问新帧。
@@ -615,7 +548,9 @@ private:
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<VideoDecoder> videoDecoder_;
     std::unique_ptr<AudioDecoder> audioDecoder_;
-    std::unique_ptr<AVSync> avSync_;
+    // ===== 时钟与同步（收口到 ClockController）=====
+    std::unique_ptr<ClockController> clockController_;
+
     std::unique_ptr<AudioOutput> audioOutput_;
     std::unique_ptr<DashMerger> dashMerger_;  ///< DASH 流合并器（非 DASH 时为空）
     ExtractedStream lastExtractedInfo_;       ///< DASH 流提取结果，seek 时重启 merger 复用
@@ -632,13 +567,8 @@ private:
     // UI 控制器（不拥有，由外部管理）
     Controller* controller_;
 
-    // 录制器
-    std::unique_ptr<Recorder> videoRecorder_;
-    std::unique_ptr<Recorder> audioRecorder_;
-    // 录制器在 demux 线程 writePacket，但 start/stop/query 来自 UI/控制线程。
-    // 用此锁保护录制器的创建/销毁/查询与 demux 线程 writePacket 之间的所有并发访问
-    // （v0.5.1：start/stop/query 全部进锁，与 writePacket 串行）。const 查询需持锁 → mutable。
-    mutable std::mutex recorderMutex_;
+    // 录制服务（无锁：录制器创建/销毁/writePacket 全归 demux 线程串行）
+    std::unique_ptr<RecordingService> recordingService_;
 
     // 字幕模块（无字幕流时保持为空指针）
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
@@ -651,10 +581,10 @@ private:
     /// 纯音频模式：提取封面图并上传到渲染器
     void loadCoverImage();
 
-    // ===== 线程相关（ffplay 式解耦：demux + 独立 video/audio 解码线程） =====
-    std::unique_ptr<std::thread> demuxThread_;        ///< 读包分发线程
-    std::unique_ptr<std::thread> videoDecodeThread_;  ///< 视频解码线程（纯音频模式不创建）
-    std::unique_ptr<std::thread> audioDecodeThread_;  ///< 音频解码线程（无音频流时不创建）
+    // ===== 线程相关（Worker 类组件化管理）=====
+    std::unique_ptr<DemuxWorker> demuxWorker_;        ///< Demux 工作线程（持有 demux 线程）
+    std::unique_ptr<DecodeWorker> videoDecodeWorker_; ///< 视频解码工作线程（纯音频模式不创建）
+    std::unique_ptr<DecodeWorker> audioDecodeWorker_; ///< 音频解码工作线程（无音频流时不创建）
 
     // 各线程结束/停泊标志（EOF 判定）：
     // - demuxFinished_：demux 线程读到 EOF 并已向各 packet 队列投递 null 包（seek 恢复时清零）
@@ -666,14 +596,10 @@ private:
     std::atomic<bool> videoDrainedEof_{false};
     std::atomic<bool> audioDrainedEof_{false};
 
-    // 压缩包队列（demux 线程生产，对应 decode 线程消费，serial 标记 flush 边界）
-    std::unique_ptr<PacketQueue> videoPktQueue_;
-    std::unique_ptr<PacketQueue> audioPktQueue_;
-
-    // 帧队列（环形缓冲 + condition_variable 背压，对标 ffplay FrameQueue）
-    // 视频队列启用 keep-last（暂停/截图时保留最后帧），音频队列不启用
-    std::unique_ptr<FrameQueue> videoQueue_;
-    std::unique_ptr<FrameQueue> audioQueue_;
+    // 队列管理器（统一管理 packet×2 + frame×2 的生命周期）
+    // 通过访问器 videoPacketQueue()/audioPacketQueue()/videoFrameQueue()/audioFrameQueue()
+    // 返回 unique_ptr& 引用，兼容原成员用法（判空 / operator-> / 赋值 / reset）
+    std::unique_ptr<QueueManager> queueManager_;
 
     // 网络流预缓冲状态
     std::atomic<bool> prebuffering_{false};  // 是否正在预缓冲（等待队列填充到安全水位）

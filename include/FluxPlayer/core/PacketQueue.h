@@ -48,7 +48,7 @@ public:
      */
     void setTimeBase(AVRational tb);
 
-    // ==================== 生产者接口（demux 线程调用） ====================
+    // 生产者接口（demux 线程调用）
 
     /**
      * @brief 入队一个数据包（非阻塞追加）
@@ -68,7 +68,7 @@ public:
      */
     void putNullPacket(int streamIndex);
 
-    // ==================== 消费者接口（解码线程调用） ====================
+    // 消费者接口（解码线程调用）
 
     /**
      * @brief 取出一个数据包
@@ -81,7 +81,7 @@ public:
      */
     int get(AVPacket* pkt, bool block, int* serial);
 
-    // ==================== 控制接口 ====================
+    // 控制接口
 
     /**
      * @brief 清空队列所有包，serial 自增
@@ -105,7 +105,7 @@ public:
      */
     void start();
 
-    // ==================== 状态查询 ====================
+    // 状态查询
 
     /** @brief 当前队列中的包数 */
     int size() const;

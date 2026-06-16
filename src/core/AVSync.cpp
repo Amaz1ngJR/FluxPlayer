@@ -1,4 +1,5 @@
 #include "FluxPlayer/core/AVSync.h"
+#include "FluxPlayer/core/TimeUtils.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <algorithm>
 #include <chrono>
@@ -10,11 +11,6 @@ namespace FluxPlayer {
 namespace {
 
 constexpr double kMaxAudioClockInterpolationSec = 0.1;
-
-int64_t steadyNowNs() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
 
 } // namespace
 

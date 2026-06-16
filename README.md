@@ -4,7 +4,7 @@
 ![Language](https://img.shields.io/badge/language-C%2B%2B17-orange)
 
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/d879b637-6d3a-4f70-a15e-95780d4a7b7b" width="720" height="600" alt="图片描述" />
+  <img src="source/pic2.png" width="720" alt="FluxPlayer" />
 </div>
 
 
@@ -30,7 +30,7 @@
 - 📝 线程安全日志系统，支持 TCP 远程日志查看，运行时热更新日志级别
 - ⚙️ INI 配置文件，支持热重载
 - 📸 截图功能（PNG / JPEG，快捷键 P）
-- 🎥 录像功能（转封装原始流，支持 low/medium/high/original 四档质量）
+- 🎥 录像功能（纯转封装原始流，无损保留画质，零重编码开销）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
 - 🎬 多视频合并与片段截取（主页 MERGE VIDEOS 入口）：多选/拖放添加、拖拽调序、单项删除；每个片段可设 IN/OUT 截取范围并实时预览入点/出点画面；同一文件可多次添加各取一段；智能模式：全整段且参数一致走流拷贝极速无损，含截取或参数不一致时统一转码 H.264/AAC 帧级精确；输出到录制目录
 - 🔁 循环播放
@@ -42,6 +42,12 @@
 - 🎯 画质切换（360P / 480P / 720P / 1080P），切换时保持播放位置
 - 🔒 网络代理支持（HTTP/SOCKS5），默认 127.0.0.1:7890，可配置开关
 - 🎨 皮肤系统（Skin System）：语义 token 驱动的 UI 主题，支持 JSON 皮肤包加载、三层搜索（用户/开发/内置）、热加载（文件变更自动刷新，无需重启）、Appearance 子页切换皮肤，默认内置 `cyberpunk-neon`
+
+<div align="center">
+  <img src="source/UI/skins/cyberpunk-neon/mockup_player.svg" width="720" alt="播放器界面预览" />
+  <br/>
+  <img src="source/UI/skins/cyberpunk-neon/mockup_skin_settings.svg" width="720" alt="皮肤设置预览" />
+</div>
 
 ## 技术栈
 | 组件 | 技术 |
@@ -69,7 +75,7 @@ FluxPlayer/
 ├── src/                  # 源代码
 │   ├── main.cpp
 │   ├── audio/            # 音频输出 (AudioOutput)
-│   ├── core/             # 播放器核心 (Player, AVSync, MediaInfo, FrameQueue, PacketQueue, PTSNormalizer)
+│   ├── core/             # 播放器核心（Player 门面 + 命令队列 CommandQueue + 状态机 StateManager + 时钟 ClockController + 队列管理 QueueManager + 读包 DemuxWorker + 解码 DecodeWorker + 录制 RecordingService + AVSync / MediaInfo / FrameQueue / PacketQueue / PTSNormalizer）
 │   ├── decoder/          # 解码器 (Demuxer, VideoDecoder, AudioDecoder, Frame)
 │   ├── recorder/         # 录制器 (Recorder)
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
@@ -85,6 +91,114 @@ FluxPlayer/
 ├── CMakeLists.txt
 └── xmake.lua
 ```
+
+## 总体架构图
+
+### 图一：控制流（命令队列）
+
+UI 线程不直接修改播放器内部状态，所有操作（Seek、Pause、Stop 等）封装成命令投入 `CommandQueue`。控制线程（即主线程）在每帧渲染前调用 `pumpCommands()` 取出命令串行执行，再分发给各组件处理，从而彻底消除多线程并发修改状态的问题。
+
+```plantuml
+@startuml 控制流：命令队列
+
+left to right direction
+skinparam defaultFontSize 12
+skinparam component {
+    BackgroundColor #EEF5FF
+    BorderColor #4A90D9
+}
+
+rectangle "UI 线程" #FFFDE7 {
+    component "Controller" as ctrl
+}
+
+rectangle "控制线程" #E3F2FD {
+    component "CommandQueue" as cmdq
+    component "pumpCommands()" as pump
+    cmdq --> pump : drain()
+}
+
+component "StateManager" as state
+component "ClockController" as clock
+component "QueueManager" as qmgr
+component "RecordingService" as rec
+component "GLRenderer" as gl
+
+ctrl --> cmdq : post (非阻塞)
+
+pump --> state
+pump --> clock
+pump --> qmgr
+pump --> rec
+pump --> gl : 渲染
+
+note top of cmdq
+  Seek / Pause / Stop
+  SetSpeed / SwitchQuality
+  StartRecording
+end note
+
+@enduml
+```
+
+### 图二：数据流（三线程解耦）
+
+媒体数据经由三条独立线程流转：**DemuxWorker** 从文件/网络读包分发到两条 PacketQueue；**DecodeWorker(Video/Audio)** 各自取包解码后放入 FrameQueue；主线程从 videoFrameQueue 取帧渲染，平台音频回调从 audioFrameQueue 取帧播放。视频和音频队列完全独立——视频队列堵住只会阻塞视频解码线程，音频可以持续产帧，从根本上消除了「视频卡顿导致音频饿死」的死锁。`serial` 序号用于 seek：每次 seek 时递增 serial，decode 线程检测到 serial 变化即丢弃旧包，画面立刻切换到新位置。
+
+```plantuml
+@startuml 数据流：三线程解耦
+
+skinparam defaultFontSize 12
+skinparam component {
+    BackgroundColor #E8F4F8
+    BorderColor #2C3E50
+}
+
+component "Demuxer" as dmx
+
+component "DemuxWorker" as dw #FFF3E0
+component "DecodeWorker(Video)" as vw #FFF3E0
+component "DecodeWorker(Audio)" as aw #FFF3E0
+
+queue "videoPktQueue" as vpq #F5F5F5
+queue "audioPktQueue" as apq #F5F5F5
+queue "videoFrameQueue" as vfq #F5F5F5
+queue "audioFrameQueue" as afq #F5F5F5
+
+component "GLRenderer" as gl #E8F5E9
+component "AudioOutput" as ao #E8F5E9
+
+dmx --> dw
+dw --> vpq : put(pkt, serial)
+dw --> apq : put(pkt, serial)
+vpq --> vw : get() blocking
+apq --> aw : get() blocking
+vw --> vfq : 解码入队
+aw --> afq : 解码入队
+vfq --> gl : peekReadable()
+afq --> ao : peekReadable()
+
+note bottom of vpq
+  serial 机制：seek 时 bump serial
+  decode 线程丢弃旧 serial 包
+end note
+
+note bottom of vfq
+  video/audio 队列独立
+  视频队列满只阻塞视频解码
+  音频持续产帧，消除死锁
+end note
+
+note left of dw
+  录制无锁：
+  writePacket 全归此线程
+end note
+
+@enduml
+```
+
+详细架构设计见 [`docs/v0.6.0命令队列与控制线程架构重构方案.md`](docs/v0.6.0命令队列与控制线程架构重构方案.md)。
+
 
 ## 环境依赖
 
@@ -517,10 +631,8 @@ screenshotFormat=png
 #   macOS:   ~/Library/Caches/FluxPlayer/Record
 #   Windows: %LOCALAPPDATA%\FluxPlayer\Record
 #   Linux:   ~/.cache/FluxPlayer/Record
+# 说明：录制为纯转封装（remux），无损保留原始流，不重编码，因此无质量档位配置。
 recordDir=Record
-# recordQuality: 录像质量 (low / medium / high / original)
-# low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流
-recordQuality=original
 
 [Decoder]
 # hwaccel: 是否启用硬件加速解码 (true / false)
@@ -552,12 +664,6 @@ httpProxy=http://127.0.0.1:7890
 # 默认：socks5://127.0.0.1:7890
 socksProxy=socks5://127.0.0.1:7890
 ```
-
-录像质量说明：
-- `original`：直接转封装原始流，零质量损失
-- `high`：H.264 重编码，8Mbps / CRF 18
-- `medium`：H.264 重编码，4Mbps / CRF 23
-- `low`：H.264 重编码，1Mbps / CRF 28
 
 ## TCP 远程日志
 
@@ -643,9 +749,12 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 
 ### 架构设计
 
-- 多线程架构（ffplay 式解耦）：demux 读包线程 + 独立 video/audio 解码线程 + 主渲染线程 + 平台音频回调线程，通过线程安全的 PacketQueue / FrameQueue 通信，彻底消除「视频帧队列满饿死音频」的结构性死锁
-- 模块解耦：Demuxer → PacketQueue → Decoder → FrameQueue → Renderer / AudioOutput 流水线式处理
-- 状态机管理：Player 通过 `PlayerState` 枚举管理 IDLE → OPENING → PLAYING → PAUSED → STOPPED 状态转换
+- 命令队列 + 控制线程模型：UI 线程不直接修改播放管线状态，而是投递命令（Seek / Pause / Resume / Stop / SetSpeed / 录制 / 画质切换）到线程安全的 CommandQueue；控制线程（主循环）在每帧固定时点（UI 渲染前）串行执行，消除「UI 线程伸手进播放管线」的并发脆弱性。只读查询（getCurrentTime / isRecording 等）走原子量直读，不入队列
+- 组件化拆分：Player 降为门面（Facade），持有职责单一的组件 —— DemuxWorker（读包分发 + seek 协议 + DASH 重启）、DecodeWorker ×2（video/audio 对称解码）、QueueManager（packet×2 + frame×2 队列生命周期）、ClockController（AVSync + seek 精确跳转状态）、StateManager（状态机）、RecordingService（无锁录制）、CommandQueue（命令队列）
+- 多线程数据流（ffplay 式解耦）：DemuxWorker 读包线程 + 独立 video/audio DecodeWorker 解码线程 + 主渲染线程 + 平台音频回调线程，通过线程安全的 PacketQueue / FrameQueue 通信，彻底消除「视频帧队列满饿死音频」的结构性死锁
+- 流水线式处理：Demuxer → PacketQueue → Decoder → FrameQueue → Renderer / AudioOutput
+- 状态机管理：StateManager 通过 `PlayerState` 枚举管理 IDLE → OPENING → PLAYING → PAUSED → STOPPED 状态转换，统一转换协议与回调
+- 录制无锁化：RecordingService 的录制器创建/销毁/writePacket 全归 demux 线程串行执行，查询走原子状态块，彻底去除录制锁
 
 ### 视频渲染
 

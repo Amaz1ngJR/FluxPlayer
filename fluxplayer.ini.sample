@@ -74,10 +74,8 @@ screenshotFormat=png
 #   macOS:   ~/Library/Caches/FluxPlayer/Record
 #   Windows: %LOCALAPPDATA%\FluxPlayer\Record
 #   Linux:   ~/.cache/FluxPlayer/Record
+# 说明：录制为纯转封装（remux），无损保留原始流，不重编码，因此无质量档位配置。
 recordDir=Record
-# recordQuality: 录像质量 (low / medium / high / original)
-# low: 1Mbps CRF28, medium: 4Mbps CRF23, high: 8Mbps CRF18, original: 直接拷贝原始流
-recordQuality=original
 
 [Decoder]
 # hwaccel: 是否启用硬件加速解码 (true / false)
