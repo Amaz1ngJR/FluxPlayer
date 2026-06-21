@@ -16,6 +16,7 @@
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include "FluxPlayer/utils/CookieStore.h"
 #include "FluxPlayer/utils/WebLogin.h"
+#include "FluxPlayer/utils/HistoryStore.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>      // 需要 ImGui 内部 API（GetBackgroundDrawList 等）
@@ -26,8 +27,11 @@
 #include <tinyfiledialogs.h>     // 跨平台文件对话框（macOS/Windows/Linux）
 
 #include <cstring>
+#include <cstdio>
 #include <cmath>
 #include <vector>
+#include <algorithm>
+#include <string>
 
 namespace FluxPlayer {
 
@@ -103,6 +107,11 @@ bool HomeScreen::init() {
 
     // 应用皮肤样式
     setupStyle();
+
+    // 加载观看历史到内存缓存（每次进入 HomeScreen 重新读盘，保证跨重启/跨播放可见）
+    history_ = HistoryStore::loadAll();
+    pendingDeleteId_.clear();
+    clearConfirmOpen_ = false;
 
     LOG_INFO("HomeScreen initialized");
     return true;
@@ -779,6 +788,258 @@ void HomeScreen::renderUI() {
 
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(2);  // WindowBg + Border
+
+    // 右侧观看历史侧栏（独立窗口，在主卡片样式出栈后绘制，避免样式串扰）
+    renderHistoryPanel();
+}
+
+// ═══════════════════════════════════════════════════════
+// formatDuration — 秒数 → mm:ss / h:mm:ss
+// ═══════════════════════════════════════════════════════
+
+std::string HomeScreen::formatDuration(double seconds) const {
+    if (seconds <= 0.0) return "--:--";  // 时长未知（直播 / 提取失败）
+    int total = static_cast<int>(seconds + 0.5);
+    int h = total / 3600;
+    int m = (total % 3600) / 60;
+    int s = total % 60;
+    char buf[32];
+    if (h > 0) {
+        std::snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, s);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%d:%02d", m, s);
+    }
+    return std::string(buf);
+}
+
+// ═══════════════════════════════════════════════════════
+// renderHistoryPanel — 右侧观看历史侧栏
+// ═══════════════════════════════════════════════════════
+
+void HomeScreen::renderHistoryPanel() {
+    auto snapPtr = SkinManager::instance().current();
+    if (!snapPtr) return;
+    const auto& sk = *snapPtr;
+    const auto& home = sk.surfaces.home;
+    ImGuiIO& io = ImGui::GetIO();
+
+    // 面板布局：完全由窗口尺寸推导，不依赖主卡片的绝对位置，避免溢出屏幕外。
+    // 思路：主卡片在窗口水平居中，其右侧到窗口右缘形成一条「右侧空槽」，
+    // 面板就居中放在这条空槽里。所有量都是 io.DisplaySize 的派生值，
+    // 窗口缩放 / 高 DPI 时面板随之自适应。
+    const float screenW = io.DisplaySize.x;
+    const float screenH = io.DisplaySize.y;
+    float cardW = sk.metrics.size.homeSourceCardW;
+    float cardH = sk.metrics.size.homeSourceCardH;
+
+    // 右侧空槽：[卡片右缘, 窗口右缘]
+    float cardRight = (screenW + cardW) * 0.5f;
+    const float edgePad = screenW * 0.018f;  // 槽两侧留白（随窗口宽度按比例缩放）
+    float gutterX = cardRight + edgePad;
+    float gutterW = screenW - gutterX - edgePad;
+
+    const float minPanelW = 150.0f;  // 槽宽不足以放下面板时不绘制（窗口过窄）
+    const float maxPanelW = 320.0f;  // 上限：大窗口里面板不必无限变宽
+    if (gutterW < minPanelW) return;
+
+    float panelW = gutterW > maxPanelW ? maxPanelW : gutterW;
+    // 面板在空槽内水平居中
+    float panelX = gutterX + (gutterW - panelW) * 0.5f;
+    // 高度对齐主卡片：窗口垂直居中，与卡片同高
+    float panelH = cardH;
+    float panelY = (screenH - cardH) * 0.5f;
+
+    ImVec2 panelPos(panelX, panelY);
+    ImVec2 panelMax(panelX + panelW, panelY + panelH);
+
+    // 面板背景：填充 + 发光边框（复用主卡片同款霓虹风格）
+    {
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        dl->AddRectFilled(panelPos, panelMax, ToImU32(sk.colors.bgPanelTransparent),
+                          sk.metrics.radius.panel);
+        DrawGlowRect(dl, panelPos, panelMax, sk.colors.accentSecondary, sk, sk.metrics.radius.panel);
+    }
+
+    ImGui::SetNextWindowPos(panelPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(panelW, panelH), ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ToImVec4(sk.colors.bgPanelTransparent));
+    ImGui::PushStyleColor(ImGuiCol_Border,   ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sk.metrics.radius.panel);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(home.cardPaddingX, home.cardPaddingY));
+
+    ImGui::Begin("##HistoryPanel", nullptr,
+                 ImGuiWindowFlags_NoTitleBar  |
+                 ImGuiWindowFlags_NoResize    |
+                 ImGuiWindowFlags_NoMove      |
+                 ImGuiWindowFlags_NoCollapse  |
+                 ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    float contentW = ImGui::GetContentRegionAvail().x;
+
+    // 标题
+    {
+        const char* title = "[ WATCH HISTORY ]";
+        float tw = ImGui::CalcTextSize(title).x;
+        ImGui::SetCursorPosX((contentW - tw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
+        ImGui::TextUnformatted(title);
+        ImGui::PopStyleColor();
+    }
+    ImGui::Dummy(ImVec2(0, 6.0f));
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 c = ImGui::GetCursorScreenPos();
+        float cx = c.x + contentW * 0.5f;
+        DrawGradientSeparator(dl, ImVec2(cx, c.y), contentW * 0.9f, sk.colors.accentSecondary);
+        ImGui::Dummy(ImVec2(0, 8.0f));
+    }
+
+    // 空历史占位
+    if (history_.empty()) {
+        const char* empty = "No history yet";
+        float ew = ImGui::CalcTextSize(empty).x;
+        ImGui::SetCursorPosX((contentW - ew) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::Dummy(ImVec2(0, panelH * 0.35f));
+        ImGui::SetCursorPosX((contentW - ew) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+        ImGui::TextUnformatted(empty);
+        ImGui::PopStyleColor();
+    } else {
+        // 列表区：底部为 CLEAR ALL 预留高度，列表用滚动区承载
+        const float clearBtnH = 30.0f;
+        float listH = ImGui::GetContentRegionAvail().y - clearBtnH - 12.0f;
+        ImGui::BeginChild("##HistoryList", ImVec2(0, listH), false,
+                          ImGuiWindowFlags_NoScrollbar);
+
+        int idx = 0;
+        for (const auto& e : history_) {
+            ImGui::PushID(idx++);
+
+            float rowW = ImGui::GetContentRegionAvail().x;
+            const float delBtnW = 22.0f;
+
+            // 标题行：可点击的选择按钮（占满除删除按钮外的宽度）
+            ImVec4 hov = ToImVec4(sk.colors.accentPrimary); hov.w *= 0.10f;
+            ImVec4 act = ToImVec4(sk.colors.accentPrimary); act.w *= 0.20f;
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  act);
+            ImGui::PushStyleColor(ImGuiCol_Text,          ToImVec4(sk.colors.textPrimary));
+
+            // 标题（过长则截断，悬停 tooltip 显示完整）
+            std::string label = "> " + e.title;
+            if (ImGui::Button(label.c_str(), ImVec2(rowW - delBtnW - 6.0f, 0))) {
+                // 点击重播：回填 selectedFile_，复用「选中即返回」逻辑
+                selectedFile_ = e.path;
+                fileSelected_ = true;
+                errorMessage_.clear();
+                LOG_INFO("History replay: " + e.path);
+            }
+            if (ImGui::IsItemHovered() && ImGui::CalcTextSize(label.c_str()).x > rowW - delBtnW - 6.0f) {
+                ImGui::SetTooltip("%s", e.title.c_str());
+            }
+            ImGui::PopStyleColor(4);
+
+            // 删除按钮 [x]
+            ImGui::SameLine(0, 4.0f);
+            ImVec4 dHov = ToImVec4(sk.colors.stateError); dHov.w *= 0.20f;
+            ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, dHov);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  dHov);
+            ImGui::PushStyleColor(ImGuiCol_Text,          ToImVec4(sk.colors.stateError));
+            if (ImGui::Button("x", ImVec2(delBtnW, 0))) {
+                pendingDeleteId_ = e.id;  // 延迟到帧末处理，避免遍历时改容器
+            }
+            ImGui::PopStyleColor(4);
+
+            // 副信息行：时长 · 来源/平台
+            std::string sub = formatDuration(e.duration);
+            if (e.sourceType == HistorySourceType::WebVideo) {
+                sub += " · " + (e.platform.empty() ? std::string("web") : e.platform);
+            } else if (e.sourceType == HistorySourceType::NetworkUrl) {
+                sub += " · stream";
+            } else {
+                sub += " · local";
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+            ImGui::TextUnformatted(sub.c_str());
+            ImGui::PopStyleColor();
+
+            ImGui::Dummy(ImVec2(0, 4.0f));
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        // CLEAR ALL 按钮（accent.secondary 描边，点击弹确认）
+        ImVec4 hov = ToImVec4(sk.colors.accentSecondary); hov.w *= 0.12f;
+        ImVec4 act = ToImVec4(sk.colors.accentSecondary); act.w *= 0.25f;
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hov);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  act);
+        ImGui::PushStyleColor(ImGuiCol_Text,          ToImVec4(sk.colors.accentSecondary));
+        ImGui::PushStyleColor(ImGuiCol_Border,        ToImVec4(sk.colors.accentSecondary));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, sk.metrics.radius.button);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        if (ImGui::Button("CLEAR ALL", ImVec2(contentW, clearBtnH))) {
+            clearConfirmOpen_ = true;
+        }
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(5);
+    }
+
+    renderClearConfirmPopup();
+
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+
+    // 帧末处理延迟删除（在容器遍历结束后，安全修改 history_）
+    if (!pendingDeleteId_.empty()) {
+        std::string err;
+        if (HistoryStore::remove(pendingDeleteId_, &err)) {
+            history_.erase(std::remove_if(history_.begin(), history_.end(),
+                               [&](const HistoryEntry& x) { return x.id == pendingDeleteId_; }),
+                           history_.end());
+        } else {
+            LOG_WARN("Failed to remove history entry: " + err);
+        }
+        pendingDeleteId_.clear();
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// renderClearConfirmPopup — 清空全部二次确认
+// ═══════════════════════════════════════════════════════
+
+void HomeScreen::renderClearConfirmPopup() {
+    if (clearConfirmOpen_) {
+        ImGui::OpenPopup("ClearHistoryConfirm");
+        clearConfirmOpen_ = false;
+    }
+    // 弹窗居中
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("ClearHistoryConfirm", nullptr,
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::TextWrapped("确定清空全部观看历史？此操作不可恢复。");
+        ImGui::Separator();
+        if (ImGui::Button("清空", ImVec2(120, 0))) {
+            std::string err;
+            if (HistoryStore::clear(&err)) {
+                history_.clear();
+                LOG_INFO("Watch history cleared");
+            } else {
+                LOG_WARN("Failed to clear history: " + err);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("取消", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 }
 
 } // namespace FluxPlayer

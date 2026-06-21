@@ -21,9 +21,12 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/HistoryStore.h"
 #include <GLFW/glfw3.h>
 #include <string>
 #include <memory>
+#include <filesystem>
+#include <ctime>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -59,6 +62,51 @@ static inline bool isNetworkPath(const std::string& p) {
     return p.find("rtsp://") == 0 || p.find("rtmp://") == 0 ||
            p.find("rtp://")  == 0 || p.find("http://") == 0 ||
            p.find("https://") == 0;
+}
+
+/**
+ * @brief 记录一次观看历史（旁路功能，失败仅警告不阻断播放）
+ *
+ * 在 player.play() 成功后调用。根据来源类型组装 HistoryEntry：
+ * - 网页视频（needsExtraction 为真）：title/uploader/platform 取自 Player 提取结果，
+ *   path 存原始网页 URL（重播时重新走 yt-dlp，临时流地址会过期）。
+ * - 网络直链 / RTSP / RTMP：title 用 URL 本身，sourceType=NetworkUrl。
+ * - 本地文件：title 取文件名，sourceType=LocalFile。
+ *
+ * @param mediaPath 用户原始输入路径 / URL（未经 yt-dlp 改写）
+ * @param player    已打开并开始播放的 Player（用于取提取信息与时长）
+ */
+static void recordHistory(const std::string& mediaPath, const Player& player) {
+    HistoryEntry entry;
+    entry.path = mediaPath;
+    entry.lastPlayedAt = static_cast<int64_t>(std::time(nullptr));
+    entry.duration = player.getDuration();
+
+    if (StreamExtractor::needsExtraction(mediaPath)) {
+        // 网页视频：复用 Player 已缓存的提取结果填充展示信息
+        const ExtractedStream& info = player.getLastExtractedInfo();
+        entry.sourceType = HistorySourceType::WebVideo;
+        entry.title = info.title.empty() ? mediaPath : info.title;
+        entry.uploader = info.uploader;
+        entry.platform = info.platform;
+    } else if (isNetworkPath(mediaPath)) {
+        entry.sourceType = HistorySourceType::NetworkUrl;
+        entry.title = mediaPath;
+    } else {
+        entry.sourceType = HistorySourceType::LocalFile;
+        // 本地文件：取文件名作为标题（filesystem 解析失败时回退到完整路径）
+        try {
+            entry.title = std::filesystem::path(mediaPath).filename().string();
+        } catch (...) {
+            entry.title = mediaPath;
+        }
+        if (entry.title.empty()) entry.title = mediaPath;
+    }
+
+    std::string err;
+    if (!HistoryStore::record(entry, &err)) {
+        LOG_WARN("Failed to record watch history: " + err);
+    }
 }
 
 /**
@@ -105,6 +153,9 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
     }
     player.setLoopPlayback(Config::getInstance().get().loopPlayback);
 
+    // 播放成功后立即记录观看历史（旁路功能，失败不阻断播放）
+    recordHistory(mediaPath, player);
+
     Window* window = player.getWindow();
     if (!window) {
         return "Player has no window";
@@ -146,6 +197,9 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
     // 主循环：注意 ESC 仅退出当前播放（Player::quit 不会关共享窗口），返回 HomeScreen
     player.run();
 
+    // 回写退出时的播放位置（为断点续播预留数据，本期 UI 不消费）
+    HistoryStore::updatePosition(mediaPath, player.getCurrentTime());
+
     controller->destroy();   // 共享模式：仅清状态，不拆 ImGui 后端
     player.close();          // 共享模式：cleanup 不销毁外部窗口
 
@@ -186,6 +240,9 @@ static std::string playMediaCli(const std::string& mediaPath) {
     if (!player.play()) return "Failed to start playback";
     player.setLoopPlayback(Config::getInstance().get().loopPlayback);
 
+    // 播放成功后记录观看历史（CLI 打开的文件同样进历史）
+    recordHistory(mediaPath, player);
+
     Window* window = player.getWindow();
     if (!window) return "Failed to create player window";
 
@@ -208,6 +265,7 @@ static std::string playMediaCli(const std::string& mediaPath) {
     });
 
     player.run();
+    HistoryStore::updatePosition(mediaPath, player.getCurrentTime());
     controller->destroy();
     player.close();
     return errorMsg;

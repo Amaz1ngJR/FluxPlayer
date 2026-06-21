@@ -14,6 +14,9 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+
+#include "FluxPlayer/utils/HistoryStore.h"  // HistoryEntry（轻量结构体，不含三方依赖）
 
 struct ImFont;
 
@@ -87,6 +90,20 @@ private:
     /// 渲染窗口背景装饰（透视网格、扫描线、光晕、数字雨等）
     void renderBackground();
 
+    /**
+     * @brief 渲染右侧观看历史侧栏（列表 + 单条删除 + 清空按钮）
+     *
+     * 数据来自 init() 时缓存的 history_，点击某条即回填 selectedFile_ 触发重播，
+     * 单条删除调用 HistoryStore::remove 并同步 history_，清空走确认弹窗。
+     */
+    void renderHistoryPanel();
+
+    /// 渲染「清空全部历史」二次确认模态弹窗
+    void renderClearConfirmPopup();
+
+    /// 把秒数格式化为 mm:ss / h:mm:ss（历史副信息行显示时长）
+    std::string formatDuration(double seconds) const;
+
     UiContext& ui_;               ///< 共享 UI 上下文（窗口 / ImGui ctx / 字体）
     char urlBuffer_[1024];        ///< URL 输入框文本缓冲
     std::string errorMessage_;
@@ -108,6 +125,14 @@ private:
 
     /// 已应用皮肤代号；与 SkinManager::currentGeneration() 比较以决定是否重应用样式
     uint64_t appliedSkinGeneration_ = 0;
+
+    // ==================== 观看历史 ====================
+    /// init() 时从 HistoryStore::loadAll() 缓存，避免每帧读盘；删除/清空后同步维护
+    std::vector<HistoryEntry> history_;
+    /// 待删除的历史 id（延迟到帧末处理，避免遍历 history_ 时修改容器）
+    std::string pendingDeleteId_;
+    /// 是否请求弹出「清空全部」确认弹窗
+    bool clearConfirmOpen_ = false;
 };
 
 } // namespace FluxPlayer
