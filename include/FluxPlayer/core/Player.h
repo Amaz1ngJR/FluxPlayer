@@ -574,12 +574,27 @@ private:
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
     std::unique_ptr<SubtitleManager> subtitleManager_;
 
-    bool audioOnly_{false};  ///< 纯音频模式（无视频流时为 true）
-    bool hasVideoStream_{false};  ///< 当前媒体是否含视频流（EOF 判定用）
-    bool hasAudioStream_{false};  ///< 当前媒体是否含音频流（EOF 判定用）
+    bool audioOnly_{false};     ///< 纯音频模式（无视频流时为 true）
+    bool hasVideoStream_{false}; ///< 当前媒体是否含视频流（EOF 判定用）
+    bool hasAudioStream_{false}; ///< 当前媒体是否含音频流（EOF 判定用）
+    bool isImageMode_{false};    ///< 静态图片模式（无 worker 线程，单帧永驻）
 
     /// 纯音频模式：提取封面图并上传到渲染器
     void loadCoverImage();
+
+    /**
+     * 打开静态图片文件（JPG/PNG/YUV/NV12）
+     * - 使用 FFmpeg 解码 JPEG/PNG；YUV/NV12 直接读取原始字节（需同名 .txt 元数据）
+     * - 解码帧推入 videoFrameQueue，主循环在 PLAYING 状态渲染首帧后靠 keep-last 持续复用
+     * - 不启动 DemuxWorker / DecodeWorker，不需要 PacketQueue
+     */
+    bool openImageFile(const std::string& path);
+
+    /**
+     * 检测文件是否为播放器支持的静态图片格式
+     * @return 扩展名为 jpg/jpeg/png/yuv/nv12/i420 时返回 true
+     */
+    static bool isImageFile(const std::string& path);
 
     // ===== 线程相关（Worker 类组件化管理）=====
     std::unique_ptr<DemuxWorker> demuxWorker_;        ///< Demux 工作线程（持有 demux 线程）

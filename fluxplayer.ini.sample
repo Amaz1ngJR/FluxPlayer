@@ -65,7 +65,12 @@ frameInterpolation=true
 #   Windows: %LOCALAPPDATA%\FluxPlayer\Screenshot
 #   Linux:   ~/.cache/FluxPlayer/Screenshot
 screenshotDir=Screenshot
-# screenshotFormat: 截图格式 (png / jpg)
+# screenshotFormat: 截图格式
+# 取值：png (无损压缩) | jpg (有损高质量) | yuv (I420 原始数据) | nv12 (NV12 原始数据)
+# 默认：png
+# 说明：yuv/nv12 为原始像素数据，无编码开销，适合调试与质量对比；
+#       会额外生成同名 .txt 元数据文件（含宽高、格式、FFplay 查看命令）。
+#       查看示例：ffplay -f rawvideo -pixel_format yuv420p -video_size 1920x1080 文件名.yuv
 screenshotFormat=png
 
 [Record]

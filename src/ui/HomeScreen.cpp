@@ -514,9 +514,10 @@ void HomeScreen::renderUI() {
             const char* filterPatterns[] = {
                 "*.mp4", "*.mkv", "*.avi", "*.mov", "*.flv",
                 "*.wmv", "*.webm", "*.ts", "*.m4v", "*.3gp",
-                "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg"
+                "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg",
+                "*.jpg", "*.jpeg", "*.png", "*.yuv", "*.nv12"
             };
-            const char* res = tinyfd_openFileDialog("Select Media File", "", 15, filterPatterns, "Media Files", 0);
+            const char* res = tinyfd_openFileDialog("Select Media File", "", 20, filterPatterns, "Media Files", 0);
             if (res) {
                 selectedFile_ = res;
                 fileSelected_ = true;

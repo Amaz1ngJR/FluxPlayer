@@ -40,14 +40,14 @@ constexpr int kHistoryVersion = 1;
 
 // 路径分隔符：Windows 用反斜杠，其他平台用正斜杠
 #ifdef _WIN32
-constexpr char kPathSep = '\\';
+constexpr char kHistoryPathSep = '\\';
 #else
-constexpr char kPathSep = '/';
+constexpr char kHistoryPathSep = '/';
 #endif
 
 // 全局互斥锁：保护历史文件读写，避免多线程并发损坏文件。
 // 与 CookieStore 同构：锁粒度为「一次完整的文件读-改-写」。
-std::mutex& globalMutex() {
+std::mutex& historyGlobalMutex() {
     static std::mutex m;
     return m;
 }
@@ -137,7 +137,7 @@ std::vector<HistoryEntry> loadAllLocked() {
 
 // 历史文件路径：与 fluxplayer.ini、cookies/ 同级
 std::string HistoryStore::getHistoryFilePath() {
-    return Config::getAppDataDir() + kPathSep + "history.json";
+    return Config::getAppDataDir() + kHistoryPathSep + "history.json";
 }
 
 // 由 path 计算稳定 id：std::hash 取十六进制字符串。
@@ -150,7 +150,7 @@ std::string HistoryStore::makeId(const std::string& path) {
 }
 
 std::vector<HistoryEntry> HistoryStore::loadAll() {
-    std::lock_guard<std::mutex> lock(globalMutex());
+    std::lock_guard<std::mutex> lock(historyGlobalMutex());
     return loadAllLocked();
 }
 
@@ -196,7 +196,7 @@ bool HistoryStore::record(const HistoryEntry& entry, std::string* error) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(globalMutex());
+    std::lock_guard<std::mutex> lock(historyGlobalMutex());
     std::vector<HistoryEntry> entries = loadAllLocked();
 
     // id 统一由 path 计算，忽略调用方可能未填的 id
@@ -228,7 +228,7 @@ bool HistoryStore::record(const HistoryEntry& entry, std::string* error) {
 bool HistoryStore::updatePosition(const std::string& path, double position, std::string* error) {
     if (path.empty()) return true;  // 无路径无需更新，视为成功
 
-    std::lock_guard<std::mutex> lock(globalMutex());
+    std::lock_guard<std::mutex> lock(historyGlobalMutex());
     std::vector<HistoryEntry> entries = loadAllLocked();
 
     const std::string id = makeId(path);
@@ -243,7 +243,7 @@ bool HistoryStore::updatePosition(const std::string& path, double position, std:
 }
 
 bool HistoryStore::remove(const std::string& id, std::string* error) {
-    std::lock_guard<std::mutex> lock(globalMutex());
+    std::lock_guard<std::mutex> lock(historyGlobalMutex());
     std::vector<HistoryEntry> entries = loadAllLocked();
 
     auto newEnd = std::remove_if(entries.begin(), entries.end(),
@@ -257,7 +257,7 @@ bool HistoryStore::remove(const std::string& id, std::string* error) {
 }
 
 bool HistoryStore::clear(std::string* error) {
-    std::lock_guard<std::mutex> lock(globalMutex());
+    std::lock_guard<std::mutex> lock(historyGlobalMutex());
     return writeAll({}, error);
 }
 

@@ -157,4 +157,157 @@ std::string Screenshot::saveFrame(const Frame* frame,
     return fullPath;
 }
 
+std::string Screenshot::saveFrameYUV(const Frame* frame,
+                                      const std::string& outputDir,
+                                      const std::string& yuvFormat) {
+    if (!frame) return "";
+
+    const AVFrame* srcFrame = frame->getAVFrame();
+    if (!srcFrame) return "";
+
+    // 1. 确定目标格式
+    AVPixelFormat targetFmt;
+    std::string ext;
+    if (yuvFormat == "nv12") {
+        targetFmt = AV_PIX_FMT_NV12;
+        ext = "nv12";
+    } else {
+        // 默认 I420 (yuv420p)
+        targetFmt = AV_PIX_FMT_YUV420P;
+        ext = "yuv";
+    }
+
+    // 2. 格式转换（如需要）
+    AVFrame* outFrame = nullptr;
+    SwsContext* swsCtx = nullptr;
+    bool needFree = false;
+
+    if (srcFrame->format == targetFmt) {
+        // 无需转换，直接使用源帧（零拷贝）
+        outFrame = (AVFrame*)srcFrame;
+    } else {
+        // 需要转换
+        outFrame = av_frame_alloc();
+        outFrame->format = targetFmt;
+        outFrame->width = srcFrame->width;
+        outFrame->height = srcFrame->height;
+
+        if (av_frame_get_buffer(outFrame, 0) < 0) {
+            LOG_ERROR("Screenshot: failed to allocate frame buffer for YUV");
+            av_frame_free(&outFrame);
+            return "";
+        }
+
+        swsCtx = sws_getContext(
+            srcFrame->width, srcFrame->height, (AVPixelFormat)srcFrame->format,
+            srcFrame->width, srcFrame->height, targetFmt,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+        if (!swsCtx) {
+            LOG_ERROR("Screenshot: failed to create SwsContext for YUV conversion");
+            av_frame_free(&outFrame);
+            return "";
+        }
+
+        sws_scale(swsCtx, srcFrame->data, srcFrame->linesize,
+                  0, srcFrame->height, outFrame->data, outFrame->linesize);
+
+        needFree = true;
+        LOG_INFO("Screenshot: converted " + std::to_string(srcFrame->format) +
+                 " to " + std::to_string(targetFmt));
+    }
+
+    // 3. 创建目录并生成文件名
+    std::filesystem::create_directories(outputDir);
+    std::string filename = generateFilename(ext);
+    std::string fullPath = outputDir + "/" + filename;
+
+    // 4. 写入 YUV 数据
+    std::ofstream file(fullPath, std::ios::binary);
+    if (!file.is_open()) {
+        LOG_ERROR("Screenshot: failed to open file: " + fullPath);
+        if (swsCtx) sws_freeContext(swsCtx);
+        if (needFree) av_frame_free(&outFrame);
+        return "";
+    }
+
+    int width = outFrame->width;
+    int height = outFrame->height;
+
+    if (targetFmt == AV_PIX_FMT_YUV420P) {
+        // I420: 写入 Y, U, V 三个平面
+        // 注意处理 linesize（可能有对齐填充），按行写入避免写入填充字节
+        for (int i = 0; i < height; i++) {
+            file.write(reinterpret_cast<const char*>(outFrame->data[0] + i * outFrame->linesize[0]), width);
+        }
+        for (int i = 0; i < height / 2; i++) {
+            file.write(reinterpret_cast<const char*>(outFrame->data[1] + i * outFrame->linesize[1]), width / 2);
+        }
+        for (int i = 0; i < height / 2; i++) {
+            file.write(reinterpret_cast<const char*>(outFrame->data[2] + i * outFrame->linesize[2]), width / 2);
+        }
+    } else {
+        // NV12: 写入 Y, UV 两个平面
+        for (int i = 0; i < height; i++) {
+            file.write(reinterpret_cast<const char*>(outFrame->data[0] + i * outFrame->linesize[0]), width);
+        }
+        for (int i = 0; i < height / 2; i++) {
+            file.write(reinterpret_cast<const char*>(outFrame->data[1] + i * outFrame->linesize[1]), width);
+        }
+    }
+
+    file.close();
+
+    // 5. 写入元数据
+    writeYUVMetadata(fullPath, width, height, yuvFormat);
+
+    // 6. 清理
+    if (swsCtx) sws_freeContext(swsCtx);
+    if (needFree) av_frame_free(&outFrame);
+
+    LOG_INFO("YUV screenshot saved: " + fullPath);
+    return fullPath;
+}
+
+void Screenshot::writeYUVMetadata(const std::string& yuvPath,
+                                   int width, int height,
+                                   const std::string& format) {
+    std::string metaPath = yuvPath + ".txt";
+    std::ofstream meta(metaPath);
+
+    if (!meta.is_open()) {
+        LOG_WARN("Screenshot: failed to write metadata: " + metaPath);
+        return;
+    }
+
+    auto now = std::chrono::system_clock::now();
+    auto timeT = std::chrono::system_clock::to_time_t(now);
+
+    std::tm tm;
+#ifdef _WIN32
+    localtime_s(&tm, &timeT);
+#else
+    localtime_r(&timeT, &tm);
+#endif
+
+    meta << "# FluxPlayer YUV Screenshot Metadata\n";
+    meta << "format=" << format << "\n";
+    meta << "width=" << width << "\n";
+    meta << "height=" << height << "\n";
+    meta << "timestamp=" << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "\n";
+    meta << "\n";
+    meta << "# 使用 FFplay 查看:\n";
+
+    std::string filename = std::filesystem::path(yuvPath).filename().string();
+    if (format == "nv12") {
+        meta << "# ffplay -f rawvideo -pixel_format nv12 -video_size "
+             << width << "x" << height << " " << filename << "\n";
+    } else {
+        meta << "# ffplay -f rawvideo -pixel_format yuv420p -video_size "
+             << width << "x" << height << " " << filename << "\n";
+    }
+
+    meta.close();
+}
+
 } // namespace FluxPlayer

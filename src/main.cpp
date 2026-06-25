@@ -380,6 +380,8 @@ int main(int argc, char* argv[]) {
             // ── 3) Controller 主循环（共享 ImGui ctx） ──
             std::string err = playMediaShared(ui, player, pendingPath);
             if (!err.empty()) lastError = err;
+            // 播放结束返回主界面时，恢复固定的 HomeScreen 窗口尺寸
+            glfwSetWindowSize(ui.window()->getGLFWWindow(), w, h);
         }
 
         ui.destroy();

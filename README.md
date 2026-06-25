@@ -10,7 +10,7 @@
 
 基于 FFmpeg + OpenGL 的跨平台桌面视频播放器，使用 C++17 开发，覆盖 macOS / Windows / Linux 三端。从本地文件、纯音频，到 RTSP/RTMP/HTTP/HLS/DASH 网络流，再到 B站、YouTube 等 1000+ 平台的网页视频，都能直接打开播放。
 
-核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、硬件加速解码（VideoToolbox / CUDA / D3D11VA / DXVA2）及 NV12 零拷贝直通、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。界面由 Dear ImGui 构建，配套语义 token 驱动、支持热加载的皮肤系统。
+核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、硬件加速解码（VideoToolbox / CUDA / D3D11VA / DXVA2）及 NV12 零拷贝直通、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图（含 YUV/NV12 原始格式）、图片查看（JPG/PNG/YUV/NV12）、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。界面由 Dear ImGui 构建，配套语义 token 驱动、支持热加载的皮肤系统。
 
 ## 功能特性
 
@@ -29,7 +29,8 @@
 - 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看，运行时热更新日志级别
 - ⚙️ INI 配置文件，支持热重载
-- 📸 截图功能（PNG / JPEG，快捷键 P）
+- 📸 截图功能（PNG / JPEG / YUV(I420) / NV12，快捷键 P）
+- 🖼️ 图片查看（JPG / PNG / YUV I420 / NV12，拖放或文件对话框打开）
 - 🎥 录像功能（纯转封装原始流，无损保留画质，零重编码开销）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
 - 🎬 多视频合并与片段截取（主页 MERGE VIDEOS 入口）：多选/拖放添加、拖拽调序、单项删除；每个片段可设 IN/OUT 截取范围并实时预览入点/出点画面；同一文件可多次添加各取一段；智能模式：全整段且参数一致走流拷贝极速无损，含截取或参数不一致时统一转码 H.264/AAC 帧级精确；输出到录制目录
@@ -624,7 +625,9 @@ frameInterpolation=true
 #   Windows: %LOCALAPPDATA%\FluxPlayer\Screenshot
 #   Linux:   ~/.cache/FluxPlayer/Screenshot
 screenshotDir=Screenshot
-# screenshotFormat: 截图格式 (png / jpg)
+# screenshotFormat: 截图格式
+# 取值：png (无损压缩) | jpg (有损高质量) | yuv (I420 原始数据) | nv12 (NV12 原始数据)
+# 说明：yuv/nv12 为原始像素数据，无编码开销，额外生成同名 .txt 元数据文件
 screenshotFormat=png
 
 [Record]

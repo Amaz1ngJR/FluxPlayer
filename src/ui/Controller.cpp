@@ -1889,11 +1889,16 @@ void Controller::renderSettingsModal() {
             }
         }
 
-        const char* kFmt[] = {"png", "jpg"};
-        int fIdx = (s.screenshotFormat == "jpg") ? 1 : 0;
+        // 截图格式：png/jpg 编码，yuv(I420)/nv12 为原始数据（无编码、用于调试与质量对比）
+        const char* kFmt[] = {"png", "jpg", "yuv (I420)", "nv12"};
+        int fIdx = 0;
+        if (s.screenshotFormat == "jpg") fIdx = 1;
+        else if (s.screenshotFormat == "yuv") fIdx = 2;
+        else if (s.screenshotFormat == "nv12") fIdx = 3;
         ImGui::SetNextItemWidth(pageContentW * settingsUi.compactFieldRatio);
         if (ImGui::Combo("Format", &fIdx, kFmt, IM_ARRAYSIZE(kFmt))) {
-            s.screenshotFormat = kFmt[fIdx];
+            const char* fmtMap[] = {"png", "jpg", "yuv", "nv12"};
+            s.screenshotFormat = fmtMap[fIdx];
             cfgInst.save();
         }
     }

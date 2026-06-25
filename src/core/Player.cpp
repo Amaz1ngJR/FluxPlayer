@@ -28,6 +28,9 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
+
+#include <filesystem>
+#include <fstream>
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include "FluxPlayer/utils/DashMerger.h"
 
@@ -201,6 +204,11 @@ bool Player::open(const std::string& filePath) {
     if (stateManager_->current() != PlayerState::IDLE && stateManager_->current() != PlayerState::STOPPED) {
         LOG_ERROR("Cannot open file: player is busy");
         return false;
+    }
+
+    // 图片文件走独立路径（无 Demuxer/Worker��单帧直接注入渲染队列）
+    if (isImageFile(filePath)) {
+        return openImageFile(filePath);
     }
 
     // 网页 URL 提取流程
@@ -522,6 +530,14 @@ bool Player::play() {
         return false;
     }
 
+    // 图片模式：无需启动 Worker 线程，直接进入 PLAYING 让渲染循环显示图片
+    if (isImageMode_) {
+        shouldQuit_.store(false);
+        clockController_->avSync()->reset();
+        setState(PlayerState::PLAYING);
+        return true;
+    }
+
     LOG_INFO("Starting playback");
 
     if (stateManager_->current() == PlayerState::PAUSED) {
@@ -654,7 +670,8 @@ void Player::run() {
             bool audioDone = !hasAudioStream_ ||
                 (audioDrainedEof_.load() &&
                  (!queueManager_->audioFrameQueue() || queueManager_->audioFrameQueue()->numReadable() == 0));
-            if (demuxFinished_.load() && videoDone && audioDone) {
+            // 图片模式无 worker 线程，demuxFinished_ 永远不会置位，不能走此退出路径
+            if (!isImageMode_ && demuxFinished_.load() && videoDone && audioDone) {
                 shouldQuit_.store(true);
                 break;
             }
@@ -1143,6 +1160,7 @@ void Player::cleanup() {
     lastRenderedPTS_.store(0.0);
     droppedFrames_.store(0);
     currentFPS_.store(0.0);
+    isImageMode_ = false;
 
     // 重置音频相关统计
     audioUnderrunCount_.store(0);
@@ -1176,7 +1194,7 @@ bool Player::initWindowAndRenderer() {
         LOG_INFO("Window size clamped to screen: " + std::to_string(clampedW) + "x" + std::to_string(clampedH));
     }
 
-    // 创建窗口（外部窗口模式下跳过，window_ 已由调用方设置）
+    // 创建窗口（外部窗口模式下跳过创建，但需要 resize 适配内容尺寸）
     if (ownsWindow_) {
         window_ = std::make_unique<Window>(clampedW, clampedH,
                                            "FluxPlayer - " + filePath_);
@@ -1184,6 +1202,9 @@ bool Player::initWindowAndRenderer() {
             LOG_ERROR("Failed to initialize window");
             return false;
         }
+    } else {
+        // 共享窗口：调整尺寸以匹配视频/图片原始分辨率（保持宽高比，限制在屏幕80%以内）
+        glfwSetWindowSize(window_->getGLFWWindow(), clampedW, clampedH);
     }
 
     // 设置键盘回调
@@ -1247,7 +1268,12 @@ bool Player::initWindowAndRenderer() {
                         Frame leased;
                         if (queueManager_->videoFrameQueue() && queueManager_->videoFrameQueue()->peekLastRef(leased)) {
                             auto& cfg = Config::getInstance().get();
-                            Screenshot::saveFrame(&leased, cfg.screenshotDir, cfg.screenshotFormat);
+                            // 根据格式分发：yuv/nv12 走原始 YUV 写出（无编码），png/jpg 走编码
+                            if (cfg.screenshotFormat == "yuv" || cfg.screenshotFormat == "nv12") {
+                                Screenshot::saveFrameYUV(&leased, cfg.screenshotDir, cfg.screenshotFormat);
+                            } else {
+                                Screenshot::saveFrame(&leased, cfg.screenshotDir, cfg.screenshotFormat);
+                            }
                         } else {
                             LOG_WARN("Screenshot: no frame available");
                         }
@@ -1973,6 +1999,224 @@ void Player::stopAudioRecordingInternal() {
     if (recordingService_) {
         recordingService_->requestStopAudio();
     }
+}
+
+// =============================================================================
+// 静态图片查看
+// =============================================================================
+
+bool Player::isImageFile(const std::string& path) {
+    // 检测扩展名（不区分大小写），支持常见图片和原始 YUV 格式
+    auto dot = path.rfind('.');
+    if (dot == std::string::npos) return false;
+    std::string ext = path.substr(dot);
+    for (char& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    return ext == ".jpg" || ext == ".jpeg" || ext == ".png" ||
+           ext == ".yuv" || ext == ".i420" || ext == ".nv12";
+}
+
+bool Player::openImageFile(const std::string& path) {
+    LOG_INFO("Opening image: " + path);
+
+    // 按扩展名区分 JPEG/PNG（FFmpeg 解码）和 YUV/NV12（原始字节读取）
+    auto dot = path.rfind('.');
+    std::string ext = (dot != std::string::npos) ? path.substr(dot) : "";
+    for (char& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    // 原始 YUV 格式按扩展名约定区分（裸字节无法区分平面布局，扩展名是业界标准信号）：
+    //   .nv12        → NV12（Y + UV 半平面）
+    //   .yuv / .i420 → I420（Y + U + V 平面，最常见的裸 YUV 约定）
+    bool isRawNV12 = (ext == ".nv12");
+    bool isRawYUV = (ext == ".yuv" || ext == ".i420");
+
+    AVFrame* imgFrame = nullptr;
+
+    if (isRawYUV || isRawNV12) {
+        // ── YUV/NV12 原始文件：解析同名 .txt 元数据获取宽高 ──
+        std::string metaPath = path + ".txt";
+        std::ifstream meta(metaPath);
+        int w = 0, h = 0;
+        if (meta.is_open()) {
+            std::string line;
+            while (std::getline(meta, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                auto eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string key = line.substr(0, eq), val = line.substr(eq + 1);
+                if (key == "width")  w = std::stoi(val);
+                else if (key == "height") h = std::stoi(val);
+            }
+        }
+        if (w <= 0 || h <= 0) {
+            // 无元数据：按文件大小匹配常用分辨率（I420/NV12 均为 W×H×3/2 字节）
+            // 覆盖了从 QCIF 到 4K 的常见尺寸，匹配失败才回退 1920×1080
+            static constexpr std::pair<int,int> kCommonRes[] = {
+                {176,144},{352,288},{640,360},{640,480},{720,480},{720,576},
+                {800,600},{1024,576},{1024,768},{1280,720},{1280,800},{1280,960},
+                {1280,1080},{1440,1080},{1920,1080},{1920,1088},{2048,1080},
+                {2560,1440},{3840,2160},{4096,2160}
+            };
+            // 获取文件大小（避免 std::filesystem 在旧 MinGW 上的兼容问题）
+            int64_t fileSize = 0;
+            {
+                std::ifstream file(path, std::ios::binary | std::ios::ate);
+                if (file.is_open()) fileSize = file.tellg();
+            }
+            // 两轮匹配：pass0 精确单帧（fileSize*2 == W*H*3），pass1 整数倍多帧
+            // 优先精确匹配，避免小分辨率多帧误命中大文件
+            for (int pass = 0; pass < 2 && w <= 0; pass++) {
+                for (auto [rw, rh] : kCommonRes) {
+                    int64_t frameBytes2 = (int64_t)rw * rh * 3;  // = W*H*3/2 × 2，避免浮点
+                    bool match = (pass == 0) ? (fileSize * 2 == frameBytes2)
+                                             : (frameBytes2 > 0 && (fileSize * 2) % frameBytes2 == 0);
+                    if (match) { w = rw; h = rh; break; }
+                }
+            }
+            if (w <= 0 || h <= 0) {
+                w = 1920; h = 1080;
+                LOG_WARN("openImageFile: cannot guess resolution, assuming 1920x1080");
+            }
+        }
+
+        imgFrame = av_frame_alloc();
+        imgFrame->format = isRawNV12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+        imgFrame->width  = w;
+        imgFrame->height = h;
+        av_frame_get_buffer(imgFrame, 0);
+
+        std::ifstream raw(path, std::ios::binary);
+        if (!raw.is_open()) {
+            av_frame_free(&imgFrame);
+            LOG_ERROR("openImageFile: cannot read " + path);
+            return false;
+        }
+        // 按行写入，避免读入 linesize 的对齐填充字节
+        if (!isRawNV12) {
+            // I420: Y + U + V
+            for (int i = 0; i < h;     i++) raw.read((char*)imgFrame->data[0] + i * imgFrame->linesize[0], w);
+            for (int i = 0; i < h / 2; i++) raw.read((char*)imgFrame->data[1] + i * imgFrame->linesize[1], w / 2);
+            for (int i = 0; i < h / 2; i++) raw.read((char*)imgFrame->data[2] + i * imgFrame->linesize[2], w / 2);
+        } else {
+            // NV12: Y + UV（UV 每行宽度与 Y 相同）
+            for (int i = 0; i < h;     i++) raw.read((char*)imgFrame->data[0] + i * imgFrame->linesize[0], w);
+            for (int i = 0; i < h / 2; i++) raw.read((char*)imgFrame->data[1] + i * imgFrame->linesize[1], w);
+        }
+    } else {
+        // ── JPEG / PNG：FFmpeg image2 解复用器 + 解码器 ──
+        AVFormatContext* fmt = nullptr;
+        if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
+            LOG_ERROR("openImageFile: avformat_open_input failed: " + path);
+            return false;
+        }
+        avformat_find_stream_info(fmt, nullptr);
+
+        int vidIdx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (vidIdx < 0) {
+            avformat_close_input(&fmt);
+            LOG_ERROR("openImageFile: no video stream in " + path);
+            return false;
+        }
+
+        const AVCodec* codec = avcodec_find_decoder(fmt->streams[vidIdx]->codecpar->codec_id);
+        AVCodecContext* ctx = avcodec_alloc_context3(codec);
+        avcodec_parameters_to_context(ctx, fmt->streams[vidIdx]->codecpar);
+        if (avcodec_open2(ctx, codec, nullptr) < 0) {
+            avcodec_free_context(&ctx);
+            avformat_close_input(&fmt);
+            LOG_ERROR("openImageFile: avcodec_open2 failed");
+            return false;
+        }
+
+        AVPacket* pkt = av_packet_alloc();
+        AVFrame* raw = av_frame_alloc();
+        bool decoded = false;
+        while (av_read_frame(fmt, pkt) >= 0 && !decoded) {
+            if (pkt->stream_index == vidIdx &&
+                avcodec_send_packet(ctx, pkt) == 0 &&
+                avcodec_receive_frame(ctx, raw) == 0) {
+                decoded = true;
+            }
+            av_packet_unref(pkt);
+        }
+        av_packet_free(&pkt);
+        avcodec_free_context(&ctx);
+        avformat_close_input(&fmt);
+
+        if (!decoded) {
+            av_frame_free(&raw);
+            LOG_ERROR("openImageFile: decode failed: " + path);
+            return false;
+        }
+
+        // YUV420P / YUVJ420P / NV12：直接使用（renderer 按 avFrame->format 和 color_range 正确渲染）
+        // 其他格式（如 PNG → RGB24）：转换为 YUV420P
+        AVPixelFormat srcFmt = (AVPixelFormat)raw->format;
+        if (srcFmt == AV_PIX_FMT_YUV420P || srcFmt == AV_PIX_FMT_YUVJ420P ||
+            srcFmt == AV_PIX_FMT_NV12) {
+            imgFrame = raw;  // 直接移交，color_range 会被 renderVideoFrame 正确读取
+        } else {
+            SwsContext* sws = sws_getContext(
+                raw->width, raw->height, srcFmt,
+                raw->width, raw->height, AV_PIX_FMT_YUV420P,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!sws) {
+                av_frame_free(&raw);
+                LOG_ERROR("openImageFile: sws_getContext failed");
+                return false;
+            }
+            imgFrame = av_frame_alloc();
+            imgFrame->format = AV_PIX_FMT_YUV420P;
+            imgFrame->width  = raw->width;
+            imgFrame->height = raw->height;
+            av_frame_get_buffer(imgFrame, 0);
+            sws_scale(sws, raw->data, raw->linesize, 0, raw->height,
+                      imgFrame->data, imgFrame->linesize);
+            sws_freeContext(sws);
+            av_frame_free(&raw);
+        }
+    }
+
+    // ── 初始化渲染器（window + GLRenderer）──
+    videoWidth_  = imgFrame->width;
+    videoHeight_ = imgFrame->height;
+
+    if (!initWindowAndRenderer()) {
+        av_frame_free(&imgFrame);
+        LOG_ERROR("openImageFile: initWindowAndRenderer failed");
+        return false;
+    }
+
+    // 图片无音频，使用外部时钟
+    clockController_->avSync()->setClockType(ClockType::EXTERNAL_CLOCK);
+
+    // 创建视频帧队列（大小 2，keep-last 让暂停后继续复用 GPU 纹理）
+    queueManager_->videoFrameQueue() = std::make_unique<FrameQueue>(2, /*keepLast=*/true);
+    queueManager_->videoFrameQueue()->start();
+
+    // 将解码帧注入队列槽位（reference 增持引用计数，imgFrame 释放后槽内数据仍有效）
+    Frame* slot = queueManager_->videoFrameQueue()->peekWritable();
+    if (!slot) {
+        av_frame_free(&imgFrame);
+        LOG_ERROR("openImageFile: peekWritable failed");
+        return false;
+    }
+    slot->reference(imgFrame);
+    slot->setPTS(0.0);
+    slot->setDuration(0.0);
+    slot->setType(FrameType::VIDEO);
+    queueManager_->videoFrameQueue()->push();
+    av_frame_free(&imgFrame);
+
+    // 设置标志：图片模式无 Worker 线程，EOF 判断需跳过
+    isImageMode_    = true;
+    filePath_       = path;
+    hasVideoStream_ = true;
+    hasAudioStream_ = false;
+    audioOnly_      = false;
+
+    setState(PlayerState::STOPPED);
+    LOG_INFO("Image loaded: " + path + " (" +
+             std::to_string(videoWidth_) + "x" + std::to_string(videoHeight_) + ")");
+    return true;
 }
 
 } // namespace FluxPlayer
