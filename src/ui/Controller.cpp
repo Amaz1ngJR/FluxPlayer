@@ -71,9 +71,12 @@ Controller::Controller(Player& player, Window& window)
     , videoFps_(0.0)
     , duration_(0.0)
     , videoCodec_("")
+    , videoProfile_("")
     , audioCodec_("")
+    , audioProfile_("")
     , audioSampleRate_(0)
     , audioChannels_(0)
+    , channelLayout_("")
     , webUploader_("")
     , webPlatform_("")
     , webViewCount_(-1)
@@ -320,17 +323,21 @@ void Controller::render() {
 
 void Controller::setMediaInfo(const std::string& filename,
                                int width, int height, double duration, double videoFps,
-                               const std::string& videoCodec, const std::string& audioCodec,
-                               int audioSampleRate, int audioChannels) {
+                               const std::string& videoCodec, const std::string& videoProfile,
+                               const std::string& audioCodec, const std::string& audioProfile,
+                               int audioSampleRate, int audioChannels, const std::string& channelLayout) {
     filename_ = filename;
     videoWidth_ = width;
     videoHeight_ = height;
     duration_ = duration;
     videoFps_ = videoFps;
     videoCodec_ = videoCodec;
+    videoProfile_ = videoProfile;
     audioCodec_ = audioCodec;
+    audioProfile_ = audioProfile;
     audioSampleRate_ = audioSampleRate;
     audioChannels_ = audioChannels;
+    channelLayout_ = channelLayout;
     LOG_INFO("Controller: Media info set - " + filename);
 }
 
@@ -984,19 +991,46 @@ void Controller::renderMediaInfo() {
     ImGui::TextUnformatted("VIDEO:");
     ImGui::Indent();
     ImGui::Text("Resolution : %dx%d", videoWidth_, videoHeight_);
-    ImGui::Text("Codec      : %s", videoCodec_.empty() ? "Unknown" : videoCodec_.c_str());
+
+    // 显示编解码器和 Profile
+    if (!videoCodec_.empty()) {
+        if (!videoProfile_.empty()) {
+            ImGui::Text("Codec      : %s (%s)", videoCodec_.c_str(), videoProfile_.c_str());
+        } else {
+            ImGui::Text("Codec      : %s", videoCodec_.c_str());
+        }
+    } else {
+        ImGui::TextUnformatted("Codec      : Unknown");
+    }
+
     if (videoFps_ > 0) ImGui::Text("FPS        : %.2f", videoFps_);
     ImGui::Unindent();
     ImGui::Separator();
 
     ImGui::TextUnformatted("AUDIO:");
     ImGui::Indent();
-    ImGui::Text("Codec      : %s", audioCodec_.empty() ? "Unknown" : audioCodec_.c_str());
+
+    // 显示音频编解码器和 Profile（重点：AAC-LC / HE-AAC 等）
+    if (!audioCodec_.empty()) {
+        if (!audioProfile_.empty()) {
+            ImGui::Text("Codec      : %s (%s)", audioCodec_.c_str(), audioProfile_.c_str());
+        } else {
+            ImGui::Text("Codec      : %s", audioCodec_.c_str());
+        }
+    } else {
+        ImGui::TextUnformatted("Codec      : Unknown");
+    }
+
     if (audioSampleRate_ > 0) ImGui::Text("Sample Rate: %d Hz", audioSampleRate_);
     else ImGui::TextUnformatted("Sample Rate: Unknown");
+
     if (audioChannels_ > 0) {
-        const char* ch = audioChannels_ == 1 ? "Mono" : audioChannels_ == 2 ? "Stereo" : "Multi";
-        ImGui::Text("Channels   : %s", ch);
+        if (!channelLayout_.empty()) {
+            ImGui::Text("Channels   : %d (%s)", audioChannels_, channelLayout_.c_str());
+        } else {
+            const char* ch = audioChannels_ == 1 ? "Mono" : audioChannels_ == 2 ? "Stereo" : "Multi";
+            ImGui::Text("Channels   : %d (%s)", audioChannels_, ch);
+        }
     } else {
         ImGui::TextUnformatted("Channels   : Unknown");
     }

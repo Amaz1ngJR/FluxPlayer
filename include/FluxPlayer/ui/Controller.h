@@ -53,8 +53,9 @@ public:
 
     void setMediaInfo(const std::string& filename,
                       int width, int height, double duration, double videoFps,
-                      const std::string& videoCodec, const std::string& audioCodec,
-                      int audioSampleRate, int audioChannels);
+                      const std::string& videoCodec, const std::string& videoProfile,
+                      const std::string& audioCodec, const std::string& audioProfile,
+                      int audioSampleRate, int audioChannels, const std::string& channelLayout);
 
     /**
      * @brief 设置网页视频扩展信息（上传者、平台、播放量、上传日期）
@@ -163,9 +164,12 @@ private:
     double videoFps_;
     double duration_;
     std::string videoCodec_;
+    std::string videoProfile_;      ///< 视频 Profile（如 "High", "Main"）
     std::string audioCodec_;
+    std::string audioProfile_;      ///< 音频 Profile（如 "LC", "HE-AAC"）
     int audioSampleRate_;
     int audioChannels_;
+    std::string channelLayout_;     ///< 声道布局（如 "stereo", "5.1"）
 
     // 网页视频扩展信息
     std::string webUploader_;       ///< 上传者

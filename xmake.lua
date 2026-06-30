@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.7.1"
+local version = "0.7.2"
 
 -- 项目基本信息
 set_project("FluxPlayer")

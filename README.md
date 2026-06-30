@@ -101,43 +101,69 @@ FluxPlayer/
 UI 线程不直接修改播放器内部状态，所有操作（Seek、Pause、Stop 等）封装成命令投入 `CommandQueue`。控制线程（即主线程）在每帧渲染前调用 `pumpCommands()` 取出命令串行执行，再分发给各组件处理，从而彻底消除多线程并发修改状态的问题。
 
 ```plantuml
-@startuml 控制流：命令队列
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Microsoft YaHei,SimHei,Arial"
+skinparam componentFontSize 14
+skinparam noteFontSize 12
+skinparam nodesep 60
+skinparam ranksep 80
 
-left to right direction
-skinparam defaultFontSize 12
-skinparam component {
-    BackgroundColor #EEF5FF
-    BorderColor #4A90D9
+<style>
+component {
+    Padding 10
+    Margin 5
+}
+</style>
+
+package "UI 线程" as ui_thread #FFFDE7 {
+    component "  Controller  " as ctrl
 }
 
-rectangle "UI 线程" #FFFDE7 {
-    component "Controller" as ctrl
+queue "  CommandQueue  " as cmdq #FFE0B2
+
+package "控制线程" as ctrl_thread #E3F2FD {
+    component "  pumpCommands()  " as pump
+    component "  StateManager  " as state
+    component "  ClockController  " as clock
+    component "  QueueManager  " as qmgr
+    component "  RecordingService  " as rec
+    component "  GLRenderer  " as gl
 }
 
-rectangle "控制线程" #E3F2FD {
-    component "CommandQueue" as cmdq
-    component "pumpCommands()" as pump
-    cmdq --> pump : drain()
-}
+ctrl -down-> cmdq : "  post(cmd)  "
+cmdq -down-> pump : "  drain()  "
 
-component "StateManager" as state
-component "ClockController" as clock
-component "QueueManager" as qmgr
-component "RecordingService" as rec
-component "GLRenderer" as gl
+pump -down-> state
+pump -down-> clock
+pump -down-> qmgr
+pump -down-> rec
+pump -down-> gl
 
-ctrl --> cmdq : post (非阻塞)
+note right of ctrl
+  用户交互
+  ————————
+  拖动进度条
+  点击按钮
+  快捷键
+end note
 
-pump --> state
-pump --> clock
-pump --> qmgr
-pump --> rec
-pump --> gl : 渲染
+note right of cmdq
+  命令类型
+  ————————
+  SeekCommand
+  PauseCommand
+  ResumeCommand
+  StopCommand
+  SetSpeedCommand
+  SwitchQualityCommand
+end note
 
-note top of cmdq
-  Seek / Pause / Stop
-  SetSpeed / SwitchQuality
-  StartRecording
+note bottom of pump
+  串行执行保证
+  ————————————————
+  每帧渲染前统一处理命令
+  消除多线程竞态条件
 end note
 
 @enduml
@@ -148,52 +174,96 @@ end note
 媒体数据经由三条独立线程流转：**DemuxWorker** 从文件/网络读包分发到两条 PacketQueue；**DecodeWorker(Video/Audio)** 各自取包解码后放入 FrameQueue；主线程从 videoFrameQueue 取帧渲染，平台音频回调从 audioFrameQueue 取帧播放。视频和音频队列完全独立——视频队列堵住只会阻塞视频解码线程，音频可以持续产帧，从根本上消除了「视频卡顿导致音频饿死」的死锁。`serial` 序号用于 seek：每次 seek 时递增 serial，decode 线程检测到 serial 变化即丢弃旧包，画面立刻切换到新位置。
 
 ```plantuml
-@startuml 数据流：三线程解耦
+@startuml
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Arial"
+skinparam ArrowColor #333333
+skinparam ArrowThickness 2
 
-skinparam defaultFontSize 12
-skinparam component {
-    BackgroundColor #E8F4F8
-    BorderColor #2C3E50
+storage "文件/网络流" as FileSource #LightBlue
+
+package "线程1: DemuxWorker" #FFF3E0 {
+    component [Demuxer\n解复用器] as dmx
+    note right of dmx
+      职责：
+      • av_read_frame()
+      • 音视频流分离
+      • 录制无锁写入
+    end note
 }
 
-component "Demuxer" as dmx
+queue "PacketQueue\n(压缩视频包)" as vpq #E8EAF6
+queue "PacketQueue\n(压缩音频包)" as apq #E8EAF6
 
-component "DemuxWorker" as dw #FFF3E0
-component "DecodeWorker(Video)" as vw #FFF3E0
-component "DecodeWorker(Audio)" as aw #FFF3E0
+package "线程2: DecodeWorker (Video)" #E8F5E9 {
+    component [VideoDecoder\n视频解码器] as vdec
+    note right of vdec
+      职责：
+      • avcodec_send_packet()
+      • avcodec_receive_frame()
+      • 硬件加速 (NV12)
+    end note
+}
 
-queue "videoPktQueue" as vpq #F5F5F5
-queue "audioPktQueue" as apq #F5F5F5
-queue "videoFrameQueue" as vfq #F5F5F5
-queue "audioFrameQueue" as afq #F5F5F5
+package "线程3: DecodeWorker (Audio)" #FFF9C4 {
+    component [AudioDecoder\n音频解码器] as adec
+    note right of adec
+      职责：
+      • avcodec_send_packet()
+      • avcodec_receive_frame()
+      • PCM 输出
+    end note
+}
 
-component "GLRenderer" as gl #E8F5E9
-component "AudioOutput" as ao #E8F5E9
+queue "FrameQueue\n(YUV 视频帧)" as vfq #FFECB3
+queue "FrameQueue\n(PCM 音频帧)" as afq #FFECB3
 
-dmx --> dw
-dw --> vpq : put(pkt, serial)
-dw --> apq : put(pkt, serial)
-vpq --> vw : get() blocking
-apq --> aw : get() blocking
-vw --> vfq : 解码入队
-aw --> afq : 解码入队
-vfq --> gl : peekReadable()
-afq --> ao : peekReadable()
+package "主线程: Renderer" #FCE4EC {
+    component [GLRenderer\n渲染器] as gl
+    component [AudioOutput\n音频输出] as ao
+    component [AVSync\n同步器] as sync
+}
+
+actor "显示器\n扬声器" as Output #FF9800
+
+FileSource -down-> dmx
+
+dmx -down-> vpq : put(pkt, serial)
+dmx -down-> apq : put(pkt, serial)
+
+vpq -down-> vdec : get() 阻塞读取
+apq -down-> adec : get() 阻塞读取
+
+vdec -down-> vfq : push(YUV Frame)
+adec -down-> afq : push(PCM Frame)
+
+vfq -down-> gl : peekRef() 独立引用
+afq -down-> ao : peekRef() 独立引用
+
+gl -down-> sync
+ao -down-> sync
+
+sync -down-> Output
 
 note bottom of vpq
-  serial 机制：seek 时 bump serial
-  decode 线程丢弃旧 serial 包
+  **serial 机制**：
+  seek 时递增 serial
+  decode 线程检测到变化
+  立即 flush 解码器
 end note
 
 note bottom of vfq
-  video/audio 队列独立
-  视频队列满只阻塞视频解码
-  音频持续产帧，消除死锁
+  **独立队列消除死锁**：
+  视频队列满 → 仅阻塞视频解码
+  音频队列独立 → 持续产帧
+  消除「视频饿死音频」
 end note
 
-note left of dw
-  录制无锁：
-  writePacket 全归此线程
+note left of dmx
+  **录制无锁**：
+  writePacket() 全归
+  DemuxWorker 线程
+  串行执行
 end note
 
 @enduml

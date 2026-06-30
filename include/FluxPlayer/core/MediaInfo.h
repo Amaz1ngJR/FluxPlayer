@@ -14,22 +14,32 @@ namespace FluxPlayer {
  */
 struct StreamInfo {
     int index;                  // 流索引
-    std::string codecName;      // 编解码器名称
+    std::string codecName;      // 编解码器名称（如 "aac", "h264"）
     std::string codecLongName;  // 编解码器详细名称
+    std::string profile;        // 编解码器 profile（如 "LC", "HE-AAC", "Main"）
+    std::string level;          // 编解码器 level（如 "4.0", "5.1"）
     int64_t bitrate;           // 比特率
     double duration;           // 时长（秒）
+    std::string language;      // 语言（如 "eng", "chi"）
+    std::string title;         // 流标题（来自元数据）
 
     // 视频流特有信息
     int width;                 // 宽度
     int height;                // 高度
     double fps;                // 帧率
-    std::string pixelFormat;   // 像素格式
+    std::string pixelFormat;   // 像素格式（如 "yuv420p", "nv12"）
+    std::string colorSpace;    // 色彩空间（如 "bt709", "bt601"）
+    std::string colorRange;    // 色彩范围（"tv", "pc"）
+    int64_t numFrames;        // 总帧数
 
     // 音频流特有信息
-    int sampleRate;            // 采样率
+    int sampleRate;            // 采样率（Hz）
     int channels;              // 声道数
-    std::string sampleFormat;  // 采样格式
+    std::string channelLayout; // 声道布局（如 "stereo", "5.1"）
+    std::string sampleFormat;  // 采样格式（如 "s16", "fltp"）
+    int bitsPerSample;        // 位深度
 };
+
 
 /**
  * MediaInfo 类 - 媒体信息管理

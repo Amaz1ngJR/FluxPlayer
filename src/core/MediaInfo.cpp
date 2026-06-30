@@ -7,6 +7,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/channel_layout.h>
+#include <libavutil/opt.h>
 #include <libavformat/avio.h>
 }
 
@@ -150,12 +152,55 @@ std::string MediaInfo::toString() const {
         oss << "Video Streams: " << videoStreamCount_ << "\n";
         for (int i = 0; i < videoStreamCount_; i++) {
             StreamInfo info = getVideoStreamInfo(i);
-            oss << "  Stream #" << i << ":\n";
-            oss << "    Codec: " << info.codecName << " (" << info.codecLongName << ")\n";
+            oss << "  Stream #" << info.index << ":\n";
+
+            // 编解码器信息
+            oss << "    Codec: " << info.codecName;
+            if (!info.profile.empty()) {
+                oss << " (" << info.profile << ")";
+            }
+            oss << "\n";
+
+            if (!info.codecLongName.empty()) {
+                oss << "    Codec Long Name: " << info.codecLongName << "\n";
+            }
+
+            if (!info.level.empty()) {
+                oss << "    Level: " << info.level << "\n";
+            }
+
+            // 分辨率和帧率
             oss << "    Resolution: " << info.width << "x" << info.height << "\n";
             oss << "    FPS: " << std::fixed << std::setprecision(2) << info.fps << "\n";
-            oss << "    Pixel Format: " << info.pixelFormat << "\n";
+
+            if (info.numFrames > 0) {
+                oss << "    Total Frames: " << info.numFrames << "\n";
+            }
+
+            // 像素格式和色彩信息
+            if (!info.pixelFormat.empty()) {
+                oss << "    Pixel Format: " << info.pixelFormat << "\n";
+            }
+
+            if (!info.colorSpace.empty()) {
+                oss << "    Color Space: " << info.colorSpace << "\n";
+            }
+
+            if (!info.colorRange.empty()) {
+                oss << "    Color Range: " << info.colorRange << "\n";
+            }
+
+            // 码率
             oss << "    Bitrate: " << formatBitrate(info.bitrate) << "\n";
+
+            // 语言和标题
+            if (!info.language.empty()) {
+                oss << "    Language: " << info.language << "\n";
+            }
+
+            if (!info.title.empty()) {
+                oss << "    Title: " << info.title << "\n";
+            }
         }
         oss << "\n";
     }
@@ -165,14 +210,54 @@ std::string MediaInfo::toString() const {
         oss << "Audio Streams: " << audioStreamCount_ << "\n";
         for (int i = 0; i < audioStreamCount_; i++) {
             StreamInfo info = getAudioStreamInfo(i);
-            oss << "  Stream #" << i << ":\n";
-            oss << "    Codec: " << info.codecName << " (" << info.codecLongName << ")\n";
+            oss << "  Stream #" << info.index << ":\n";
+
+            // 编解码器信息（重点：显示 AAC-LC / HE-AAC 等）
+            oss << "    Codec: " << info.codecName;
+            if (!info.profile.empty()) {
+                oss << " (" << info.profile << ")";
+            }
+            oss << "\n";
+
+            if (!info.codecLongName.empty()) {
+                oss << "    Codec Long Name: " << info.codecLongName << "\n";
+            }
+
+            // 采样率和声道
             oss << "    Sample Rate: " << info.sampleRate << " Hz\n";
-            oss << "    Channels: " << info.channels << "\n";
-            oss << "    Sample Format: " << info.sampleFormat << "\n";
+            oss << "    Channels: " << info.channels;
+            if (!info.channelLayout.empty()) {
+                oss << " (" << info.channelLayout << ")";
+            }
+            oss << "\n";
+
+            // 采样格式和位深度
+            if (!info.sampleFormat.empty()) {
+                oss << "    Sample Format: " << info.sampleFormat << "\n";
+            }
+
+            if (info.bitsPerSample > 0) {
+                oss << "    Bits Per Sample: " << info.bitsPerSample << "\n";
+            }
+
+            // 码率
             oss << "    Bitrate: " << formatBitrate(info.bitrate) << "\n";
+
+            // 语言和标题
+            if (!info.language.empty()) {
+                oss << "    Language: " << info.language << "\n";
+            }
+
+            if (!info.title.empty()) {
+                oss << "    Title: " << info.title << "\n";
+            }
         }
         oss << "\n";
+    }
+
+    // 字幕流信息
+    if (subtitleStreamCount_ > 0) {
+        oss << "Subtitle Streams: " << subtitleStreamCount_ << "\n\n";
     }
 
     // 元数据
@@ -216,9 +301,42 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
 
     info.bitrate = codecParams->bit_rate;
 
+    // Profile 信息（区分 AAC-LC / HE-AAC / H.264 Main/High 等）
+    if (codecParams->profile != FF_PROFILE_UNKNOWN) {
+        const char* profileName = avcodec_profile_name(codecParams->codec_id, codecParams->profile);
+        if (profileName) {
+            info.profile = profileName;
+        } else {
+            info.profile = "Profile " + std::to_string(codecParams->profile);
+        }
+    }
+
+    // Level 信息
+    if (codecParams->level != FF_LEVEL_UNKNOWN) {
+        // Level 通常是整数，需要转换为小数形式（如 41 → "4.1"）
+        if (codecParams->codec_id == AV_CODEC_ID_H264 ||
+            codecParams->codec_id == AV_CODEC_ID_HEVC) {
+            int levelInt = codecParams->level;
+            info.level = std::to_string(levelInt / 10) + "." + std::to_string(levelInt % 10);
+        } else {
+            info.level = std::to_string(codecParams->level);
+        }
+    }
+
     // 计算时长
     if (stream->duration != AV_NOPTS_VALUE) {
         info.duration = stream->duration * av_q2d(stream->time_base);
+    }
+
+    // 流元数据（语言、标题等）
+    AVDictionaryEntry* langTag = av_dict_get(stream->metadata, "language", nullptr, 0);
+    if (langTag) {
+        info.language = langTag->value;
+    }
+
+    AVDictionaryEntry* titleTag = av_dict_get(stream->metadata, "title", nullptr, 0);
+    if (titleTag) {
+        info.title = titleTag->value;
     }
 
     // 视频流特有信息
@@ -233,22 +351,70 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
             info.fps = av_q2d(stream->r_frame_rate);
         }
 
+        // 像素格式
         const char* pixFmtName = av_get_pix_fmt_name(static_cast<AVPixelFormat>(codecParams->format));
         info.pixelFormat = pixFmtName ? pixFmtName : "";
+
+        // 色彩空间
+        if (codecParams->color_space != AVCOL_SPC_UNSPECIFIED) {
+            const char* colorSpaceName = av_color_space_name(codecParams->color_space);
+            if (colorSpaceName) {
+                info.colorSpace = colorSpaceName;
+            }
+        }
+
+        // 色彩范围
+        if (codecParams->color_range == AVCOL_RANGE_JPEG) {
+            info.colorRange = "pc";
+        } else if (codecParams->color_range == AVCOL_RANGE_MPEG) {
+            info.colorRange = "tv";
+        }
+
+        // 总帧数（如果可用）
+        if (stream->nb_frames > 0) {
+            info.numFrames = stream->nb_frames;
+        } else if (info.duration > 0 && info.fps > 0) {
+            // 估算帧数
+            info.numFrames = static_cast<int64_t>(info.duration * info.fps);
+        }
     }
 
     // 音频流特有信息
     if (codecParams->codec_type == AVMEDIA_TYPE_AUDIO) {
         info.sampleRate = codecParams->sample_rate;
-        // FFmpeg 4.x 使用 channels 字段，5.x+ 使用 ch_layout
+
+        // 声道数和布局
 #if LIBAVCODEC_VERSION_MAJOR >= 59
         info.channels = codecParams->ch_layout.nb_channels;
+
+        // 获取声道布局名称
+        char layoutBuf[128];
+        av_channel_layout_describe(&codecParams->ch_layout, layoutBuf, sizeof(layoutBuf));
+        info.channelLayout = layoutBuf;
 #else
         info.channels = codecParams->channels;
+
+        // FFmpeg 4.x 使用旧的 channel_layout API
+        if (codecParams->channel_layout) {
+            char layoutBuf[128];
+            av_get_channel_layout_string(layoutBuf, sizeof(layoutBuf),
+                                        codecParams->channels,
+                                        codecParams->channel_layout);
+            info.channelLayout = layoutBuf;
+        }
 #endif
 
+        // 采样格式
         const char* sampleFmtName = av_get_sample_fmt_name(static_cast<AVSampleFormat>(codecParams->format));
         info.sampleFormat = sampleFmtName ? sampleFmtName : "";
+
+        // 位深度
+        info.bitsPerSample = codecParams->bits_per_coded_sample;
+        if (info.bitsPerSample == 0) {
+            // 从采样格式推断位深度
+            AVSampleFormat sampleFmt = static_cast<AVSampleFormat>(codecParams->format);
+            info.bitsPerSample = av_get_bytes_per_sample(sampleFmt) * 8;
+        }
     }
 
     return info;

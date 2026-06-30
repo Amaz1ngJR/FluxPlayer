@@ -175,9 +175,12 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
         mediaInfo.getDuration(),
         videoInfo.fps,
         videoInfo.codecName,
+        videoInfo.profile,
         audioInfo.codecName,
+        audioInfo.profile,
         audioInfo.sampleRate,
-        audioInfo.channels);
+        audioInfo.channels,
+        audioInfo.channelLayout);
 
     // 网页视频的 qualities / uploader / platform 等字段由 Controller::render 的
     // 「lazy pull」分支按需从 player.getLastExtractedInfo() 拉取（首帧命中），
@@ -255,8 +258,10 @@ static std::string playMediaCli(const std::string& mediaPath) {
         mediaPath,
         videoInfo.width, videoInfo.height,
         mediaInfo.getDuration(), videoInfo.fps,
-        videoInfo.codecName, audioInfo.codecName,
-        audioInfo.sampleRate, audioInfo.channels);
+        videoInfo.codecName, videoInfo.profile,
+        audioInfo.codecName, audioInfo.profile,
+        audioInfo.sampleRate, audioInfo.channels,
+        audioInfo.channelLayout);
 
     player.setController(controller.get());
     player.setRenderCallback([&controller]() {
