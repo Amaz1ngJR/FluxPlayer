@@ -5,12 +5,19 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.7.2"
+local version = "0.7.3"
 
 -- 项目基本信息
 set_project("FluxPlayer")
 set_version(version)
 set_languages("cxx17")  -- 要求 C++17 标准
+
+-- 配置阶段第一次加载 xmake.lua 时目标平台可能尚未写入缓存，因此这里按稳定的
+-- Windows 主机条件设置默认 buildir，确保首次执行 xmake f/xmake 就使用 build/windows。
+-- 用户仍可通过 xmake f -o <目录> 临时覆盖该默认值。
+if is_host("windows") then
+    set_config("buildir", "build/windows")
+end
 
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
 if is_plat("windows") then
@@ -166,18 +173,23 @@ target("imgui_local")
 target("FluxPlayer")
     set_kind("binary")  -- 编译为可执行文件
 
+    -- CMake 和 xmake 共用最终运行目录。后执行的构建可以覆盖 FluxPlayer.exe，
+    -- 但两者的对象文件与缓存分别留在 build/cmake、build/windows，不会互相污染。
+    set_targetdir("build/bin")
+    set_rundir("build/bin")
+
     -- src/*.cpp 匹配根目录下的 main.cpp
     -- src/**/*.cpp 匹配所有子目录下的 .cpp 文件
     add_files("src/*.cpp")
     add_files("src/**/*.cpp")
 
-    -- 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)
+    -- 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)。
+    -- Linux 仍需保留 WebLogin_win.cpp：未定义 FLUXPLAYER_HAVE_WEBVIEW2 时，该文件会
+    -- 编译出 Unsupported 占位实现，与 CMake 的源文件选择保持一致，避免 Linux 链接缺符号。
     if is_plat("macosx") then
         -- Objective-C++ 源文件，禁用 ARC 与项目内其他原生代码风格一致
         add_files("src/utils/WebLogin_mac.mm", {mxxflags = "-fno-objc-arc"})
-    end
-    -- 注意：WebLogin_win.cpp 已被 src/**/*.cpp 通配匹配；非 Windows 平台需排除
-    if not is_plat("windows") then
+        -- macOS 已有原生实现，不能再编译 WebLogin_win.cpp 中的占位实现，否则符号重复。
         remove_files("src/utils/WebLogin_win.cpp")
     end
 
@@ -237,7 +249,14 @@ target("FluxPlayer")
         -- add_syslinks：链接系统库（等价于 -l xxx 或 xxx.lib）
         -- uuid：MinGW 下 IID_IUnknown 等 COM IID 常量定义在 libuuid.a 中，
         -- WebView2 回调对象 QueryInterface 用到 IID_IUnknown 必须链上
-        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32", "d3d11", "dxgi", "uuid")
+        -- shell32 对应 Config 中的 SHGetFolderPath；uuid 提供 IID_IUnknown 等 COM IID。
+        -- 两个库均在 CMake 主目标中显式链接，避免依赖第三方 target 的传递链接顺序。
+        add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32",
+                     "d3d11", "dxgi", "shell32", "uuid")
+
+        -- CMake 在 Windows 使用 add_executable(... WIN32)，MinGW 会传入 -mwindows。
+        -- xmake 也显式使用 GUI 子系统，避免双击 xmake 产物时额外弹出控制台窗口。
+        add_ldflags("-mwindows", {force = true})
 
         -- WebView2 SDK 检测：third_party/webview2/include/WebView2.h 存在时启用内置登录
         -- 不需要 .lib：运行时通过 LoadLibraryW 动态加载 WebView2Loader.dll；
@@ -302,6 +321,11 @@ target("FluxPlayer")
         os.cp("assets/fonts", path.join(target:targetdir(), "fonts"))
         -- source/ 全拷贝（开发期依赖，含字幕测试、封面兜底图）
         os.cp("source", path.join(target:targetdir(), "source"))
+        -- 发布运行时按 Config::getResourcePath() 从 resources/ 读取纯音频兜底封面。
+        -- CMake install 使用相同布局；保留上面的 source/ 仅用于开发期资源热加载。
+        local resources_dir = path.join(target:targetdir(), "resources")
+        os.mkdir(resources_dir)
+        cp_if_changed("source/pic2.png", resources_dir)
         -- 皮肤包内置回退：与 source/UI/skins 解耦，发布版从 resources/skins 加载
         -- 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
         -- 先清空目标目录：os.cp 不删除已存在文件，否则旧构建残留的 mockup 会滞留
@@ -325,7 +349,13 @@ target("FluxPlayer")
             if os.isfile(webview2_loader) then
                 cp_if_changed(webview2_loader, target:targetdir())
             end
-            -- MinGW 运行时 DLL：从编译器同目录拷贝，方便直接从 build 目录启动调试
+            -- 与 CMake install 对齐：发布产物必须把 yt-dlp 放在 exe 同级目录，
+            -- 这样移动整个构建目录后也不会依赖源码树中的绝对路径。
+            local ytdlp = path.join(os.projectdir(), "third_party", "yt-dlp", "yt-dlp.exe")
+            if os.isfile(ytdlp) then
+                cp_if_changed(ytdlp, target:targetdir())
+            end
+            -- MinGW 运行时 DLL：从编译器同目录拷贝，方便直接从 build/bin 启动调试
             -- （与 CMakeLists.txt 的 POST_BUILD 逻辑保持一致）
             local mingw_dlls = {"libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll"}
             local mingw_bin = path.directory(target:tool("cxx"))
@@ -340,6 +370,10 @@ target("FluxPlayer")
             local ffmpeg_lib = path.join(os.projectdir(), "third_party", "ffmpeg-macos", "lib")
             if os.isdir(ffmpeg_lib) then
                 os.cp(path.join(ffmpeg_lib, "*.dylib"), target:targetdir())
+            end
+            local ytdlp = path.join(os.projectdir(), "third_party", "yt-dlp", "yt-dlp_macos")
+            if os.isfile(ytdlp) then
+                cp_if_changed(ytdlp, target:targetdir())
             end
         end
     end)

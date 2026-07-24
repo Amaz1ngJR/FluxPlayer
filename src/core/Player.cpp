@@ -35,6 +35,7 @@
 #include "FluxPlayer/utils/DashMerger.h"
 
 #include <GLFW/glfw3.h>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -52,6 +53,14 @@ extern "C" {
 namespace FluxPlayer {
 
 namespace {
+
+// 变速切换时允许的音频追赶误差。
+// 这个值需要大于常见音频回调/重采样造成的几毫秒抖动，避免频繁进入追赶；
+// 又需要远小于会造成可见卡顿的秒级时钟差，保证 AClock 不会长期落后于 VClock。
+constexpr double kAudioCatchupToleranceSec = 0.05;
+// 单次音频设备回调内最多跳过的旧音频量。追赶旧音频不能无限循环，
+// 否则设备线程迟迟不提交新 buffer，主时钟反而会停住。
+constexpr double kMaxAudioCatchupDiscardSec = 0.25;
 
 /**
  * 用 FFmpeg 将任意格式图片数据解码为 RGBA 像素
@@ -1411,6 +1420,18 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     bool hasValidFrame = false;
     size_t queueDepth = 0;
 
+    // 本次音频回调的追赶目标。只有变速切换或单调性兜底明确设置
+    // audioCatchupTargetPTS_ 后才启用；普通播放不能拿当前 AClock 当目标主动丢帧。
+    // 音频回调本身就是推进 AClock 的来源，若每次都追当前 AClock，在回调延迟或
+    // 队列补充较快时可能在单次回调里连续丢帧很久，导致音频设备没有新 buffer。
+    double audioSyncTarget = audioCatchupTargetPTS_.load();
+    if (audioSyncTarget < 0.0) {
+        audioSyncTarget = -1.0;
+    }
+    const size_t maxCatchupDiscardBytes = static_cast<size_t>(
+        kMaxAudioCatchupDiscardSec * audioSampleRate_ * frameBytes);
+    size_t catchupDiscardedBytes = 0;
+
     // 从队列读取 inputNeeded 字节。leasedAudio 复用一份消费者持有的 Frame：
     // peekRef 在锁内 av_frame_ref 出独立引用，回调读 data[0] 期间即便 audio decode
     // 线程 seek flush 队列，这份引用的数据仍有效，不会读到被 unref 的 buffer。
@@ -1446,8 +1467,47 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
             continue;
         }
 
+        size_t remainingFrameData = frameDataSize - frameOffset;
+        double framePTS = leasedAudio.getPTS();
+
+        // 音频队列中可能存在旧速率下缓存的旧帧。例如 2x 播放时视频已显示到 842s，
+        // 切回 1x 后音频队列队头仍可能是 833s。若直接播放这些旧帧，AClock 会被拉回
+        // 833s，视频线程因为以音频为主时钟而停止消费 842s 之后的视频帧。
+        //
+        // 这里在音频回调里做“细粒度追赶”：如果当前帧起点早于目标，就按采样数跳过
+        // 已经过时的前半段；若整帧都早于目标，则直接释放整帧。这样即使解码线程还没
+        // 来得及补新帧，音频输出线程也不会慢慢播放一长段旧音频。
+        //
+        // 追赶量必须有上限。音频设备线程需要按时返回并提交 buffer；若单次回调无限
+        // 丢旧帧，WinMM/AudioQueue 得不到新 buffer，AClock 也不会继续更新，画面会卡住。
+        if (audioSyncTarget >= 0.0 && std::isfinite(framePTS)) {
+            double frameStartPTS = framePTS +
+                static_cast<double>(frameOffset) / frameBytes / audioSampleRate_;
+            double lag = audioSyncTarget - frameStartPTS;
+            if (lag > kAudioCatchupToleranceSec) {
+                size_t samplesToDrop = static_cast<size_t>(lag * audioSampleRate_);
+                size_t bytesToDrop = std::min(remainingFrameData, samplesToDrop * static_cast<size_t>(frameBytes));
+                bytesToDrop -= bytesToDrop % static_cast<size_t>(frameBytes);
+
+                if (bytesToDrop >= remainingFrameData) {
+                    catchupDiscardedBytes += remainingFrameData;
+                    queueManager_->audioFrameQueue()->next();
+                    pendingAudioOffset_.store(0);
+                    if (catchupDiscardedBytes >= maxCatchupDiscardBytes) {
+                        break;
+                    }
+                    continue;
+                }
+                if (bytesToDrop > 0) {
+                    catchupDiscardedBytes += bytesToDrop;
+                    frameOffset += bytesToDrop;
+                    remainingFrameData -= bytesToDrop;
+                    pendingAudioOffset_.store(frameOffset);
+                }
+            }
+        }
+
         if (!hasValidFrame) {
-            double framePTS = leasedAudio.getPTS();
             if (frameOffset > 0) {
                 framePTS += static_cast<double>(frameOffset) / frameBytes / audioSampleRate_;
             }
@@ -1455,7 +1515,6 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
             hasValidFrame = true;
         }
 
-        size_t remainingFrameData = frameDataSize - frameOffset;
         size_t bytesToCopy = std::min(remainingFrameData, inputNeeded - inputFilled);
 
         std::memcpy(inputBuf.data() + inputFilled, avFrame->data[0] + frameOffset, bytesToCopy);
@@ -1488,10 +1547,24 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     audioQueueDepth_.store(queueDepth);
 
     if (hasValidFrame && clockController_ && audioSampleRate_ > 0) {
-        double deviceDuration = static_cast<double>(outSamples) / audioSampleRate_;
-        double currentAudioPTS = std::abs(rate - 1.0) < 0.01
-            ? firstFramePTS + deviceDuration
-            : clockController_->avSync()->getAudioClock() + deviceDuration * rate;
+        double consumedMediaDuration = static_cast<double>(inSamples) / audioSampleRate_;
+        double currentAudioPTS = firstFramePTS + consumedMediaDuration;
+        double previousAudioPTS = clockController_->avSync()->getAudioClock();
+
+        // 音频帧 PTS 是变速切换时最稳定的媒体时间锚点。
+        // 旧的非 1x 路径会在已按 playbackRate 插值过的时钟上继续累加时长，
+        // 导致 AClock 先漂到过前，再在切回 1x 时从队列帧 PTS 跳回去。
+        // 这里仍保留单调性兜底：一旦发现即将倒退，就把追赶目标推进到当前 AClock，
+        // 并保持本次时钟不变，后续回调/解码线程会主动丢弃落后的音频数据。
+        if (currentAudioPTS + kAudioCatchupToleranceSec < previousAudioPTS) {
+            audioCatchupTargetPTS_.store(previousAudioPTS);
+            currentAudioPTS = previousAudioPTS;
+        }
+        if (audioSyncTarget >= 0.0 &&
+            currentAudioPTS >= audioSyncTarget - kAudioCatchupToleranceSec) {
+            audioCatchupTargetPTS_.store(-1.0);
+        }
+
         clockController_->avSync()->updateAudioClock(currentAudioPTS);
     }
 
@@ -1811,9 +1884,34 @@ void Player::stopInternal() {
 }
 
 void Player::setPlaybackSpeedInternal(double speed) {
-    playbackRate_.store(speed);
+    double oldSpeed = playbackRate_.exchange(speed);
+    double catchupTarget = -1.0;
     if (clockController_) {
+        double audioClock = clockController_->avSync()->getAudioClock();
+        double videoClock = clockController_->avSync()->getVideoClock();
+        // 切速瞬间用较新的那个时钟作为音频追赶目标。
+        // 不能只用 AClock：2x 时视频可能已经显示到更靠前的位置；
+        // 也不能只用 VClock：纯音频/视频暂未推进时 AClock 才是可靠位置。
+        catchupTarget = std::max(audioClock, videoClock);
         clockController_->avSync()->setPlaybackRate(speed);
+    }
+
+    if (std::abs(oldSpeed - speed) > 0.001 && catchupTarget >= 0.0) {
+        audioCatchupTargetPTS_.store(catchupTarget);
+        pendingAudioOffset_.store(0);
+        if (clockController_) {
+            // 若切速时 VClock 比 AClock 新，先把 AClock 校准到追赶目标。
+            // 后续音频解码/回调会丢掉目标之前的旧音频，避免主时钟回退。
+            clockController_->avSync()->updateAudioClock(catchupTarget);
+        }
+        if (queueManager_ && queueManager_->audioFrameQueue()) {
+            // 丢弃已经转换好的旧音频帧。packet 队列不 flush，因为它仍然包含
+            // 连续媒体数据；后续 DecodeWorker 会按 audioCatchupTargetPTS_
+            // 在入队前快速丢弃目标 PTS 之前的音频帧。
+            queueManager_->audioFrameQueue()->flush();
+        }
+        LOG_INFO("Audio catch-up target set to " + std::to_string(catchupTarget) +
+                 "s for speed switch");
     }
 
     // 释放旧的重采样器（如有）

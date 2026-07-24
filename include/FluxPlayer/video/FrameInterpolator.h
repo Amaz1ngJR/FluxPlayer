@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace FluxPlayer {
 
 class Frame;  // 前向声明，避免暴露 FFmpeg 类型

@@ -11,12 +11,23 @@
 #include "FluxPlayer/decoder/AudioDecoder.h"
 #include "FluxPlayer/utils/Logger.h"
 
+#include <cmath>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 }
 
 namespace FluxPlayer {
+
+namespace {
+
+// 与音频回调侧保持一致的追赶容差。
+// 解码线程按帧粒度丢弃旧音频，回调线程按采样粒度跳过旧音频；
+// 两边使用同一个阈值，避免一个线程认为已追上、另一个线程继续丢帧。
+constexpr double kAudioCatchupToleranceSec = 0.05;
+
+} // namespace
 
 DecodeWorker::DecodeWorker(Player* player, StreamKind kind)
     : player_(player), kind_(kind) {}
@@ -383,12 +394,36 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
     double audioPTS = rawFrame.getPTS();
     AVFrame* avFrame = rawFrame.getAVFrame();
 
-    // 丢弃 seek/flush 之前的陈旧帧（与 enqueueVideoFrame 同理）：倒退 seek 时旧位置音频帧
-    // （PTS 远大于新目标）会触发下面的「far from target」提前重校准，把时钟拉回旧位置、
-    // 解冻精确跳转，导致进度条跳回。serial 不一致即为陈旧帧，直接丢弃。
+    // 必须先排除 seek/flush 之前的陈旧帧，再用 PTS 判断是否完成变速追赶。
+    // 陈旧帧可能来自完全不同的播放位置；如果它的 PTS 恰好大于追赶目标，
+    // 提前参与判断会错误清除 audioCatchupTargetPTS_，让后续真正落后的音频重新入队。
     if (audioPktQueue_ && serial != audioPktQueue_->serial()) {
         rawFrame.unreference();
         return true;
+    }
+
+    // 变速切换后的粗粒度追赶。
+    // audio frame 队列已在切速时 flush，但 packet 队列里还可能有旧速率下
+    // 预读出来的压缩包；这些包解码后 PTS 仍早于当前播放位置。
+    // 如果把它们继续转成 S16 并入队，音频回调会被迫一帧帧跳过，日志和延迟都会变差。
+    // 因此这里在入队前直接丢弃目标 PTS 之前的完整音频帧，让解码线程快速追到当前位置。
+    double catchupTarget = player_->audioCatchupTargetPTS_.load();
+    if (catchupTarget >= 0.0 && std::isfinite(audioPTS)) {
+        double frameDuration = (player_->audioSampleRate_ > 0 && avFrame && avFrame->nb_samples > 0)
+            ? static_cast<double>(avFrame->nb_samples) / player_->audioSampleRate_
+            : 0.0;
+        // 整帧都落在追赶目标之前：无需做格式转换，直接丢弃，继续解下一帧。
+        if (audioPTS + frameDuration < catchupTarget - kAudioCatchupToleranceSec) {
+            rawFrame.unreference();
+            return true;
+        }
+        // 当前帧已经到达目标附近，清除追赶任务。后面会按普通路径转换并入队，
+        // 音频回调若还需要跳过帧内的几十毫秒，会用 pendingAudioOffset_ 做细粒度处理。
+        if (audioPTS >= catchupTarget - kAudioCatchupToleranceSec) {
+            player_->audioCatchupTargetPTS_.store(-1.0);
+            LOG_INFO("Audio catch-up reached target=" + std::to_string(catchupTarget) +
+                     "s at PTS=" + std::to_string(audioPTS) + "s");
+        }
     }
 
     // 音频跳转：丢弃目标位置之前的所有音频帧

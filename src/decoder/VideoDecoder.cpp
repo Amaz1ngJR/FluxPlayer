@@ -15,6 +15,18 @@ extern "C" {
 
 namespace FluxPlayer {
 
+namespace {
+
+// FFmpeg 的 H.264/HEVC 帧级多线程会为每个并行解码任务额外占用硬件 surface。
+// Windows 上使用 NVDEC 时，如果完全交给 FFmpeg 自动决定线程数，高核心数 CPU
+// 通常会选到 16 线程；再加上参考帧和显示队列，surface 总数可能超过驱动常见的
+// 32 个上限，cuvidCreateDecoder 会因此返回 CUDA_ERROR_INVALID_VALUE。
+//
+// 硬件承担了主要解码工作，8 个提交线程已经足够，同时能给参考帧保留 surface 余量。
+constexpr int kHardwareDecodeThreadCount = 8;
+
+} // namespace
+
 /**
  * get_format 回调：选择硬件加速像素格式
  * 这是使用 FFmpeg 硬件加速的关键步骤，确保解码器正确选择 CUDA/VIDEOTOOLBOX 等格式
@@ -31,7 +43,28 @@ static enum AVPixelFormat getHWFormat(AVCodecContext* ctx, const enum AVPixelFor
             (type == AV_HWDEVICE_TYPE_DXVA2        && *p == AV_PIX_FMT_DXVA2_VLD))
             return *p;
     }
-    return pix_fmts[0];
+
+    // FFmpeg 在目标硬件格式初始化失败后会再次调用 get_format，并从候选列表中
+    // 移除刚才失败的格式。例如 CUDA surface 创建失败后，列表首项可能变成 Vulkan
+    // 或 D3D11。这里绝不能直接返回 pix_fmts[0]：当前 codecCtx 仍绑定 CUDA 设备，
+    // 返回另一种硬件格式会产生一连串“设备上下文类型不匹配”的错误。
+    //
+    // 目标硬件格式已经不在列表时，只选择 FFmpeg 提供的软件像素格式，让当前解码器
+    // 干净地降级到 CPU 解码。prepareFrame() 本身支持软件帧，因此无需跨硬件后端重试。
+    for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+        const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(*p);
+        if (descriptor && !(descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+            const char* formatName = av_get_pix_fmt_name(*p);
+            LOG_WARN("Requested HW pixel format is unavailable; falling back to software format: " +
+                     std::string(formatName ? formatName : "unknown"));
+            return *p;
+        }
+    }
+
+    // 候选列表中没有可用的软件格式时返回 NONE，让 FFmpeg 明确报告初始化失败。
+    // 返回任意硬件格式只会把真正的错误掩盖成设备类型不匹配。
+    LOG_ERROR("No compatible hardware or software pixel format found");
+    return AV_PIX_FMT_NONE;
 }
 
 VideoDecoder::VideoDecoder()
@@ -96,17 +129,21 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
     }
 
     // 步骤3.5：尝试硬件加速（失败不影响后续软件解码）
+    bool hwAccelConfigured = false;
     if (Config::getInstance().get().hwaccel) {
         if (initHWAccel(m_codecCtx)) {
             // 设置 get_format 回调，这是硬件加速的关键步骤
             // 没有这个回调，FFmpeg 无法正确选择 CUDA/VIDEOTOOLBOX 等硬件格式
             m_codecCtx->get_format = getHWFormat;
+            hwAccelConfigured = true;
             LOG_DEBUG("get_format callback set for hardware acceleration");
         }
     }
 
-    // 启用多线程解码（0 = FFmpeg 自动选择最优线程数）
-    m_codecCtx->thread_count = 0;
+    // 软件解码继续让 FFmpeg 自动选择线程数；硬件解码限制提交线程数，避免 H.264
+    // 参考帧 + 帧级并行线程申请超过 32 个 NVDEC surface，导致解码器在首帧或 seek 后
+    // 重新配置时创建失败。
+    m_codecCtx->thread_count = hwAccelConfigured ? kHardwareDecodeThreadCount : 0;
 
     // 步骤4：打开解码器
     ret = avcodec_open2(m_codecCtx, codec, nullptr);

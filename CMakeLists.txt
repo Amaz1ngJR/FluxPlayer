@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.7.2 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.7.3 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -179,8 +179,24 @@ if(WIN32)
     # （缺此步快捷方式图标为空白）。windres 默认在 .rc 所在目录搜索 pic.ico。
     add_executable(FluxPlayer WIN32 ${FLUXPLAYER_SOURCES} source/app.rc)
 else()
-add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
+    add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
 endif()
+
+# CMake 的缓存、对象文件和静态库保留在 -B 指定的 build/cmake 中；
+# 只有可直接运行的主程序进入共享的 build/bin。xmake 也把主程序及运行时依赖
+# 输出到同一目录，因此切换构建系统后可以直接运行同一条路径。
+#
+# 多配置生成器（Visual Studio/Xcode）默认会追加 Debug/Release 子目录。
+# 为每种标准配置显式设置输出路径，保证所有生成器都遵守 build/bin 约定。
+set(FLUXPLAYER_RUNTIME_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/bin")
+set_target_properties(FluxPlayer PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${FLUXPLAYER_RUNTIME_OUTPUT_DIR}"
+)
+foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(FluxPlayer PROPERTIES
+        "RUNTIME_OUTPUT_DIRECTORY_${_config}" "${FLUXPLAYER_RUNTIME_OUTPUT_DIR}"
+    )
+endforeach()
 
 # yt-dlp 打包路径：编译时固定，避免运行时路径推算失败
 if(APPLE)
@@ -249,6 +265,7 @@ elseif(WIN32)
         d3d11       # D3D11VA 硬件解码
         dxgi        # DXGI 设备枚举
         shell32     # SHGetFolderPath（应用数据目录）
+        uuid        # IID_IUnknown 等 COM IID（与 xmake Windows 链接项一致）
     )
 
     # WebView2 SDK 检测：放在 third_party/webview2/ 下时自动启用内置登录窗口
@@ -373,7 +390,7 @@ if(APPLE)
     endif()
 endif()
 
-# Windows + MinGW：把 3 个 GCC 运行时 DLL 拷到 exe 旁边，方便直接从 build 目录启动调试
+# Windows + MinGW：把 3 个 GCC 运行时 DLL 拷到 exe 旁边，方便直接从 build/bin 启动调试
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     foreach(_dll libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
@@ -421,6 +438,12 @@ endif()
 if(WIN32)
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
     install(CODE "
+        # CMake 4.4+ 在分析 Windows PE 依赖前会规范化路径分隔符。
+        # 显式启用新策略，避免为每个 System32 DLL 重复输出 CMP0207 警告；
+        # 下面的排除正则不依赖斜杠方向，规范化不会改变依赖筛选结果。
+        if(POLICY CMP0207)
+            cmake_policy(SET CMP0207 NEW)
+        endif()
         file(GET_RUNTIME_DEPENDENCIES
             EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/FluxPlayer.exe\"
             RESOLVED_DEPENDENCIES_VAR   _r_deps

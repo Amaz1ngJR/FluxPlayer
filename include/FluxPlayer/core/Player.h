@@ -536,6 +536,15 @@ private:
     // 且回调内对其做边界保护，避免 flush 后旧偏移越界访问新帧。
     std::atomic<size_t> pendingAudioOffset_;     // 当前队头帧已消费的字节偏移
 
+    // 音频追赶目标。变速切换时，视频队列可能已经显示到较新的 PTS，
+    // 但音频 frame/packet 队列里还压着旧速率下缓存的较早音频帧。
+    // 如果继续按这些旧音频帧更新 AClock，主时钟会倒退，视频调度就会等待
+    // AClock 重新追上 VClock，表现为画面停在最后一帧。
+    //
+    // 值 >= 0 表示正在追赶：音频解码线程和音频回调都会丢弃/跳过该 PTS
+    // 之前的音频数据；值 < 0 表示没有追赶任务。
+    std::atomic<double> audioCatchupTargetPTS_{-1.0};
+
     // 音频缓冲延迟管理
     double audioBufferDelay_;                     // 动态计算的音频缓冲延迟（秒）
     std::atomic<size_t> audioQueueDepth_;        // 当前音频队列深度

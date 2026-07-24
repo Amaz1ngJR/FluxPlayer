@@ -33,9 +33,8 @@ Source: "..\dist\staging\yt-dlp.exe";     DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\staging\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs
 ; 字体文件（ImGui 渲染字幕和 UI 使用）
 Source: "..\dist\staging\fonts\*";        DestDir: "{app}\fonts";   Flags: ignoreversion recursesubdirs
-; 资源图片（纯音频模式兜底封面等）
-Source: "..\dist\staging\source\*";       DestDir: "{app}\source";  Flags: ignoreversion recursesubdirs
-; 内置皮肤资源（运行期 Config::getResourcePath("skins") 解析到 {app}\resources\skins）
+; 运行时资源：纯音频兜底封面和内置皮肤都由 CMake 安装到 resources/
+; Config::getResourcePath() 在发布版中会从 {app}\resources 解析这些文件
 Source: "..\dist\staging\resources\*";    DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs
 
 [UninstallDelete]

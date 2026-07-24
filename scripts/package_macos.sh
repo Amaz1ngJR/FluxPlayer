@@ -15,17 +15,20 @@
 #   ./scripts/package_macos.sh
 #
 # 输出：
-#   build/FluxPlayer.dmg
+#   dist/FluxPlayer-<版本号>.dmg
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
-BUILD_DIR="$ROOT/build"
+# CMake 中间文件固定放在 build/cmake，最终运行产物统一放在 build/bin。
+# 输出目录由 CMakeLists.txt 配置；这里分别保存路径，避免打包脚本依赖旧布局。
+BUILD_DIR="$ROOT/build/cmake"
+BIN_DIR="$ROOT/build/bin"
 APP_NAME="FluxPlayer"
 # 从 CMakeLists.txt 读取版本号，发版只需改那一处
 VERSION=$(grep -m1 'project(FluxPlayer VERSION' "$ROOT/CMakeLists.txt" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
+APP_BUNDLE="$BIN_DIR/$APP_NAME.app"
 DMG_OUT="$ROOT/dist/$APP_NAME-$VERSION.dmg"
 
 # ── 1. CMake 构建（Release 模式）──────────────────────────────────────────────
@@ -40,14 +43,14 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# 复制可执行文件
-cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+# 复制 build/bin 中的共享可执行文件
+cp "$BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 
 # shaders/fonts 必须与可执行文件同目录：
 # GLRenderer 用 getExeDir()+"/shaders/..." 定位着色器，字体按可执行文件同级 fonts/
 # 加载，二者都依赖「与 exe 同级」而非 Resources，因此放进 Contents/MacOS/
-cp -r "$BUILD_DIR/shaders" "$APP_BUNDLE/Contents/MacOS/"
-cp -r "$BUILD_DIR/fonts"   "$APP_BUNDLE/Contents/MacOS/"
+cp -r "$BIN_DIR/shaders" "$APP_BUNDLE/Contents/MacOS/"
+cp -r "$BIN_DIR/fonts"   "$APP_BUNDLE/Contents/MacOS/"
 
 # pic2.png：纯音频封面兜底图，Player 通过 Config::getResourcePath("pic2.png") 加载，
 # macOS 优先解析 ../Resources/，故直接放在 Resources 根下
@@ -62,7 +65,7 @@ cp "$ROOT/source/UI/skins/cyberpunk-neon/preview.svg" \
    "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon/"
 
 # 复制 FFmpeg dylib（rpath 设为 @executable_path，dylib 需与可执行文件同目录）
-find "$BUILD_DIR" -maxdepth 1 -name "*.dylib" -exec cp {} "$APP_BUNDLE/Contents/MacOS/" \;
+find "$BIN_DIR" -maxdepth 1 -name "*.dylib" -exec cp {} "$APP_BUNDLE/Contents/MacOS/" \;
 
 # yt-dlp：网页流提取依赖，必须与可执行文件同级（getYtDlpPath 优先在 exe 同级查找），
 # 否则装到目标机后运行时报「找不到 dlp」。保留可执行权限。

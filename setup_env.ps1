@@ -2,12 +2,14 @@
 # 安装xmake : 
 #Invoke-WebRequest `
 #  -Uri "https://github.com/xmake-io/xmake/releases/download/v2.9.9/xmake-bundle-v2.9.9.win64.exe" `
-#  -OutFile "D:\tools\xmake.exe"
+#  -OutFile "C:\Xmake\xmake.exe"
 # 使用方式：在 PowerShell 中运行 D:\tools\setup_env.ps1
 # 首次使用需执行：Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+# 清掉这个损坏缓存目录: Remove-Item -Recurse -Force "$env:TEMP\.xmake0\2.9.9+dev.a6af349ad"Remove-Item -Recurse -Force "$env:TEMP\.xmake0\2.9.9+dev.a6af349ad"
 
-$mingw_path = "D:\tools\mingw64\bin"
-$xmake_path = "D:\tools"
+
+$mingw_path = "C:\msys64\mingw64\bin"
+$xmake_path = "C:\Xmake\"
 
 # 添加 MinGW 到 PATH
 if (Test-Path $mingw_path) {
@@ -51,10 +53,11 @@ if ($xmake_version[0] -notmatch "xmake v2\.9\.") {
 Write-Host ""
 Write-Host "All tools are ready!" -ForegroundColor Green
 
-# 配置 xmake 使用 MinGW
+# 配置 xmake 使用 MinGW。-o 显式指定构建根目录，既与 xmake.lua 的默认值一致，
+# 也能覆盖旧版 .xmake 配置中遗留的 build 路径，确保缓存和对象文件进入 build\windows。
 Write-Host "Configuring xmake with MinGW toolchain..." -ForegroundColor Cyan
 New-Item -Path ".xmake\windows\x64" -ItemType Directory -Force | Out-Null
-xmake f -p windows --toolchain=mingw --mingw="D:\tools\mingw64" --cross="x86_64-w64-mingw32-" -y
+xmake f -p windows -o build/windows --toolchain=mingw --mingw="C:\msys64\mingw64" --cross="x86_64-w64-mingw32-" -y
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "xmake configuration succeeded!" -ForegroundColor Green

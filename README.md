@@ -305,6 +305,9 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 .\setup_env.ps1
 ```
 
+初始化脚本会把 xmake 构建根目录配置为 `build/windows`；主程序和运行时依赖仍按
+`xmake.lua` 的约定输出到共享的 `build/bin`。
+
 ### Linux
 
 ```bash
@@ -316,6 +319,20 @@ sudo dnf install ffmpeg-devel alsa-lib-devel
 ```
 
 ## 构建
+
+### 构建目录约定
+
+CMake 和 xmake 共用 `build/` 根目录，但中间文件严格隔离，最终运行产物统一输出：
+
+```text
+build/
+├── cmake/                 # CMake 缓存、生成器文件、对象文件和静态库
+├── windows/               # xmake 的缓存、对象文件和第三方静态库
+└── bin/                   # 两者共用的 FluxPlayer、动态库和运行时资源
+```
+
+`build/bin` 是共享运行目录，后执行的构建会覆盖同名最终产物。CMake 与 xmake
+不会共享中间文件，因此可以在两套构建系统之间切换而不污染增量编译缓存。
 
 ### 使用 xmake（推荐）
 
@@ -341,24 +358,31 @@ xmake run FluxPlayer /path/to/video.mp4
 
 # 播放网络流
 xmake run FluxPlayer rtsp://example.com/stream
+
+# Windows 最终运行产物
+.\build\bin\FluxPlayer.exe
 ```
 
 ### 使用 CMake
 
-```bash
-mkdir build && cd build
-
-# macOS / Linux
-cmake ..
-make -j$(nproc)
-
-# Windows (MinGW)
-cmake -G "MinGW Makefiles" ..
-mingw32-make -j
+```powershell
+# Windows：中间文件进入 build\cmake，最终产物进入 build\bin
+cmake -S . -B build\cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build\cmake
 
 # 运行
-./FluxPlayer
-./FluxPlayer /path/to/video.mp4
+.\build\bin\FluxPlayer.exe
+.\build\bin\FluxPlayer.exe <视频文件路径>
+```
+
+```bash
+# macOS / Linux
+cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cmake -j
+
+# 运行
+./build/bin/FluxPlayer
+./build/bin/FluxPlayer /path/to/video.mp4
 ```
 
 ## 打包环境搭建
@@ -430,7 +454,7 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 ```bash
 ./scripts/package_macos.sh
-# 输出：build/FluxPlayer.dmg
+# 输出：dist/FluxPlayer-<版本号>.dmg
 ```
 
 脚本流程：cmake Release 构建 → 生成 `.app` bundle（含 FFmpeg dylib、shaders、fonts）→ 图标处理（优先用 `source/pic.icns`，否则从 `source/pic.png` 转换）→ 打包为 `.dmg`。
@@ -439,7 +463,7 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 ```powershell
 .\scripts\package_windows.ps1
-# 输出：dist\FluxPlayer-0.4.0-Setup.exe
+# 输出：dist\FluxPlayer-<版本号>-Setup.exe
 ```
 
 脚本流程：图标处理（优先用 `source\pic.ico`，否则用 ImageMagick 从 `source\pic.png` 转换）→ cmake Release 构建 → Inno Setup 打包（含桌面快捷方式选项）。
@@ -749,7 +773,7 @@ socksProxy=socks5://127.0.0.1:7890
 xmake f --tcp_log=y && xmake
 
 # CMake
-cmake -B build -DENABLE_TCP_LOG=ON && cmake --build build
+cmake -S . -B build/cmake -DENABLE_TCP_LOG=ON && cmake --build build/cmake
 ```
 
 使用 `nc` 查看实时日志：
@@ -775,6 +799,14 @@ logFileEnabled=true
 | Linux | `~/.cache/FluxPlayer/fluxplayer.log` |
 
 可通过 `logFilePath` 自定义路径。文件日志为纯文本格式（不含终端颜色码），以追加模式写入。
+
+### Windows 控制台日志
+
+Windows 版本使用 GUI 子系统，运行行为如下：
+
+- 从 PowerShell、cmd 或 Windows Terminal 启动时，程序自动附着启动终端，日志直接显示；
+- 从资源管理器双击启动时不创建控制台窗口，因此不会弹出额外黑框；
+- 文件日志不依赖控制台，启用 `logFileEnabled=true` 后会同时写入日志文件。
 
 ## 测试流地址
 

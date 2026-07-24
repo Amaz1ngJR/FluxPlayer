@@ -27,6 +27,8 @@
 #include <memory>
 #include <filesystem>
 #include <ctime>
+#include <cstdio>
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -41,6 +43,57 @@ extern "C" {
 using namespace FluxPlayer;
 
 namespace {
+
+#ifdef _WIN32
+/**
+ * @brief 在 Windows GUI 子系统下复用父进程控制台输出日志
+ *
+ * FluxPlayer 使用 WIN32/-mwindows 构建，因此双击运行时不会自动创建黑色控制台窗口。
+ * 但这也意味着 C/C++ 运行库不会自动把 stdout/stderr 连接到启动它的 PowerShell。
+ * 这里仅尝试附着父进程已经存在的控制台，不调用 AllocConsole()：
+ *
+ * - 从 PowerShell、cmd 或 Windows Terminal 启动：AttachConsole() 成功，日志继续显示
+ *   在原终端中；
+ * - 由测试工具启动且进程已经连接控制台：ERROR_ACCESS_DENIED 表示无需再次附着，
+ *   仍继续修复标准流；
+ * - 从资源管理器双击启动：父进程没有控制台，函数直接返回，不会额外弹出黑框。
+ *
+ * AttachConsole() 只修改 Win32 控制台归属，std::cout/std::cerr 仍可能指向 GUI 程序
+ * 启动时创建的无效标准流，因此必须通过 CONOUT$ 重新打开 stdout 和 stderr。文件日志
+ * 使用 Logger 自己的 ofstream，与这里的控制台重定向相互独立。
+ */
+void attachParentConsoleForLogging() {
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_ACCESS_DENIED) {
+            // ERROR_INVALID_HANDLE 通常表示由 Explorer 双击启动，父进程没有控制台。
+            return;
+        }
+    }
+
+    FILE* stream = nullptr;
+#if defined(_MSC_VER) || defined(__MINGW32__)
+    // MSVC 和 MinGW 都提供 freopen_s；保存返回流仅用于满足安全 CRT 接口。
+    freopen_s(&stream, "CONOUT$", "w", stdout);
+    freopen_s(&stream, "CONOUT$", "w", stderr);
+#else
+    stream = std::freopen("CONOUT$", "w", stdout);
+    stream = std::freopen("CONOUT$", "w", stderr);
+#endif
+    (void)stream;
+
+    // freopen 后清除 C++ 流先前可能记录的 badbit/failbit，否则 Logger 后续即使写入
+    // std::cout，也会因为流仍处于失败状态而静默丢弃。
+    std::ios::sync_with_stdio(true);
+    std::cout.clear();
+    std::cerr.clear();
+    std::clog.clear();
+
+    // 项目源码和日志均使用 UTF-8。只在确实拥有控制台时设置代码页，避免双击启动时
+    // 对不存在的控制台执行无意义操作。
+    SetConsoleOutputCP(CP_UTF8);
+}
+#endif
 
 /// 把状态名翻译成可读字符串（仅用于日志）
 const char* stateName(PlayerState s) {
@@ -281,7 +334,8 @@ static std::string playMediaCli(const std::string& mediaPath) {
  */
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
-    SetConsoleOutputCP(65001);
+    // 必须早于 Config::load()：配置加载本身会记录日志，晚附着会丢失启动阶段输出。
+    attachParentConsoleForLogging();
 #else
     // 屏蔽 SIGPIPE：DashMerger 在 stop 时 close pipe 写端后，mergeLoop 内的
     // write 可能发 SIGPIPE 默认杀进程；忽略后由 FFmpeg / curl 自行按 EPIPE 处理。
