@@ -711,6 +711,19 @@ void Player::run() {
             updatePlaybackStats(currentTime, lastPrint, lastBytesRead);
         }
 
+        // GLFW 右上角关闭按钮只会设置窗口的 should-close 标志，并不会经过
+        // Player::quit()，因此原来的 shouldQuit_ 仍可能是 false。下面的线程回收会先
+        // abort 队列再 join demux 线程；如果不在这里同步退出意图，demux 线程会继续
+        // 读完整个文件，并在 EOF 停泊循环里永久等待 seek，最终让主线程卡在 join()。
+        //
+        // 自然 EOF 和 ESC 退出已经会设置 shouldQuit_，重复 store(true) 是幂等的。
+        // 在调用播放完成回调前完成同步，还能保证回调之后的所有收尾路径看到一致状态。
+        if (window_->shouldClose()) {
+            LOG_INFO("Window close requested, stopping playback workers");
+            userStopped_.store(true);
+            shouldQuit_.store(true);
+        }
+
         LOG_INFO("Exiting main loop");
 
         // 触发播放完成回调
@@ -720,9 +733,9 @@ void Player::run() {
 
         // 检查是否需要循环播放
         if (!handleLoopRestart()) {
-            // 非循环：自然 EOF 退出。改造后 decode 线程 EOF 停泊不退出，主动 abort+join
-            // 收尾，使退出路径自身闭合，不依赖调用方随后 close()。
-            shutdownWorkersForEof();
+            // 非循环：可能是自然 EOF、ESC 或窗口关闭。统一停止音频输出并回收 worker，
+            // 使 run() 返回时不再有后台线程访问 Player 的队列和时钟。
+            shutdownWorkersAfterRun();
             shouldLoop = false;
         }
     }
@@ -1078,11 +1091,18 @@ void Player::joinWorkerThreads(bool abortQueues) {
     pendingAudioOffset_.store(0);
 }
 
-void Player::shutdownWorkersForEof() {
-    // 自然 EOF（非循环）收尾：改造后 decode 线程 EOF 停泊在 get() 不退出，仅 shouldQuit_
-    // 无法唤醒它们；必须 abort 队列才能让 get() 返回 0、线程退出。此处主动 abort+join，
-    // 使 EOF 退出路径自身闭合，不依赖调用方随后调用 close()。后续 close() 对已 reset 的
-    // 线程对象幂等（joinable 检查为假，跳过）。
+void Player::shutdownWorkersAfterRun() {
+    // 音频输出线程通过回调持续消费 audioFrameQueue_。必须先停止音频设备并等待其线程
+    // 退出，再 abort/flush 队列；否则回收 worker 的同时音频回调仍会访问空队列，不但会
+    // 连续打印 underrun，还会让退出阶段存在不必要的并发访问。stop() 是幂等的，随后
+    // close()->cleanup() 再次调用不会重复关闭设备。
+    if (audioOutput_) {
+        audioOutput_->stop();
+    }
+
+    // 自然 EOF 时 decode/demux 线程会停泊等待 seek；窗口关闭和 ESC 退出时也可能有线程
+    // 正阻塞在 packet/frame 队列。abortAll() 同时唤醒这些等待点，再 join 能让 run()
+    // 自己完成线程收尾，不依赖调用方稍后执行 close()。
     joinWorkerThreads(/*abortQueues=*/true);
 }
 
@@ -1120,14 +1140,15 @@ void Player::cleanup() {
     // 停止录制（RecordingService 析构时自动处理，此处无需显式停止）
     // recordingService_ 会在后续 reset() 时自动析构并停止录制
 
-    // abort 队列唤醒阻塞线程，join demux + video/audio decode 三线程并清空队列
-    joinWorkerThreads(/*abortQueues=*/true);
-
-    // 先停音频输出，再处理时钟相关状态，避免音频回调访问已销毁的时钟（use-after-free）
+    // close() 也可能在 run() 之外调用。先停止音频回调线程，再回收其所消费的帧队列，
+    // 保证 cleanup 的独立调用路径与 run() 正常退出路径拥有相同的线程关闭顺序。
     if (audioOutput_) {
         audioOutput_->stop();
         audioOutput_.reset();
     }
+
+    // abort 队列唤醒阻塞线程，join demux + video/audio decode 三线程并清空队列
+    joinWorkerThreads(/*abortQueues=*/true);
 
     // 清理组件
     renderer_.reset();

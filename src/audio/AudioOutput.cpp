@@ -45,7 +45,10 @@ struct AudioOutput::Impl {
     std::thread audioThread;        // 音频处理线程
     std::mutex mutex;               // 互斥锁
     std::condition_variable cv;     // 条件变量
-    bool shouldExit = false;        // 线程退出标志
+    // WinMM 回调线程、音频处理线程和调用 stop() 的控制线程都会访问该标志。
+    // 使用原子变量避免普通 bool 的数据竞争，否则音频线程可能看不到退出请求，
+    // 让 stop() 永久卡在 audioThread.join()。
+    std::atomic<bool> shouldExit{false};
     int nextBuffer = 0;             // 下一个要填充的缓冲区索引
 
     static void CALLBACK waveOutCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2);
@@ -58,7 +61,8 @@ struct AudioOutput::Impl {
     std::thread audioThread;
     std::mutex mutex;
     std::condition_variable cv;
-    bool shouldExit = false;
+    // ALSA 音频线程与控制线程并发读写，语义同 Windows 实现。
+    std::atomic<bool> shouldExit{false};
 
     void runAudioThread(AudioOutput* owner);
 #endif
@@ -115,7 +119,7 @@ void AudioOutput::Impl::audioQueueCallback(void* userData, AudioQueueRef queue, 
 void CALLBACK AudioOutput::Impl::waveOutCallback(HWAVEOUT, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR, DWORD_PTR) {
     if (uMsg == WOM_DONE) {
         auto* owner = reinterpret_cast<AudioOutput*>(dwInstance);
-        if (owner && owner->isPlaying_.load() && !owner->impl_->shouldExit) {
+        if (owner && owner->isPlaying_.load() && !owner->impl_->shouldExit.load()) {
             std::unique_lock<std::mutex> lock(owner->impl_->mutex);
             owner->impl_->cv.notify_one();
         }
@@ -145,16 +149,19 @@ void AudioOutput::Impl::runAudioThread(AudioOutput* owner) {
     };
 
     // 预填充所有缓冲区
-    for (int i = 0; i < kNumBuffers; ++i) { if (shouldExit) break; fillBuffer(i); }
+    for (int i = 0; i < kNumBuffers; ++i) {
+        if (shouldExit.load()) break;
+        fillBuffer(i);
+    }
     nextBuffer = 0;
 
     // 主循环：等待缓冲区完成并重新填充
-    while (!shouldExit) {
+    while (!shouldExit.load()) {
         std::unique_lock<std::mutex> lock(mutex);
         cv.wait_for(lock, std::chrono::milliseconds(100), [&] {
-            return shouldExit || (waveHeaders[nextBuffer].dwFlags & WHDR_DONE);
+            return shouldExit.load() || (waveHeaders[nextBuffer].dwFlags & WHDR_DONE);
         });
-        if (shouldExit) break;
+        if (shouldExit.load()) break;
         if (waveHeaders[nextBuffer].dwFlags & WHDR_DONE) {
             fillBuffer(nextBuffer);
             nextBuffer = (nextBuffer + 1) % kNumBuffers;
@@ -172,12 +179,12 @@ void AudioOutput::Impl::runAudioThread(AudioOutput* owner) {
     LOG_DEBUG("AudioOutput: Audio thread started (ALSA)");
     const size_t bytesPerFrame = format.channels * (format.bitsPerSample / 8);
 
-    while (!shouldExit) {
+    while (!shouldExit.load()) {
         // 检查是否暂停
         if (owner->isPaused_.load()) {
             std::unique_lock<std::mutex> lock(mutex);
             cv.wait_for(lock, std::chrono::milliseconds(100), [&] {
-                return shouldExit || !owner->isPaused_.load();
+                return shouldExit.load() || !owner->isPaused_.load();
             });
             continue;
         }
@@ -201,7 +208,7 @@ void AudioOutput::Impl::runAudioThread(AudioOutput* owner) {
         // 写入 ALSA，处理下溢和重试
         snd_pcm_uframes_t frames = bytesRead / bytesPerFrame;
         uint8_t* ptr = buffer.data();
-        while (frames > 0 && !shouldExit) {
+        while (frames > 0 && !shouldExit.load()) {
             snd_pcm_sframes_t written = snd_pcm_writei(pcmHandle, ptr, frames);
             if (written < 0) {
                 if (written == -EPIPE) {
@@ -393,13 +400,13 @@ void AudioOutput::start() {
 
 #elif defined(_WIN32)
     // 启动音频处理线程
-    impl_->shouldExit = false;
+    impl_->shouldExit.store(false);
     impl_->nextBuffer = 0;
     impl_->audioThread = std::thread(&Impl::runAudioThread, impl_.get(), this);
 
 #elif defined(__linux__)
     // 启动音频处理线程
-    impl_->shouldExit = false;
+    impl_->shouldExit.store(false);
     impl_->audioThread = std::thread(&Impl::runAudioThread, impl_.get(), this);
 #endif
 
@@ -480,7 +487,7 @@ void AudioOutput::stop() {
     if (!impl_->hWaveOut) return;
     if (isPlaying_.load()) {
         // 停止音频线程
-        impl_->shouldExit = true;
+        impl_->shouldExit.store(true);
         impl_->cv.notify_all();
         if (impl_->audioThread.joinable()) impl_->audioThread.join();
         // 重置音频设备
@@ -502,7 +509,7 @@ void AudioOutput::stop() {
     if (!impl_->pcmHandle) return;
     if (isPlaying_.load()) {
         // 停止音频线程
-        impl_->shouldExit = true;
+        impl_->shouldExit.store(true);
         impl_->cv.notify_all();
         if (impl_->audioThread.joinable()) impl_->audioThread.join();
         isPlaying_.store(false);

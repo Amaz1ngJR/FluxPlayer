@@ -406,11 +406,16 @@ private:
     void joinWorkerThreads(bool abortQueues);
 
     /**
-     * run() 自然 EOF（非循环播放）退出时收尾 worker 线程。
-     * 改造后 decode 线程 EOF 停泊不退出，需主动 abort+join，使 EOF 退出路径自身闭合，
-     * 不依赖调用方随后调用 close()。内部即 joinWorkerThreads(abortQueues=true)。
+     * run() 最终退出（自然 EOF、ESC 或窗口关闭）时停止音频并收尾 worker 线程。
+     *
+     * 关闭顺序必须是：
+     * 1. 停止音频设备及其回调线程，避免它继续读取 audioFrameQueue_；
+     * 2. abort 所有队列，唤醒停泊/阻塞中的 demux 与 decode 线程；
+     * 3. join worker 并清空队列。
+     *
+     * 这样 run() 返回时不再有后台线程访问 Player，后续 close() 只做幂等清理。
      */
-    void shutdownWorkersForEof();
+    void shutdownWorkersAfterRun();
 
     /**
      * run() 辅助函数：从队列取帧并渲染一帧视频
