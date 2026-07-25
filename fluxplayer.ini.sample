@@ -84,8 +84,8 @@ recordDir=Record
 
 [Decoder]
 # hwaccel: 是否启用硬件加速解码 (true / false)
-# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2
-# 硬件解码可显著降低 CPU 占用，对不支持的编解码器会自动降级为软件解码
+# macOS: VideoToolbox + IOSurface/CGL | Windows: D3D11VA + WGL/OpenGL
+# 仅在原生零 CPU 拷贝互操作可用时保持硬解，否则自动重建为软件解码
 hwaccel=true
 
 [Subtitle]

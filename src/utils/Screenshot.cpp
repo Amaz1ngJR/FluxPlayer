@@ -11,6 +11,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <chrono>
@@ -21,6 +22,26 @@ extern "C" {
 #include <algorithm>
 
 namespace FluxPlayer {
+
+namespace {
+
+/**
+ * @brief 判断 AVFrame 是否只包含原生 GPU surface 句柄
+ *
+ * 零拷贝播放后，D3D11/VideoToolbox 帧会原样保留在 FrameQueue 中，其 data[]
+ * 不是可由 CPU 解引用的像素 plane。截图本质上需要生成 CPU 文件，必须由独立的
+ * 显式 readback 功能完成；当前先拒绝操作，避免崩溃或在播放路径中偷偷下载帧。
+ */
+bool isHardwareFrame(const AVFrame* frame) {
+    if (!frame) {
+        return false;
+    }
+    const auto format = static_cast<AVPixelFormat>(frame->format);
+    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(format);
+    return descriptor && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL);
+}
+
+} // namespace
 
 std::string Screenshot::generateFilename(const std::string& ext) {
     auto now = std::chrono::system_clock::now();
@@ -50,6 +71,10 @@ std::string Screenshot::saveFrame(const Frame* frame,
 
     const AVFrame* avFrame = frame->getAVFrame();
     if (!avFrame) return "";
+    if (isHardwareFrame(avFrame)) {
+        LOG_WARN("Screenshot skipped: zero-copy hardware frame requires explicit GPU readback");
+        return "";
+    }
 
     // 判断格式
     bool isJpeg = (format == "jpg" || format == "jpeg");
@@ -164,6 +189,10 @@ std::string Screenshot::saveFrameYUV(const Frame* frame,
 
     const AVFrame* srcFrame = frame->getAVFrame();
     if (!srcFrame) return "";
+    if (isHardwareFrame(srcFrame)) {
+        LOG_WARN("Raw YUV screenshot skipped: zero-copy hardware frame has no CPU planes");
+        return "";
+    }
 
     // 1. 确定目标格式
     AVPixelFormat targetFmt;

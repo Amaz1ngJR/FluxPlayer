@@ -1057,9 +1057,19 @@ void Controller::renderStats() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sk.metrics.radius.panel);
 
-    float windowWidth = ImGui::GetIO().DisplaySize.x;
-    ImGui::SetNextWindowPos(ImVec2(windowWidth - hud.statsW - hud.margin, hud.margin), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(hud.statsW, hud.statsH), ImGuiCond_Always);
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    // 原统计窗口只容纳性能和队列数据。新增视频链路后扩大默认尺寸，并受当前
+    // 显示区域约束；小窗口中由 ImGui 提供滚动条，避免设备名称覆盖后续状态。
+    const float availableWidth = std::max(200.0f, displaySize.x - hud.margin * 2.0f);
+    const float availableHeight = std::max(220.0f, displaySize.y - hud.margin * 2.0f);
+    const float statsWidth =
+        std::min(std::max(hud.statsW, 400.0f), availableWidth);
+    const float statsHeight =
+        std::min(std::max(hud.statsH, 330.0f), availableHeight);
+    const float statsX =
+        std::max(hud.margin, displaySize.x - statsWidth - hud.margin);
+    ImGui::SetNextWindowPos(ImVec2(statsX, hud.margin), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(statsWidth, statsHeight), ImGuiCond_Always);
     ImGui::Begin("Statistics", &showStats_,
                  ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
@@ -1081,6 +1091,18 @@ void Controller::renderStats() {
     ImGui::Indent();
     ImGui::Text("Video : %zu frames", stats.videoQueueSize);
     ImGui::Text("Audio : %zu frames", stats.audioQueueSize);
+    ImGui::Unindent();
+    ImGui::Separator();
+
+    ImGui::TextUnformatted("VIDEO PIPELINE:");
+    ImGui::Indent();
+    const char* decoderMode = stats.hardwareFrameActive ? "HARDWARE" : "SOFTWARE";
+    const char* zeroCopyState = stats.zeroCopyActive ? "ACTIVE" : "INACTIVE";
+    ImGui::Text("Decoder   : %s", decoderMode);
+    ImGui::Text("Backend   : %s", stats.hardwareBackend.c_str());
+    ImGui::TextWrapped("Device    : %s", stats.hardwareDevice.c_str());
+    ImGui::Text("Zero-copy : %s", zeroCopyState);
+    ImGui::TextWrapped("Path      : %s", stats.zeroCopyMode.c_str());
     ImGui::Unindent();
     ImGui::Separator();
 

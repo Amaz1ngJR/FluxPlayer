@@ -54,6 +54,15 @@ struct PlayerStats {
     size_t videoQueueSize;  // 视频队列大小
     size_t audioQueueSize;  // 音频队列大小
     PlayerState state;      // 当前状态
+
+    // “链路就绪”与“当前帧启用”必须分开：前者表示平台互操作初始化成功，
+    // 后者才表示正在显示的画面确实来自硬件 surface，没有经过 CPU 像素上传。
+    bool hardwareInteropReady = false;
+    bool hardwareFrameActive = false;
+    bool zeroCopyActive = false;
+    std::string hardwareBackend = "Software";
+    std::string hardwareDevice = "CPU";
+    std::string zeroCopyMode = "Disabled";
 };
 
 /**

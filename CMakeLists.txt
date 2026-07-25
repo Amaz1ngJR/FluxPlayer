@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.7.3 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.7.4 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -242,6 +242,9 @@ if(APPLE)
     find_library(OPENGL_FRAMEWORK OpenGL)
     find_library(COCOA_FRAMEWORK Cocoa)
     find_library(COREVIDEO_FRAMEWORK CoreVideo)
+    find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox)
+    find_library(COREMEDIA_FRAMEWORK CoreMedia)
+    find_library(IOSURFACE_FRAMEWORK IOSurface)
     find_library(IOKIT_FRAMEWORK IOKit)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation)
     find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox)  # 音频输出
@@ -250,6 +253,9 @@ if(APPLE)
         ${OPENGL_FRAMEWORK}
         ${COCOA_FRAMEWORK}
         ${COREVIDEO_FRAMEWORK}
+        ${VIDEOTOOLBOX_FRAMEWORK}
+        ${COREMEDIA_FRAMEWORK}
+        ${IOSURFACE_FRAMEWORK}
         ${IOKIT_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
         ${AUDIOTOOLBOX_FRAMEWORK}

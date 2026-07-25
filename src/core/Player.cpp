@@ -838,9 +838,6 @@ void Player::renderVideoFrame(double& lastFrameTime) {
             // 渲染帧
             renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
             AVFrame* avFrame = frame->getAVFrame();
-            // 判断帧格式：硬件解码输出 NV12，软件解码输出 YUV420P
-            bool isNV12 = (static_cast<AVPixelFormat>(avFrame->format) == AV_PIX_FMT_NV12);
-
             // 提取色彩空间元数据，用于着色器选择正确的 YUV→RGB 转换矩阵
             // 常量值与 video.frag 中 colorSpace uniform 的约定一致
             constexpr int kColorSpaceBT601  = 0;
@@ -861,14 +858,14 @@ void Player::renderVideoFrame(double& lastFrameTime) {
             }
             int fullRange = (avFrame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
 
-            renderer_->renderFrame(
-                avFrame->data[0], avFrame->data[1], avFrame->data[2],
-                avFrame->linesize[0], avFrame->linesize[1], avFrame->linesize[2],
-                isNV12, colorSpace, fullRange
-            );
-
-            // 更新最后渲染的帧的 PTS（帧本身由 keep-last 保留在 queueManager_->videoFrameQueue() 中）
-            lastRenderedPTS_.store(framePTS);
+            // 将完整 AVFrame 交给渲染器。硬件帧的 data[] 是原生 GPU 句柄，
+            // 不能按 CPU plane 解引用；GLRenderer 会按像素格式分派到
+            // D3D11/WGL 或 VideoToolbox/IOSurface 的零 CPU 拷贝路径。
+            if (renderer_->renderFrame(avFrame, colorSpace, fullRange)) {
+                // 只有画面真正提交后才推进最后渲染 PTS，避免互操作异常时
+                // 进度条继续前进而画面停在旧帧。
+                lastRenderedPTS_.store(framePTS);
+            }
         } else {
             // 队列为空或正在 seek：复用 GPU 纹理中的帧数据，避免重复上传
             renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
@@ -1017,6 +1014,19 @@ PlayerStats Player::getStats() const {
     stats.audioQueueSize = queueManager_->audioFrameQueue() ? queueManager_->audioFrameQueue()->size() : 0;
 
     stats.state = stateManager_->current();
+
+    if (renderer_) {
+        // 统计面板展示的是渲染器当前实际画面来源，而不是仅依据配置项推断。
+        // 这样硬件互操作已初始化、但当前帧因格式变化走了软件路径时，
+        // “Hardware/Zero-copy” 会立即变为未启用，避免给排障造成误导。
+        stats.hardwareInteropReady = renderer_->isHardwareInteropReady();
+        stats.hardwareFrameActive = renderer_->isHardwareFrameActive();
+        stats.zeroCopyActive =
+            stats.hardwareInteropReady && stats.hardwareFrameActive;
+        stats.hardwareBackend = renderer_->hardwareBackendName();
+        stats.hardwareDevice = renderer_->hardwareDeviceName();
+        stats.zeroCopyMode = renderer_->zeroCopyModeName();
+    }
     return stats;
 }
 
@@ -1149,6 +1159,14 @@ void Player::cleanup() {
 
     // abort 队列唤醒阻塞线程，join demux + video/audio decode 三线程并清空队列
     joinWorkerThreads(/*abortQueues=*/true);
+
+    // GLRenderer 的硬件互操作对象必须在创建它的 OpenGL 上下文仍然有效且当前时
+    // 注销 WGL/CGL 资源。共享窗口模式中 Controller/其他页面可能切换过上下文，
+    // 因此清理前显式恢复 Player 所使用的 GLFW 上下文，避免显卡驱动收到跨上下文
+    // 的纹理、renderbuffer 或 fence 句柄。
+    if (renderer_ && window_ && window_->getGLFWWindow()) {
+        glfwMakeContextCurrent(window_->getGLFWWindow());
+    }
 
     // 清理组件
     renderer_.reset();
@@ -1320,13 +1338,20 @@ bool Player::initWindowAndRenderer() {
         return false;
     }
 
-#if defined(_WIN32)
-    // CUDA 后端的 NV12 与 GL_RG8 纹理存在兼容性问题，启用 UV 解交错模式
-    if (videoDecoder_ && videoDecoder_->getHWDeviceType() == AV_HWDEVICE_TYPE_CUDA) {
-        renderer_->setNV12Deinterleave(true);
-        LOG_INFO("NV12 deinterleave mode enabled for CUDA backend");
+    if (videoDecoder_ && videoDecoder_->isHWAccelActive()) {
+        const AVHWDeviceType deviceType = videoDecoder_->getHWDeviceType();
+        if (!renderer_->initHardwareInterop(
+                deviceType, videoDecoder_->getHWDeviceContext())) {
+            // 原生互操作能力必须在 worker 启动前确定。若驱动不支持 WGL interop
+            // 或当前 macOS OpenGL 上下文无法导入 IOSurface，就重建为软件解码器；
+            // 绝不能保留硬解码，再在每帧执行 GPU->CPU->GPU 往返。
+            if (!videoDecoder_->disableHardwareAcceleration()) {
+                LOG_ERROR("Failed to fall back after zero-copy interop initialization failure");
+                return false;
+            }
+            LOG_INFO("Video decoder is using software mode because zero-copy interop is unavailable");
+        }
     }
-#endif
 
     LOG_INFO("Window and renderer initialized successfully");
     return true;

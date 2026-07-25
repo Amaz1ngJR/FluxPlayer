@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.7.3"
+local version = "0.7.4"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -210,6 +210,10 @@ target("FluxPlayer")
     -- OpenGL 相关文件排除在外，因为 glad 和系统 GL 头不能在同一编译单元中重复包含
     add_rules("c++.unity_build", {batchsize = 8})
     add_files("src/renderer/GLRenderer.cpp", {unity_ignored = true})
+    -- 硬件帧互操作同时包含 glad 与平台原生图形头（D3D11/CGL/IOSurface），
+    -- 必须独立编译，避免 Unity Build 与其他源文件共享宏和系统 GL 声明。
+    -- 这条规则同时覆盖 Windows 与 macOS，保证两套零拷贝后端的构建行为一致。
+    add_files("src/renderer/HardwareFrameInterop.cpp", {unity_ignored = true})
     add_files("src/renderer/Shader.cpp", {unity_ignored = true})
     add_files("src/ui/Window.cpp", {unity_ignored = true})
     add_files("src/ui/HomeScreen.cpp", {unity_ignored = true})
@@ -242,7 +246,10 @@ target("FluxPlayer")
     if is_plat("macosx") then
         -- add_frameworks：链接 macOS 系统框架（等价于 -framework xxx）
         -- WebKit：WKWebView 内置登录窗口
-        add_frameworks("OpenGL", "Cocoa", "CoreVideo", "IOKit", "CoreFoundation", "AudioToolbox", "WebKit")
+        -- VideoToolbox 输出 IOSurface-backed CVPixelBuffer；IOSurface 与 OpenGL
+        -- framework 共同提供不经过 CPU plane 的 CGLTexImageIOSurface2D 映射。
+        add_frameworks("OpenGL", "Cocoa", "CoreVideo", "VideoToolbox", "CoreMedia",
+                       "IOSurface", "IOKit", "CoreFoundation", "AudioToolbox", "WebKit")
         -- 设置 rpath，让可执行文件在构建目录和安装后都能找到 dylib
         add_rpathdirs("@executable_path")
     elseif is_plat("windows") then

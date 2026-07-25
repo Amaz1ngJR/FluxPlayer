@@ -151,7 +151,7 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     if (!checkGLError("V texture glTexImage2D")) return false;
     LOG_DEBUG("V texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
 
-    // 步骤8：配置 NV12 UV 纹理（硬件解码零拷贝用，GL_RG8 双通道）
+    // 步骤8：配置 CPU 内存 NV12 的 UV 上传纹理（GL_RG8 双通道）
     glGenTextures(1, &m_textureUV);
     glBindTexture(GL_TEXTURE_2D, m_textureUV);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -168,11 +168,64 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     return true;
 }
 
+bool GLRenderer::initHardwareInterop(AVHWDeviceType deviceType,
+                                     AVBufferRef* hwDeviceContext) {
+    if (deviceType == AV_HWDEVICE_TYPE_NONE) {
+        return true;
+    }
+
+    auto interop = createHardwareFrameInterop();
+    if (!interop ||
+        !interop->initialize(deviceType, hwDeviceContext, m_videoWidth, m_videoHeight)) {
+        return false;
+    }
+
+    const std::string exeDir = getExeDir();
+    if (deviceType == AV_HWDEVICE_TYPE_D3D11VA) {
+        // D3D11 Video Processor 已经在 GPU 内完成 YUV->BGRA，OpenGL 只需
+        // 使用 RGBA 直通着色器采样共享纹理。
+        if (!m_rgbaShader) {
+            m_rgbaShader = std::make_unique<Shader>();
+            if (!m_rgbaShader->loadFromFile(exeDir + "/shaders/image.vert",
+                                             exeDir + "/shaders/image.frag")) {
+                LOG_ERROR("Failed to load D3D11 interop RGBA shader");
+                return false;
+            }
+            m_rgbaShader->use();
+            m_rgbaShader->setInt("texRGBA", 0);
+            m_rgbaShader->unuse();
+        }
+    } else if (deviceType == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
+        // CGLTexImageIOSurface2D 导出的 plane 是 GL_TEXTURE_RECTANGLE，
+        // 必须使用 sampler2DRect，不能套用普通 sampler2D 着色器。
+        m_hardwareYuvShader = std::make_unique<Shader>();
+        if (!m_hardwareYuvShader->loadFromFile(exeDir + "/shaders/video.vert",
+                                                exeDir + "/shaders/video_rect.frag")) {
+            LOG_ERROR("Failed to load VideoToolbox IOSurface shader");
+            m_hardwareYuvShader.reset();
+            return false;
+        }
+        m_hardwareYuvShader->use();
+        m_hardwareYuvShader->setInt("texY", 0);
+        m_hardwareYuvShader->setInt("texUV", 1);
+        m_hardwareYuvShader->unuse();
+    }
+
+    m_hardwareInterop = std::move(interop);
+    return true;
+}
+
 /**
  * 销毁渲染器，释放 OpenGL 资源
  */
 void GLRenderer::destroy() {
     LOG_DEBUG("Destroying GLRenderer resources");
+
+    // 平台互操作对象持有 WGL 注册对象、IOSurface AVFrame 引用和 GL fence，
+    // 必须在普通纹理及当前 OpenGL 上下文销毁前先释放。
+    m_hardwareInterop.reset();
+    m_hardwareYuvShader.reset();
+    m_lastFrameWasHardware = false;
 
     if (m_VAO) {
         glDeleteVertexArrays(1, &m_VAO);
@@ -206,6 +259,59 @@ void GLRenderer::destroy() {
     LOG_DEBUG("GLRenderer resources destroyed");
 }
 
+bool GLRenderer::renderFrame(const AVFrame* frame, int colorSpace, int fullRange) {
+    if (!frame) {
+        return false;
+    }
+
+    const auto format = static_cast<AVPixelFormat>(frame->format);
+    const bool isHardwareFrame =
+        format == AV_PIX_FMT_D3D11 || format == AV_PIX_FMT_VIDEOTOOLBOX;
+
+    if (isHardwareFrame) {
+        if (!m_hardwareInterop) {
+            LOG_ERROR("Received a hardware frame without an initialized zero-copy interop");
+            return false;
+        }
+
+        HardwareTextureBinding binding;
+        if (!m_hardwareInterop->beginFrame(frame, binding)) {
+            // 这里不允许调用 av_hwframe_transfer_data 作为隐藏回退。若平台链路
+            // 无法建立，初始化阶段就应切换为软件解码。
+            LOG_ERROR("Failed to import hardware frame without CPU copy");
+            return false;
+        }
+
+        drawHardwareBinding(binding, colorSpace, fullRange);
+        m_hardwareInterop->endFrame();
+
+        m_hasValidTexture = true;
+        m_lastFrameWasHardware = true;
+        m_lastColorSpace = colorSpace;
+        m_lastFullRange = fullRange;
+        return true;
+    }
+
+    if (format != AV_PIX_FMT_YUV420P && format != AV_PIX_FMT_NV12) {
+        LOG_ERROR("Renderer received unsupported software pixel format: " +
+                  std::to_string(frame->format));
+        return false;
+    }
+
+    const bool isNV12 = format == AV_PIX_FMT_NV12;
+    renderFrame(
+        const_cast<uint8_t*>(frame->data[0]),
+        const_cast<uint8_t*>(frame->data[1]),
+        const_cast<uint8_t*>(frame->data[2]),
+        frame->linesize[0],
+        frame->linesize[1],
+        frame->linesize[2],
+        isNV12,
+        colorSpace,
+        fullRange);
+    return true;
+}
+
 /**
  * 渲染一帧视频数据（支持 YUV420P 和 NV12 两种格式）
  * @param yData Y 平面数据指针
@@ -214,7 +320,7 @@ void GLRenderer::destroy() {
  * @param yPitch Y 平面行跨度（字节数）
  * @param uPitch YUV420P: U平面行跨度 / NV12: UV平面行跨度
  * @param vPitch YUV420P: V平面行跨度 / NV12: 不使用
- * @param isNV12 true = NV12 格式（硬件解码输出），false = YUV420P（软件解码输出）
+ * @param isNV12 true = CPU 内存 NV12，false = CPU 内存 YUV420P
  */
 void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
                               int yPitch, int uPitch, int vPitch,
@@ -254,6 +360,49 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     m_lastIsNV12Shader = useNV12Shader;
     m_lastColorSpace = colorSpace;
     m_lastFullRange = fullRange;
+    m_lastFrameWasHardware = false;
+}
+
+void GLRenderer::drawHardwareBinding(const HardwareTextureBinding& binding,
+                                     int colorSpace,
+                                     int fullRange) {
+    if (binding.layout == HardwareTextureLayout::RGBA2D) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(binding.textureTarget, binding.textureRGBA);
+        m_rgbaShader->use();
+        glBindVertexArray(m_VAO);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+        m_rgbaShader->unuse();
+        glBindTexture(binding.textureTarget, 0);
+        return;
+    }
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(binding.textureTarget, binding.textureY);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(binding.textureTarget, binding.textureUV);
+
+    m_hardwareYuvShader->use();
+    m_hardwareYuvShader->setInt("colorSpace", colorSpace);
+    m_hardwareYuvShader->setInt("fullRange", fullRange);
+    m_hardwareYuvShader->setVec2(
+        "textureSizeY",
+        static_cast<float>(binding.width),
+        static_cast<float>(binding.height));
+    m_hardwareYuvShader->setVec2(
+        "textureSizeUV",
+        static_cast<float>(binding.uvWidth),
+        static_cast<float>(binding.uvHeight));
+    glBindVertexArray(m_VAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    m_hardwareYuvShader->unuse();
+
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(binding.textureTarget, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(binding.textureTarget, 0);
 }
 
 /**
@@ -263,6 +412,15 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
  */
 void GLRenderer::renderCachedFrame() {
     if (!m_hasValidTexture) return;
+
+    if (m_lastFrameWasHardware && m_hardwareInterop) {
+        HardwareTextureBinding binding;
+        if (m_hardwareInterop->beginCachedFrame(binding)) {
+            drawHardwareBinding(binding, m_lastColorSpace, m_lastFullRange);
+            m_hardwareInterop->endFrame();
+        }
+        return;
+    }
 
     // 纯音频模式：使用 RGBA 直通着色器渲染封面图
     if (m_staticImageUploaded && m_rgbaShader) {
@@ -301,17 +459,19 @@ void GLRenderer::renderStaticImage(const uint8_t* rgbaData, int width, int heigh
     // 首次调用：加载 RGBA 着色器并创建纹理
     if (!m_staticImageUploaded) {
         // 加载 RGBA 直通着色器
-        m_rgbaShader = std::make_unique<Shader>();
-        std::string exeDir = getExeDir();
-        if (!m_rgbaShader->loadFromFile(exeDir + "/shaders/image.vert",
-                                         exeDir + "/shaders/image.frag")) {
-            LOG_ERROR("Failed to load image shaders");
-            m_rgbaShader.reset();
-            return;
+        if (!m_rgbaShader) {
+            m_rgbaShader = std::make_unique<Shader>();
+            std::string exeDir = getExeDir();
+            if (!m_rgbaShader->loadFromFile(exeDir + "/shaders/image.vert",
+                                             exeDir + "/shaders/image.frag")) {
+                LOG_ERROR("Failed to load image shaders");
+                m_rgbaShader.reset();
+                return;
+            }
+            m_rgbaShader->use();
+            m_rgbaShader->setInt("texRGBA", 0);  // RGBA 纹理绑定到纹理单元 0
+            m_rgbaShader->unuse();
         }
-        m_rgbaShader->use();
-        m_rgbaShader->setInt("texRGBA", 0);  // RGBA 纹理绑定到纹理单元 0
-        m_rgbaShader->unuse();
 
         // 创建 RGBA 纹理
         glGenTextures(1, &m_textureRGBA);
@@ -327,6 +487,7 @@ void GLRenderer::renderStaticImage(const uint8_t* rgbaData, int width, int heigh
 
         m_staticImageUploaded = true;
         m_hasValidTexture = true;
+        m_lastFrameWasHardware = false;
         LOG_INFO("Static RGBA image uploaded: " + std::to_string(width) + "x" + std::to_string(height));
     }
 
@@ -452,7 +613,7 @@ void GLRenderer::updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vDat
 }
 
 /**
- * 更新 NV12 纹理数据（硬件解码路径）
+ * 更新位于 CPU 内存中的 NV12 纹理数据
  * @param yData  Y 平面数据指针（全分辨率亮度）
  * @param uvData UV 交错平面数据指针（半分辨率，每像素 2 字节：U + V）
  * @param yPitch  Y 平面行跨度（字节数）
@@ -463,8 +624,8 @@ void GLRenderer::updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vDat
  * UV 平面： [U0][V0][U1][V1]...  每行 width 字节（U/V 交错存储）
  *
  * 支持两种上传策略（由 m_nv12Deinterleave 控制）：
- * - GL_RG8 零拷贝：直接上传交错 UV 到双通道纹理（D3D11VA/DXVA2/VideoToolbox）
- * - UV 解交错：拆分为独立 U/V 后上传到单通道纹理（CUDA 兼容模式）
+ * - GL_RG8 直接上传：把交错 UV 上传到双通道纹理
+ * - UV 解交错：拆分为独立 U/V 后上传到单通道纹理（旧驱动兼容模式）
  */
 void GLRenderer::updateNV12Textures(uint8_t* yData, uint8_t* uvData,
                                      int yPitch, int uvPitch) {
@@ -480,7 +641,7 @@ void GLRenderer::updateNV12Textures(uint8_t* yData, uint8_t* uvData,
     // ===== UV 平面上传（根据模式选择策略） =====
     if (m_nv12Deinterleave) {
         // 解交错模式：将 [U0,V0,U1,V1,...] 拆分为独立 U/V 平面
-        // 用于 CUDA 等 GL_RG8 纹理存在兼容性问题的后端
+        // 仅用于 GL_RG8 纹理存在兼容性问题的旧驱动
         const int chromaWidth  = m_videoWidth  / 2;
         const int chromaHeight = m_videoHeight / 2;
         const size_t chromaSize = static_cast<size_t>(chromaWidth) * chromaHeight;
@@ -510,8 +671,8 @@ void GLRenderer::updateNV12Textures(uint8_t* yData, uint8_t* uvData,
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, chromaWidth, chromaHeight,
                         GL_RED, GL_UNSIGNED_BYTE, m_nv12VBuffer.data());
     } else {
-        // GL_RG8 零拷贝模式：直接上传交错 UV 到双通道纹理
-        // 用于 D3D11VA/DXVA2/VideoToolbox 等 GL_RG8 兼容的后端
+        // GL_RG8 直接上传模式：避免 CPU 解交错，但仍会发生一次 CPU->GPU 上传。
+        // 真正的硬件帧不会进入本函数，而由 HardwareFrameInterop 导入原生 surface。
         glBindTexture(GL_TEXTURE_2D, m_textureUV);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, uvPitch / 2);  // GL_RG: 2 bytes/pixel
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2,

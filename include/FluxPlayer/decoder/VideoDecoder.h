@@ -74,9 +74,9 @@ public:
     AVPixelFormat getPixelFormat() const { return m_pixelFormat; }
 
     /**
-     * @brief 将解码帧转换为可渲染格式（NV12 或 YUV420P）
+     * @brief 将解码帧准备为队列可持有的格式
      *
-     * 硬件解码帧：GPU→CPU 传输后输出 NV12（零拷贝，跳过 sws_scale）
+     * 硬件解码帧：直接引用原始 GPU AVFrame，保留到渲染线程
      * 软件解码帧：YUV420P 直接引用；其他格式通过 sws_scale 转换
      * @param srcFrame 源帧（解码器输出）
      * @param dstFrame 目标帧（可渲染格式）
@@ -87,10 +87,19 @@ public:
     /** @brief 是否正在使用硬件加速解码 */
     bool isHWAccelActive() const { return m_hwDeviceCtx != nullptr; }
 
-#if defined(_WIN32)
     /** @brief 获取当前硬件加速设备类型，未启用时返回 AV_HWDEVICE_TYPE_NONE */
     AVHWDeviceType getHWDeviceType() const;
-#endif
+
+    /** @brief 获取 FFmpeg 硬件设备上下文的借用指针，所有权仍归 VideoDecoder */
+    AVBufferRef* getHWDeviceContext() const { return m_hwDeviceCtx; }
+
+    /**
+     * @brief 在播放线程启动前将已打开的硬件解码器重建为软件解码器
+     *
+     * 当 OpenGL 与硬件设备没有原生互操作能力时调用。这样可避免使用
+     * av_hwframe_transfer_data 形成伪零拷贝链路。
+     */
+    bool disableHardwareAcceleration();
 
 private:
     AVCodecContext* m_codecCtx;     ///< 视频解码器上下文
@@ -103,7 +112,6 @@ private:
 
     // ==================== 硬件加速 ====================
     AVBufferRef*  m_hwDeviceCtx;    ///< 硬件设备上下文，null = 软件解码
-    AVFrame*      m_hwTransferFrame;///< 可复用的 GPU→CPU 传输帧，避免每帧 alloc/free
     AVPixelFormat m_lastSwsFormat;  ///< 上次 sws_scale 的源格式，用于检测格式变化
 
     // ==================== 硬件降级 ====================
@@ -114,9 +122,6 @@ private:
 
     /** @brief 按平台优先级尝试初始化硬件解码设备 */
     bool initHWAccel(AVCodecContext* codecCtx);
-
-    /** @brief 将硬件帧从 GPU 传输到 CPU（复用 outFrame 缓冲） */
-    bool transferHWFrame(AVFrame* hwFrame, AVFrame* outFrame);
 
     /**
      * @brief 硬件解码不可恢复时，降级为纯软件解码并重建解码器上下文

@@ -271,8 +271,8 @@ bool Config::save() {
     file << "recordDir=" << settings_.recordDir << "\n\n";
     file << "[Decoder]\n";
     file << "# hwaccel: 是否启用硬件加速解码 (true / false)\n";
-    file << "# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2\n";
-    file << "# 硬件解码可显著降低 CPU 占用，不支持时自动降级为软件解码\n";
+    file << "# macOS: VideoToolbox + IOSurface/CGL | Windows: D3D11VA + WGL/OpenGL\n";
+    file << "# 仅在原生零 CPU 拷贝互操作可用时保持硬解，否则自动重建为软件解码\n";
     file << "hwaccel=" << (settings_.hwaccel ? "true" : "false") << "\n\n";
 
     file << "[Subtitle]\n";

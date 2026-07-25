@@ -18,18 +18,18 @@ namespace FluxPlayer {
 namespace {
 
 // FFmpeg 的 H.264/HEVC 帧级多线程会为每个并行解码任务额外占用硬件 surface。
-// Windows 上使用 NVDEC 时，如果完全交给 FFmpeg 自动决定线程数，高核心数 CPU
-// 通常会选到 16 线程；再加上参考帧和显示队列，surface 总数可能超过驱动常见的
-// 32 个上限，cuvidCreateDecoder 会因此返回 CUDA_ERROR_INVALID_VALUE。
-//
-// 硬件承担了主要解码工作，8 个提交线程已经足够，同时能给参考帧保留 surface 余量。
+// D3D11VA 与 VideoToolbox 都使用数量有限的 surface 池；完全交给高核心数 CPU
+// 自动决定线程数时，参考帧、并行解码帧和显示队列可能共同耗尽池容量。
+// 硬件承担主要解码工作，8 个提交线程足以保持吞吐，也为渲染线程持有的
+// 零拷贝 AVFrame 引用保留余量。
 constexpr int kHardwareDecodeThreadCount = 8;
 
 } // namespace
 
 /**
  * get_format 回调：选择硬件加速像素格式
- * 这是使用 FFmpeg 硬件加速的关键步骤，确保解码器正确选择 CUDA/VIDEOTOOLBOX 等格式
+ * 这是使用 FFmpeg 硬件加速的关键步骤，确保解码器只选择当前设备对应的
+ * D3D11 或 VideoToolbox 硬件格式。
  */
 static enum AVPixelFormat getHWFormat(AVCodecContext* ctx, const enum AVPixelFormat* pix_fmts) {
     AVHWDeviceType type = AV_HWDEVICE_TYPE_NONE;
@@ -37,17 +37,15 @@ static enum AVPixelFormat getHWFormat(AVCodecContext* ctx, const enum AVPixelFor
         type = reinterpret_cast<AVHWDeviceContext*>(ctx->hw_device_ctx->data)->type;
 
     for (const enum AVPixelFormat* p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if ((type == AV_HWDEVICE_TYPE_CUDA         && *p == AV_PIX_FMT_CUDA)         ||
-            (type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX && *p == AV_PIX_FMT_VIDEOTOOLBOX) ||
-            (type == AV_HWDEVICE_TYPE_D3D11VA      && *p == AV_PIX_FMT_D3D11)        ||
-            (type == AV_HWDEVICE_TYPE_DXVA2        && *p == AV_PIX_FMT_DXVA2_VLD))
+        if ((type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX && *p == AV_PIX_FMT_VIDEOTOOLBOX) ||
+            (type == AV_HWDEVICE_TYPE_D3D11VA      && *p == AV_PIX_FMT_D3D11))
             return *p;
     }
 
     // FFmpeg 在目标硬件格式初始化失败后会再次调用 get_format，并从候选列表中
-    // 移除刚才失败的格式。例如 CUDA surface 创建失败后，列表首项可能变成 Vulkan
-    // 或 D3D11。这里绝不能直接返回 pix_fmts[0]：当前 codecCtx 仍绑定 CUDA 设备，
-    // 返回另一种硬件格式会产生一连串“设备上下文类型不匹配”的错误。
+    // 移除刚才失败的格式。此时列表首项可能是另一个平台硬件格式；这里绝不能
+    // 直接返回 pix_fmts[0]，因为 codecCtx 仍绑定原设备，返回不匹配的硬件格式会
+    // 产生一连串“设备上下文类型不匹配”的错误。
     //
     // 目标硬件格式已经不在列表时，只选择 FFmpeg 提供的软件像素格式，让当前解码器
     // 干净地降级到 CPU 解码。prepareFrame() 本身支持软件帧，因此无需跨硬件后端重试。
@@ -71,7 +69,6 @@ VideoDecoder::VideoDecoder()
     : m_codecCtx(nullptr)
     , m_swsCtx(nullptr)
     , m_hwDeviceCtx(nullptr)
-    , m_hwTransferFrame(nullptr)
     , m_width(0)
     , m_height(0)
     , m_pixelFormat(AV_PIX_FMT_NONE)
@@ -133,7 +130,7 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
     if (Config::getInstance().get().hwaccel) {
         if (initHWAccel(m_codecCtx)) {
             // 设置 get_format 回调，这是硬件加速的关键步骤
-            // 没有这个回调，FFmpeg 无法正确选择 CUDA/VIDEOTOOLBOX 等硬件格式
+            // 没有这个回调，FFmpeg 无法稳定选择 D3D11/VideoToolbox 硬件格式
             m_codecCtx->get_format = getHWFormat;
             hwAccelConfigured = true;
             LOG_DEBUG("get_format callback set for hardware acceleration");
@@ -141,8 +138,8 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
     }
 
     // 软件解码继续让 FFmpeg 自动选择线程数；硬件解码限制提交线程数，避免 H.264
-    // 参考帧 + 帧级并行线程申请超过 32 个 NVDEC surface，导致解码器在首帧或 seek 后
-    // 重新配置时创建失败。
+    // 参考帧、帧级并行任务和渲染队列共同耗尽 D3D11/VideoToolbox surface 池，
+    // 导致首帧或 seek 后的解码器重建失败。
     m_codecCtx->thread_count = hwAccelConfigured ? kHardwareDecodeThreadCount : 0;
 
     // 步骤4：打开解码器
@@ -185,11 +182,6 @@ void VideoDecoder::close() {
         LOG_DEBUG("Freeing SwsContext");
         sws_freeContext(m_swsCtx);
         m_swsCtx = nullptr;
-    }
-
-    if (m_hwTransferFrame) {
-        av_frame_free(&m_hwTransferFrame);
-        m_hwTransferFrame = nullptr;
     }
 
     if (m_hwDeviceCtx) {
@@ -319,13 +311,20 @@ void VideoDecoder::flush() {
     }
 }
 
-#if defined(_WIN32)
 AVHWDeviceType VideoDecoder::getHWDeviceType() const {
     if (!m_hwDeviceCtx) return AV_HWDEVICE_TYPE_NONE;
     AVHWDeviceContext* ctx = reinterpret_cast<AVHWDeviceContext*>(m_hwDeviceCtx->data);
     return ctx->type;
 }
-#endif
+
+bool VideoDecoder::disableHardwareAcceleration() {
+    if (!isHWAccelActive()) {
+        return true;
+    }
+
+    LOG_WARN("Native GPU/OpenGL interop is unavailable; rebuilding decoder in software mode");
+    return reinitAsSoftware();
+}
 
 /**
  * 硬件解码持续失败时，完全重建为软件解码器
@@ -340,7 +339,6 @@ bool VideoDecoder::reinitAsSoftware() {
 
     // 释放旧的硬件解码器上下文（保留 m_savedCodecParams）
     if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
-    if (m_hwTransferFrame) { av_frame_free(&m_hwTransferFrame); m_hwTransferFrame = nullptr; }
     if (m_hwDeviceCtx) { av_buffer_unref(&m_hwDeviceCtx); m_hwDeviceCtx = nullptr; }
     if (m_codecCtx) { avcodec_free_context(&m_codecCtx); m_codecCtx = nullptr; }
 
@@ -376,9 +374,9 @@ bool VideoDecoder::initHWAccel(AVCodecContext* codecCtx) {
     };
 #elif defined(_WIN32)
     const AVHWDeviceType candidates[] = {
-        AV_HWDEVICE_TYPE_CUDA,      // NVDEC — NVIDIA GPU，性能最优
-        AV_HWDEVICE_TYPE_D3D11VA,   // D3D11VA — 通用，Win8+
-        AV_HWDEVICE_TYPE_DXVA2,     // DXVA2 — 旧版回退
+        // 当前 OpenGL 渲染器只为 D3D11 提供无 CPU 读回的 WGL 互操作。
+        // CUDA/DXVA2 即使能解码，也必须下载后再上传，因此不能列入硬件候选。
+        AV_HWDEVICE_TYPE_D3D11VA,
     };
 #else
     LOG_INFO("HW accel not available on this platform");
@@ -390,7 +388,6 @@ bool VideoDecoder::initHWAccel(AVCodecContext* codecCtx) {
         int ret = av_hwdevice_ctx_create(&m_hwDeviceCtx, type, nullptr, nullptr, 0);
         if (ret == 0) {
             codecCtx->hw_device_ctx = av_buffer_ref(m_hwDeviceCtx);
-            m_hwTransferFrame = av_frame_alloc();
             LOG_INFO("HW accel enabled: " + std::string(typeName));
             return true;
         }
@@ -402,31 +399,10 @@ bool VideoDecoder::initHWAccel(AVCodecContext* codecCtx) {
 }
 
 /**
- * 将硬件帧从 GPU 传输到 CPU
- * 复用 outFrame 缓冲，避免每帧 alloc/free
- */
-bool VideoDecoder::transferHWFrame(AVFrame* hwFrame, AVFrame* outFrame) {
-    av_frame_unref(outFrame);
-
-    int ret = av_hwframe_transfer_data(outFrame, hwFrame, 0);
-    if (ret < 0) {
-        char errBuf[AV_ERROR_MAX_STRING_SIZE];
-        av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("HW frame transfer failed: " + std::string(errBuf));
-        return false;
-    }
-
-    outFrame->pts    = hwFrame->pts;
-    outFrame->width  = hwFrame->width;
-    outFrame->height = hwFrame->height;
-    return true;
-}
-
-/**
  * 将解码帧准备为可渲染格式
  *
  * 零拷贝路径：
- * - 硬件帧 → GPU→CPU 传输（NV12）→ av_frame_ref 引用入 dstFrame
+ * - D3D11/VideoToolbox 硬件帧 → av_frame_ref 保留原生 GPU surface
  * - YUV420P 帧 → av_frame_ref 直接引用
  * 回退路径：
  * - 其他格式 → sws_scale 转 YUV420P
@@ -437,28 +413,25 @@ bool VideoDecoder::prepareFrame(AVFrame* srcFrame, Frame& dstFrame) {
         return false;
     }
 
-    // ===== 第一步：硬件帧转移到 CPU =====
     AVFrame* frameToProcess = srcFrame;
     const AVPixelFormat fmt = static_cast<AVPixelFormat>(srcFrame->format);
 
-    if (fmt == AV_PIX_FMT_VIDEOTOOLBOX || fmt == AV_PIX_FMT_CUDA ||
-        fmt == AV_PIX_FMT_D3D11 || fmt == AV_PIX_FMT_DXVA2_VLD) {
-        if (!transferHWFrame(srcFrame, m_hwTransferFrame)) {
-            return false;
-        }
-        frameToProcess = m_hwTransferFrame;
-    }
-
-    // ===== 第二步：根据格式选择零拷贝或转换路径 =====
+    // 硬件帧的 data[] 保存 D3D11 texture 或 CVPixelBuffer 句柄，不是 CPU
+    // plane。这里只增加 AVFrame 引用计数，让 GPU surface 安全穿过帧队列；
+    // 真正的跨 API 映射统一在拥有 OpenGL 上下文的渲染线程执行。
     const AVPixelFormat processFmt = static_cast<AVPixelFormat>(frameToProcess->format);
     AVFrame* dst = dstFrame.getAVFrame();
 
     // 环形缓冲复用槽位时，dst 可能残留上一轮的引用，必须先释放
     av_frame_unref(dst);
 
-    if (processFmt == AV_PIX_FMT_YUV420P || processFmt == AV_PIX_FMT_NV12) {
-        // 零拷贝：直接引用帧数据（仅增加引用计数）
-        av_frame_ref(dst, frameToProcess);
+    if (fmt == AV_PIX_FMT_D3D11 || fmt == AV_PIX_FMT_VIDEOTOOLBOX ||
+        processFmt == AV_PIX_FMT_YUV420P || processFmt == AV_PIX_FMT_NV12) {
+        // 无像素复制：硬件帧保留原生 surface，软件帧保留原始缓冲区。
+        if (av_frame_ref(dst, frameToProcess) < 0) {
+            LOG_ERROR("Failed to retain decoded video frame");
+            return false;
+        }
     } else {
         // 回退路径：sws_scale 转 YUV420P
         if (m_swsCtx && processFmt != m_lastSwsFormat) {

@@ -10,7 +10,7 @@
 
 基于 FFmpeg + OpenGL 的跨平台桌面视频播放器，使用 C++17 开发，覆盖 macOS / Windows / Linux 三端。从本地文件、纯音频，到 RTSP/RTMP/HTTP/HLS/DASH 网络流，再到 B站、YouTube 等 1000+ 平台的网页视频，都能直接打开播放。
 
-核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、硬件加速解码（VideoToolbox / CUDA / D3D11VA / DXVA2）及 NV12 零拷贝直通、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图（含 YUV/NV12 原始格式）、图片查看（JPG/PNG/YUV/NV12）、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。界面由 Dear ImGui 构建，配套语义 token 驱动、支持热加载的皮肤系统。
+核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、Windows D3D11VA 与 macOS VideoToolbox 硬件解码及原生 GPU/OpenGL 零 CPU 拷贝互操作、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图（含 YUV/NV12 原始格式）、图片查看（JPG/PNG/YUV/NV12）、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。界面由 Dear ImGui 构建，配套语义 token 驱动、支持热加载的皮肤系统。
 
 ## 功能特性
 
@@ -21,15 +21,15 @@
 - 🎛️ ImGui 控制界面（播放控制、进度条、音量、媒体信息、统计面板）
 - 📂 支持文件拖放打开
 - ⏱️ 音视频同步（自适应主时钟：有音频用音频时钟、无音频退回外部时钟），音频时钟回调间隙实时插值消除阶梯跳变
-- 🚀 FFmpeg 多线程解码，YUV420P 源帧零拷贝直通渲染
-- ⚡ 硬件加速解码（macOS VideoToolbox / Windows CUDA(NVDEC)、D3D11VA、DXVA2），默认开启，自动降级
-- 🎯 NV12 零拷贝渲染：硬件解码帧跳过 sws_scale，GL_RG8 纹理直通 GPU；CUDA 后端自动解交错兼容
+- 🚀 FFmpeg 多线程解码；软件 YUV420P 帧跳过不必要的 sws_scale 后直接上传 OpenGL
+- ⚡ 硬件加速解码（macOS VideoToolbox / Windows D3D11VA），默认开启；原生互操作不可用时在播放线程启动前重建为软件解码器
+- 🎯 端到端零 CPU 拷贝渲染：Windows 使用 D3D11 Video Processor + GPU Copy + WGL/OpenGL，macOS 使用 VideoToolbox + IOSurface/CGL，全程不执行 `av_hwframe_transfer_data`
 - 📡 RTSP/RTMP/HLS 实时流 PTS 回绕检测与自动重校准，断流指数退避重试
 - 🌊 网络流自适应缓冲：解耦的 PacketQueue（serial 序号 + 字节/时长背压）+ 环形帧队列（对标 ffplay），本地 4 帧 / 网络 8 帧，预缓冲 5 帧起播
-- 📊 实时统计信息（FPS、丢帧数、码率、队列深度）
+- 📊 实时统计信息（FPS、丢帧数、码率、队列深度、硬件后端、实际显卡、零拷贝状态与互操作路径）
 - 📝 线程安全日志系统，支持 TCP 远程日志查看，运行时热更新日志级别
 - ⚙️ INI 配置文件，支持热重载
-- 📸 截图功能（PNG / JPEG / YUV(I420) / NV12，快捷键 P）
+- 📸 截图功能（PNG / JPEG / YUV(I420) / NV12，快捷键 P）；零拷贝硬件帧暂待显式 GPU readback，当前会安全跳过并记录日志
 - 🖼️ 图片查看（JPG / PNG / YUV I420 / NV12，拖放或文件对话框打开）
 - 🎥 录像功能（纯转封装原始流，无损保留画质，零重编码开销）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
@@ -66,8 +66,8 @@
 
 | 平台 | 窗口系统 | 音频后端 | 状态 |
 |------|---------|---------|------|
-| macOS | Cocoa (GLFW) | AudioToolbox | ✅ 已支持，硬件加速 (VideoToolbox) |
-| Windows | Win32 (GLFW) | WinMM | ✅ 已支持，硬件加速 (CUDA/D3D11VA/DXVA2) |
+| macOS | Cocoa (GLFW) | AudioToolbox | ✅ 已支持，VideoToolbox + IOSurface/CGL 零 CPU 拷贝 |
+| Windows | Win32 (GLFW) | WinMM | ✅ 已支持，D3D11VA + WGL/OpenGL 零 CPU 拷贝 |
 | Linux | X11 (GLFW) | ALSA | ✅ 已支持 |
 
 ## 项目结构
@@ -533,7 +533,7 @@ https://www.youtube.com/watch?v=...
 | `F` | 全屏切换 |
 | `←` / `→` | 后退 / 前进 16 秒 |
 | `I` | 媒体信息 |
-| `S` | 统计信息 |
+| `S` | 统计信息（含硬件解码、设备及零拷贝链路） |
 | `H` | 强制切换 UI（默认鼠标移动自动显示/隐藏） |
 | `P` | 截图（保存当前视频帧） |
 | `Esc` | 退出 |
@@ -565,8 +565,8 @@ https://www.youtube.com/watch?v=...
 
 | 编解码器 | 状态 | 硬件加速 | 说明 |
 |---------|------|---------|------|
-| H.264 / AVC | ✅ 已支持 | ✅ VideoToolbox / CUDA / D3D11VA / DXVA2 | 最广泛使用的视频编码 |
-| H.265 / HEVC | ✅ 已支持 | ✅ VideoToolbox / CUDA / D3D11VA / DXVA2 | 4K/HDR 常用编码 |
+| H.264 / AVC | ✅ 已支持 | ✅ VideoToolbox / D3D11VA | 最广泛使用的视频编码 |
+| H.265 / HEVC | ✅ 已支持 | ✅ VideoToolbox / D3D11VA | 4K/HDR 常用编码 |
 | VP8 | ✅ 已支持 | ❌ 仅软解 | WebM 早期格式 |
 | VP9 | ✅ 已支持 | ❌ 仅软解 | YouTube / WebM 常用 |
 | AV1 | ✅ 已支持 | ❌ 仅软解 | 新一代编码，取决于 FFmpeg 编译选项 |
@@ -735,8 +735,8 @@ recordDir=Record
 
 [Decoder]
 # hwaccel: 是否启用硬件加速解码 (true / false)
-# macOS: VideoToolbox | Windows: CUDA(NVDEC) > D3D11VA > DXVA2
-# 硬件解码可显著降低 CPU 占用，对不支持的编解码器会自动降级为软件解码
+# macOS: VideoToolbox + IOSurface/CGL | Windows: D3D11VA + WGL/OpenGL
+# 仅在原生零 CPU 拷贝互操作可用时保持硬解，否则自动重建为软件解码
 hwaccel=true
 
 [Subtitle]
@@ -868,17 +868,18 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 - 双格式纹理支持：YUV420P（Y/U/V 三纹理）和 NV12（Y + UV 双纹理）
 - GLSL 片段着色器通过 `isNV12` uniform 切换 YUV420P/NV12 采样路径
 - 色彩空间自适应：从 AVFrame 元数据提取 `colorspace`/`color_range`，自动选择 BT.601/BT.709/BT.2020 转换矩阵和 TV/PC 量化范围；元数据缺失时按分辨率启发式选择（≥720p → BT.709）
-- NV12 UV 交错平面直接映射为 GL_RG8 纹理，零拷贝跳过 sws_scale
+- 软件 NV12 的 UV 交错平面可直接上传 GL_RG8，跳过不必要的 sws_scale；该 CPU→GPU 上传路径不标记为端到端零拷贝
 - 处理 FFmpeg linesize 与视频宽度不一致的内存对齐问题
 
 ### 硬件加速解码
 
 - macOS: VideoToolbox（Apple Silicon / Intel Mac 专用媒体引擎）
-- Windows: CUDA(NVDEC) → D3D11VA → DXVA2 按优先级自动选择
-- 硬件帧通过 `av_hwframe_transfer_data()` 传输到 CPU（NV12 格式）
-- 复用传输帧缓冲（`m_hwTransferFrame`），避免每帧 alloc/free
-- CUDA 后端：`getHWFormat` 回调确保 FFmpeg 正确协商硬件像素格式；UV 解交错模式解决 GL_RG8 兼容性绿屏问题
-- 全部候选失败时自动降级为软件解码，用户无感知
+- Windows: D3D11VA（Intel/AMD/NVIDIA 通用的 DirectX 11 视频解码）
+- 硬件 `AVFrame` 通过 `av_frame_ref()` 保留原生 GPU surface 到渲染线程，全程不调用 `av_hwframe_transfer_data()`
+- Windows：D3D11 Video Processor 完成 GPU 色彩转换，`CopyResource` 隔离视频引擎输出，再经 WGL 共享到 OpenGL
+- macOS：IOSurface-backed CVPixelBuffer 直接映射为 CGL 矩形纹理，并用双槽与 GPU fence 管理生命周期
+- 原生互操作初始化失败时，在 worker 启动前重建为软件解码器，避免 GPU→CPU→GPU 伪零拷贝
+- 按 `S` 可查看当前后端、实际设备、零拷贝状态和互操作路径
 - 可通过 `hwaccel=false` 配置项强制关闭
 
 ### 音视频同步
