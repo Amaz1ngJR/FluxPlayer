@@ -19,6 +19,9 @@ uniform int colorSpace;
 // 量化范围：0 = TV/limited range（Y:16-235），1 = PC/full range（Y:0-255）
 uniform int fullRange;
 
+// 透明度（用于截图缩放动画等特效）
+uniform float alpha = 1.0;
+
 void main()
 {
     // 采样 Y 分量（两种格式共用）
@@ -68,5 +71,5 @@ void main()
         b = y + 1.772 * u;
     }
 
-    FragColor = vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0);
+    FragColor = vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), alpha);
 }

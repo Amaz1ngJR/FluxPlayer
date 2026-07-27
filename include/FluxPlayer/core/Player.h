@@ -41,6 +41,8 @@ class QueueManager;
 class StateManager;
 class DemuxWorker;
 class DecodeWorker;
+class ToastManager;
+class ScreenshotEffect;
 
 /**
  * 播放器统计信息
@@ -183,6 +185,11 @@ public:
      * 退出播放循环
      */
     void quit();
+
+    /**
+     * 获取 Toast 管理器（供 UI 渲染使用）
+     */
+    ToastManager* getToastManager() const { return toastManager_.get(); }
 
     // ===== 状态查询 =====
 
@@ -589,6 +596,12 @@ private:
 
     // UI 控制器（不拥有，由外部管理）
     Controller* controller_;
+
+    // Toast 通知管理器（截图等操作的视觉反馈）
+    std::unique_ptr<ToastManager> toastManager_;
+
+    // 截图视觉效果（画面定格 + 缩放动画）
+    std::unique_ptr<ScreenshotEffect> screenshotEffect_;
 
     // 录制服务（无锁：录制器创建/销毁/writePacket 全归 demux 线程串行）
     std::unique_ptr<RecordingService> recordingService_;

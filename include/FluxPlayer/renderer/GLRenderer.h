@@ -136,6 +136,17 @@ public:
     void renderCachedFrame();
 
     /**
+     * @brief 使用已有的 GPU 纹理数据重新渲染，支持缩放和偏移
+     *
+     * 用于截图效果：画面缩小并移动到角落
+     * @param scale 缩放比例（1.0 = 原始大小）
+     * @param offsetX X 轴偏移比例（0.0 = 原位，1.0 = 屏幕右侧）
+     * @param offsetY Y 轴偏移比例（0.0 = 原位，1.0 = 屏幕底部）
+     * @param alpha 透明度（1.0 = 完全不透明，0.0 = 完全透明）
+     */
+    void renderCachedFrameWithTransform(float scale, float offsetX, float offsetY, float alpha);
+
+    /**
      * @brief 清除屏幕为指定颜色
      * @param r 红色分量 (0.0~1.0)
      * @param g 绿色分量 (0.0~1.0)

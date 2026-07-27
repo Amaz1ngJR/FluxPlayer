@@ -174,6 +174,8 @@ bool Config::load() {
                 else if (key == "loopPlayback") settings_.loopPlayback = (value == "true" || value == "1");
                 else if (key == "screenshotDir") settings_.screenshotDir = value;
                 else if (key == "screenshotFormat") settings_.screenshotFormat = value;
+                else if (key == "screenshotSound") settings_.screenshotSound = (value == "true" || value == "1");
+                else if (key == "screenshotToast") settings_.screenshotToast = (value == "true" || value == "1");
                 else if (key == "recordDir") settings_.recordDir = value;
                 else if (key == "hwaccel") settings_.hwaccel = (value == "true" || value == "1");
                 else if (key == "subtitleEnabled") settings_.subtitleEnabled = (value == "true" || value == "1");
@@ -266,7 +268,11 @@ bool Config::save() {
     file << "loopPlayback=" << (settings_.loopPlayback ? "true" : "false") << "\n\n";
     file << "[Screenshot]\n";
     file << "screenshotDir=" << settings_.screenshotDir << "\n";
-    file << "screenshotFormat=" << settings_.screenshotFormat << "\n\n";
+    file << "screenshotFormat=" << settings_.screenshotFormat << "\n";
+    file << "# screenshotSound: 截图时播放系统提示音 (true / false)\n";
+    file << "screenshotSound=" << (settings_.screenshotSound ? "true" : "false") << "\n";
+    file << "# screenshotToast: 显示截图结果通知 (true / false)\n";
+    file << "screenshotToast=" << (settings_.screenshotToast ? "true" : "false") << "\n\n";
     file << "[Record]\n";
     file << "recordDir=" << settings_.recordDir << "\n\n";
     file << "[Decoder]\n";

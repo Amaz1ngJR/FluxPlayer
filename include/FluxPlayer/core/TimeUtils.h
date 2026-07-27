@@ -24,4 +24,16 @@ inline int64_t steadyNowNs() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+/**
+ * 变速切换时允许的音频追赶误差（秒）
+ *
+ * 解码线程按帧粒度丢弃旧音频（DecodeWorker），回调线程按采样粒度跳过旧音频
+ * （Player）；两边必须使用同一个阈值，否则会出现一个线程认为已追上、另一个
+ * 线程继续丢帧的分歧。因此这里统一定义，不在各 .cpp 内各自复制。
+ *
+ * 取值权衡：需大于常见音频回调/重采样造成的几毫秒抖动，避免频繁进入追赶；
+ * 又需远小于会造成可见卡顿的秒级时钟差，保证 AClock 不会长期落后于 VClock。
+ */
+constexpr double kAudioCatchupToleranceSec = 0.05;
+
 } // namespace FluxPlayer

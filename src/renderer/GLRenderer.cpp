@@ -445,10 +445,88 @@ void GLRenderer::renderCachedFrame() {
     m_shader->setInt("isNV12", m_lastIsNV12Shader ? 1 : 0);
     m_shader->setInt("colorSpace", m_lastColorSpace);
     m_shader->setInt("fullRange", m_lastFullRange);
+    m_shader->setFloat("alpha", 1.0f);  // 正常渲染：完全不透明
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);
     m_shader->unuse();
+}
+
+void GLRenderer::renderCachedFrameWithTransform(float scale, float offsetX, float offsetY, float alpha) {
+    if (!m_hasValidTexture) return;
+
+    // 保存当前 OpenGL 状态
+    GLint oldViewport[4];
+    glGetIntegerv(GL_VIEWPORT, oldViewport);
+
+    int windowWidth = oldViewport[2];
+    int windowHeight = oldViewport[3];
+
+    // 启用混合模式以支持 alpha 透明度
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // 计算缩放后的尺寸
+    int scaledWidth = static_cast<int>(windowWidth * scale);
+    int scaledHeight = static_cast<int>(windowHeight * scale);
+
+    // 计算偏移后的位置
+    int xPos = static_cast<int>(offsetX * (windowWidth - scaledWidth));
+    int yPos = static_cast<int>(offsetY * (windowHeight - scaledHeight));
+
+    // 设置视口为缩放后的区域
+    glViewport(xPos, yPos, scaledWidth, scaledHeight);
+
+    // 硬件加速渲染
+    if (m_lastFrameWasHardware && m_hardwareInterop) {
+        HardwareTextureBinding binding;
+        if (m_hardwareInterop->beginCachedFrame(binding)) {
+            drawHardwareBinding(binding, m_lastColorSpace, m_lastFullRange);
+            m_hardwareInterop->endFrame();
+        }
+        // 恢复视口并返回
+        glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+        glDisable(GL_BLEND);
+        return;
+    }
+
+    // 纯音频模式：使用 RGBA 直通着色器渲染封面图
+    if (m_staticImageUploaded && m_rgbaShader) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
+        m_rgbaShader->use();
+        m_rgbaShader->setFloat("alpha", alpha);  // 设置透明度
+        glBindVertexArray(m_VAO);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindVertexArray(0);
+        m_rgbaShader->unuse();
+        // 恢复视口
+        glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+        glDisable(GL_BLEND);
+        return;
+    }
+
+    // YUV 渲染
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_textureY);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, m_lastIsNV12Shader ? m_textureUV : m_textureU);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, m_textureV);
+
+    m_shader->use();
+    m_shader->setInt("isNV12", m_lastIsNV12Shader ? 1 : 0);
+    m_shader->setInt("colorSpace", m_lastColorSpace);
+    m_shader->setInt("fullRange", m_lastFullRange);
+    m_shader->setFloat("alpha", alpha);  // 设置透明度
+    glBindVertexArray(m_VAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    m_shader->unuse();
+
+    // 恢复原始视口
+    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    glDisable(GL_BLEND);
 }
 
 /**

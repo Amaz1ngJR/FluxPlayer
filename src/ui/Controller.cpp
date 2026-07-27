@@ -4,6 +4,7 @@
 #include "FluxPlayer/ui/UiContext.h"
 #include "FluxPlayer/ui/SkinManager.h"
 #include "FluxPlayer/ui/SkinRenderer.h"
+#include "FluxPlayer/ui/Toast.h"
 #include "FluxPlayer/subtitle/SubtitleManager.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
@@ -314,6 +315,11 @@ void Controller::render() {
     }
     if (showStats_) {
         renderStats();
+    }
+
+    // 渲染 Toast 通知（最上层，在 ImGui::Render 之前）
+    if (auto* toastMgr = player_.getToastManager()) {
+        toastMgr->render();
     }
 
     // 渲染 ImGui
@@ -1957,6 +1963,24 @@ void Controller::renderSettingsModal() {
             s.screenshotFormat = fmtMap[fIdx];
             cfgInst.save();
         }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // 截图反馈选项
+        ImGui::Text("Feedback:");
+        ImGui::Indent();
+
+        if (ImGui::Checkbox("Play sound", &s.screenshotSound)) {
+            cfgInst.save();
+        }
+
+        if (ImGui::Checkbox("Show toast notification", &s.screenshotToast)) {
+            cfgInst.save();
+        }
+
+        ImGui::Unindent();
     }
 
     ImGui::Dummy(ImVec2(0, settingsUi.sectionGap));

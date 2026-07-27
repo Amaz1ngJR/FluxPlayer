@@ -22,6 +22,8 @@ public:
         bool loopPlayback = false;
         std::string screenshotDir;
         std::string screenshotFormat = "png";  // png 或 jpg
+        bool screenshotSound = true;           // 截图音效开关
+        bool screenshotToast = true;           // Toast 通知开关
         std::string recordDir;
         bool hwaccel = true;  // 硬件加速解码，默认开启
 

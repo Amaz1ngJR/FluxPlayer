@@ -1,5 +1,6 @@
 #include "FluxPlayer/core/DecodeWorker.h"
 #include "FluxPlayer/core/Player.h"
+#include "FluxPlayer/core/TimeUtils.h"
 #include "FluxPlayer/core/ClockController.h"
 #include "FluxPlayer/core/AVSync.h"
 #include "FluxPlayer/core/QueueManager.h"
@@ -20,14 +21,8 @@ extern "C" {
 
 namespace FluxPlayer {
 
-namespace {
-
-// 与音频回调侧保持一致的追赶容差。
-// 解码线程按帧粒度丢弃旧音频，回调线程按采样粒度跳过旧音频；
-// 两边使用同一个阈值，避免一个线程认为已追上、另一个线程继续丢帧。
-constexpr double kAudioCatchupToleranceSec = 0.05;
-
-} // namespace
+// 音频追赶容差 kAudioCatchupToleranceSec 定义在 core/TimeUtils.h，
+// 与 Player 的音频回调侧共用同一阈值。
 
 DecodeWorker::DecodeWorker(Player* player, StreamKind kind)
     : player_(player), kind_(kind) {}

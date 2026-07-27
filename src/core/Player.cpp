@@ -28,6 +28,8 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/ui/Toast.h"
+#include "FluxPlayer/ui/ScreenshotEffect.h"
 
 #include <filesystem>
 #include <fstream>
@@ -54,10 +56,8 @@ namespace FluxPlayer {
 
 namespace {
 
-// 变速切换时允许的音频追赶误差。
-// 这个值需要大于常见音频回调/重采样造成的几毫秒抖动，避免频繁进入追赶；
-// 又需要远小于会造成可见卡顿的秒级时钟差，保证 AClock 不会长期落后于 VClock。
-constexpr double kAudioCatchupToleranceSec = 0.05;
+// 音频追赶容差 kAudioCatchupToleranceSec 定义在 core/TimeUtils.h，
+// 与 DecodeWorker 共用同一阈值。
 // 单次音频设备回调内最多跳过的旧音频量。追赶旧音频不能无限循环，
 // 否则设备线程迟迟不提交新 buffer，主时钟反而会停住。
 constexpr double kMaxAudioCatchupDiscardSec = 0.25;
@@ -190,6 +190,8 @@ Player::Player()
 {
     commandQueue_ = std::make_unique<CommandQueue>();
     recordingService_ = std::make_unique<RecordingService>();
+    toastManager_ = std::make_unique<ToastManager>();
+    screenshotEffect_ = std::make_unique<ScreenshotEffect>();
     clockController_ = std::make_unique<ClockController>();
     queueManager_ = std::make_unique<QueueManager>();
     stateManager_ = std::make_unique<StateManager>(PlayerState::IDLE);
@@ -659,6 +661,7 @@ void Player::run() {
         timer.start();
 
         double lastFrameTime = 0.0;
+        double lastRenderTime = 0.0;  // 上一帧的真实渲染时间（用于 deltaTime 计算）
         double lastPrint = 0.0;       // 上次打印状态的时间（随 timer 重置）
         size_t lastBytesRead = 0;     // 上次统计码率时的累计字节数
 
@@ -686,17 +689,43 @@ void Player::run() {
             }
             double currentTime = timer.getElapsedSeconds();
 
+            // 更新截图效果动画（在渲染之前更新状态）
+            float deltaTime = static_cast<float>(currentTime - lastRenderTime);
+            if (screenshotEffect_) {
+                screenshotEffect_->update(deltaTime);
+            }
+            lastRenderTime = currentTime;
+
             // 纯音频模式渲染静态封面，视频模式从队列取帧渲染
             if (audioOnly_) {
                 renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
                 if (renderer_->hasValidTexture()) renderer_->renderCachedFrame();
             } else {
+                // 正常渲染视频帧（背景持续播放）
                 renderVideoFrame(lastFrameTime);
+
+                // 截图效果激活时，在视频之上叠加截图动画
+                // 注意：由于单纹理限制，叠加的实际是"上一帧"，但视觉差异可忽略
+                if (screenshotEffect_ && screenshotEffect_->isActive()) {
+                    if (renderer_->hasValidTexture()) {
+                        renderer_->renderCachedFrameWithTransform(
+                            screenshotEffect_->getScale(),
+                            screenshotEffect_->getOffsetX(),
+                            screenshotEffect_->getOffsetY(),
+                            screenshotEffect_->getAlpha()
+                        );
+                    }
+                }
             }
 
-            // 调用渲染回调（用于渲染 UI）
+            // 调用渲染回调（用于渲染 UI，包括 Toast）
             if (renderCallback_) {
                 renderCallback_();
+            }
+
+            // 更新 Toast 通知状态（渲染已在 Controller 中完成）
+            if (toastManager_) {
+                toastManager_->update(deltaTime);
             }
 
             // 交换缓冲区并处理事件
@@ -706,6 +735,12 @@ void Player::run() {
             // 更新 FPS
             fpsCounter.update();
             currentFPS_.store(fpsCounter.getFPS());
+
+            // 截图效果激活时，限制主循环帧率为 60fps 以保证动画流畅
+            // 正常播放时由视频帧同步控制帧率，但截图动画需要独立的高帧率
+            if (screenshotEffect_ && screenshotEffect_->isActive()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
 
             // 每秒打印一次状态
             updatePlaybackStats(currentTime, lastPrint, lastBytesRead);
@@ -781,13 +816,16 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                     queueManager_->videoFrameQueue()->consume();   // 一次原子操作推进 keep-last 状态机
                 } else {
                     // 还没到显示时间：短暂 sleep 避免主循环空转把 FPS 推到 100+
-                    // sleep 时长取剩余时间的 80%，留出 swapBuffers/UI 的余量；
-                    // 上限 20ms 防止个别异常 PTS 导致长时间卡顿
-                    double waitSec = nextPTS - masterClock - 0.002;
-                    if (waitSec > 0.001) {
-                        int waitMs = static_cast<int>(std::min(waitSec * 800.0, 20.0));
-                        if (waitMs > 0) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                    // 但在截图效果激活时，跳过 sleep 以保持高帧率渲染动画
+                    if (!screenshotEffect_ || !screenshotEffect_->isActive()) {
+                        // sleep 时长取剩余时间的 80%，留出 swapBuffers/UI 的余量；
+                        // 上限 20ms 防止个别异常 PTS 导致长时间卡顿
+                        double waitSec = nextPTS - masterClock - 0.002;
+                        if (waitSec > 0.001) {
+                            int waitMs = static_cast<int>(std::min(waitSec * 800.0, 20.0));
+                            if (waitMs > 0) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                            }
                         }
                     }
                 }
@@ -1315,15 +1353,92 @@ bool Player::initWindowAndRenderer() {
                         // 也不被并发 flush 影响）。leased 持有引用，saveFrame 期间数据有效。
                         Frame leased;
                         if (queueManager_->videoFrameQueue() && queueManager_->videoFrameQueue()->peekLastRef(leased)) {
+                            // 仅在动画未激活时触发新动画（避免连续截图时动画被打断）
+                            // 但截图文件和音效始终执行
+                            bool shouldTriggerAnimation = !screenshotEffect_ || !screenshotEffect_->isActive();
+                            if (shouldTriggerAnimation && screenshotEffect_) {
+                                screenshotEffect_->trigger();
+                            }
+
                             auto& cfg = Config::getInstance().get();
+                            std::string savedPath;
+
                             // 根据格式分发：yuv/nv12 走原始 YUV 写出（无编码），png/jpg 走编码
                             if (cfg.screenshotFormat == "yuv" || cfg.screenshotFormat == "nv12") {
-                                Screenshot::saveFrameYUV(&leased, cfg.screenshotDir, cfg.screenshotFormat);
+                                savedPath = Screenshot::saveFrameYUV(&leased, cfg.screenshotDir, cfg.screenshotFormat);
                             } else {
-                                Screenshot::saveFrame(&leased, cfg.screenshotDir, cfg.screenshotFormat);
+                                savedPath = Screenshot::saveFrame(&leased, cfg.screenshotDir, cfg.screenshotFormat);
+                            }
+
+                            // 显示 Toast 反馈
+                            if (toastManager_ && cfg.screenshotToast) {
+                                ToastMessage msg;
+                                if (!savedPath.empty()) {
+                                    // 成功
+                                    msg.type = ToastType::Success;
+                                    msg.title = "Screenshot saved";
+
+                                    // 截断长路径
+                                    if (savedPath.length() > 50) {
+                                        size_t lastSlash = savedPath.find_last_of("/\\");
+                                        if (lastSlash != std::string::npos) {
+                                            std::string filename = savedPath.substr(lastSlash + 1);
+                                            msg.content = ".../" + filename;
+                                        } else {
+                                            msg.content = savedPath.substr(0, 47) + "...";
+                                        }
+                                    } else {
+                                        msg.content = savedPath;
+                                    }
+
+                                    // 添加文件大小和分辨率信息
+                                    try {
+                                        auto fileSize = std::filesystem::file_size(savedPath);
+                                        std::string sizeStr;
+                                        if (fileSize < 1024) {
+                                            sizeStr = std::to_string(fileSize) + " B";
+                                        } else if (fileSize < 1024 * 1024) {
+                                            sizeStr = std::to_string(fileSize / 1024) + " KB";
+                                        } else {
+                                            sizeStr = std::to_string(fileSize / (1024 * 1024)) + " MB";
+                                        }
+
+                                        const AVFrame* avFrame = leased.getAVFrame();
+                                        if (avFrame) {
+                                            msg.detail = std::to_string(avFrame->width) + "x" +
+                                                        std::to_string(avFrame->height) + " • " + sizeStr;
+                                        } else {
+                                            msg.detail = sizeStr;
+                                        }
+                                    } catch (...) {
+                                        // 文件大小获取失败，忽略
+                                    }
+
+                                    msg.duration = 3.0f;
+                                } else {
+                                    // 失败
+                                    msg.type = ToastType::Error;
+                                    msg.title = "Screenshot failed";
+                                    msg.content = "Unable to save screenshot";
+                                    msg.detail = "Check logs or try disabling hardware decoding";
+                                    msg.duration = 5.0f;
+                                }
+
+                                toastManager_->show(msg);
                             }
                         } else {
                             LOG_WARN("Screenshot: no frame available");
+
+                            // 显示无帧可用的 Toast
+                            if (toastManager_ && Config::getInstance().get().screenshotToast) {
+                                ToastMessage msg;
+                                msg.type = ToastType::Warning;
+                                msg.title = "Screenshot unavailable";
+                                msg.content = "No video frame available";
+                                msg.detail = "Wait for video to start playing";
+                                msg.duration = 3.0f;
+                                toastManager_->show(msg);
+                            }
                         }
                     }
                     break;
