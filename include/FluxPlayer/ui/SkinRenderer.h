@@ -60,6 +60,28 @@ void DrawCornerCuts(ImDrawList* dl, ImVec2 min, ImVec2 max,
                     float lineLen = 14.0f, float thickness = 1.5f);
 
 /**
+ * @brief 绘制「六边形切角」面板：左上 / 右下削角的八边形轮廓
+ *
+ * 对应 mockup_home.svg 中两块主面板的形状：矩形的左上角与右下角被 45° 斜边切掉，
+ * 形成一个八顶点多边形。绘制内容依次为：
+ *   1. bgPanelTransparent 多边形填充
+ *   2. decoration.glow 开启时的外层发光描边（3 层，由内向外变淡）
+ *   3. accent 主描边（2px）
+ *   4. decoration.cutCorners 开启时的内层细边（line.primary，内缩 14px）
+ *   5. 左上 / 右下角落强调线段（accent 实色，模拟 mockup 的 corner accent marks）
+ *
+ * @param dl      目标 DrawList
+ * @param min     面板左上（未切角的外接矩形）
+ * @param max     面板右下
+ * @param accent  主色调（左面板传 accentPrimary，右面板传 accentSecondary）
+ * @param s       皮肤快照（读 decoration / opacity / colors）
+ * @param cut     切角斜边在两个方向上的长度，像素
+ */
+void DrawHexPanel(ImDrawList* dl, ImVec2 min, ImVec2 max,
+                  const SkinColor& accent, const SkinSnapshot& s,
+                  float cut = 30.0f);
+
+/**
  * @brief 在矩形外围绘制多层向外扩散的发光效果
  *
  * 仅当 `s.decoration.glow` 为 true 时绘制；总共 6 层，由内向外透明度递减。
@@ -112,5 +134,16 @@ void DrawPauseIcon(ImDrawList* dl, ImVec2 center, float size, const SkinColor& c
  * @brief 绘制方形停止图标
  */
 void DrawStopIcon(ImDrawList* dl, ImVec2 center, float size, const SkinColor& color);
+
+/**
+ * @brief 绘制齿轮图标（8齿 + 圆心孔）
+ * @param dl        ImGui 绘制列表
+ * @param center    齿轮中心
+ * @param radius    齿轮基础半径（不含齿长）
+ * @param color     前景色（齿轮本体）
+ * @param holeColor 齿轮中心孔的颜色（通常为背景色）
+ */
+void DrawGearIcon(ImDrawList* dl, ImVec2 center, float radius,
+                  ImU32 color, ImU32 holeColor);
 
 } // namespace FluxPlayer

@@ -163,6 +163,71 @@ void DrawCornerCuts(ImDrawList* dl, ImVec2 min, ImVec2 max,
     dl->AddLine(ImVec2(max.x, max.y), ImVec2(max.x, max.y - lineLen), col, thickness);
 }
 
+void DrawHexPanel(ImDrawList* dl, ImVec2 min, ImVec2 max,
+                  const SkinColor& accent, const SkinSnapshot& s,
+                  float cut) {
+    // 切角不能超过面板一半，否则多边形自交
+    float maxCut = std::min(max.x - min.x, max.y - min.y) * 0.5f;
+    if (cut > maxCut) cut = maxCut;
+    if (cut < 0.0f) cut = 0.0f;
+
+    // 八顶点轮廓：四个角全切（顺时针，从左上角切口起始点开始）
+    const ImVec2 pts[8] = {
+        ImVec2(min.x + cut, min.y),      // 顶边左侧
+        ImVec2(max.x - cut, min.y),      // 顶边右侧
+        ImVec2(max.x, min.y + cut),      // 右边顶部
+        ImVec2(max.x, max.y - cut),      // 右边底部
+        ImVec2(max.x - cut, max.y),      // 底边右侧
+        ImVec2(min.x + cut, max.y),      // 底边左侧
+        ImVec2(min.x, max.y - cut),      // 左边底部
+        ImVec2(min.x, min.y + cut),      // 左边顶部
+    };
+    const int n = 8;
+
+    // 1) 面板填充
+    dl->AddConvexPolyFilled(pts, n, ToImU32(s.colors.bgPanelTransparent));
+
+    // 2) 外层发光描边（由外向内变亮）
+    if (s.decoration.glow) {
+        for (int layer = 3; layer >= 1; --layer) {
+            ImU32 g = ScaleAlpha(accent, s.metrics.opacity.subtleDecoration * (0.22f * layer));
+            float thick = 2.0f + 2.6f * layer;
+            for (int i = 0; i < n; i++) dl->AddLine(pts[i], pts[(i + 1) % n], g, thick);
+        }
+    }
+
+    // 3) 主描边
+    ImU32 border = ToImU32(accent);
+    for (int i = 0; i < n; i++) dl->AddLine(pts[i], pts[(i + 1) % n], border, 2.0f);
+
+    // 4) 内层细边（内缩 6px 的同形轮廓）
+    if (s.decoration.cutCorners) {
+        const float in = 6.0f;
+        ImVec2 imin(min.x + in, min.y + in), imax(max.x - in, max.y - in);
+        if (imax.x > imin.x && imax.y > imin.y) {
+            float icut = cut - in * 0.7071f;  // 45度角，内缩距离需乘sqrt(2)/2
+            if (icut < 0.0f) icut = 0.0f;
+            const ImVec2 ip[8] = {
+                ImVec2(imin.x + icut, imin.y), ImVec2(imax.x - icut, imin.y),
+                ImVec2(imax.x, imin.y + icut), ImVec2(imax.x, imax.y - icut),
+                ImVec2(imax.x - icut, imax.y), ImVec2(imin.x + icut, imax.y),
+                ImVec2(imin.x, imax.y - icut), ImVec2(imin.x, imin.y + icut),
+            };
+            ImU32 ic = ScaleAlpha(s.colors.linePrimary, 0.70f);
+            for (int i = 0; i < 8; i++) dl->AddLine(ip[i], ip[(i + 1) % 8], ic, 1.0f);
+        }
+    }
+
+    // 5) 角落强调线段：左上水平+垂直（实色），右下对称（半透明）
+    float hMark = std::min(150.0f, (max.x - min.x) * 0.21f);
+    float vMark = std::min(86.0f,  (max.y - min.y) * 0.14f);
+    dl->AddLine(ImVec2(min.x + cut, min.y), ImVec2(min.x + cut + hMark, min.y), border, 2.0f);
+    dl->AddLine(ImVec2(min.x, min.y + cut), ImVec2(min.x, min.y + cut + vMark), border, 2.0f);
+    ImU32 dim = ScaleAlpha(accent, 0.48f);
+    dl->AddLine(ImVec2(max.x - cut, max.y), ImVec2(max.x - cut - hMark, max.y), dim, 1.5f);
+    dl->AddLine(ImVec2(max.x, max.y - cut), ImVec2(max.x, max.y - cut - vMark), dim, 1.5f);
+}
+
 void DrawGlowRect(ImDrawList* dl, ImVec2 min, ImVec2 max,
                   const SkinColor& base, const SkinSnapshot& s,
                   float rounding, int layers) {
@@ -278,6 +343,39 @@ void DrawStopIcon(ImDrawList* dl, ImVec2 center, float size, const SkinColor& co
     float h = size * 0.45f;
     dl->AddRectFilled(ImVec2(center.x - h * 0.5f, center.y - h * 0.5f),
                       ImVec2(center.x + h * 0.5f, center.y + h * 0.5f), col, 1.0f);
+}
+
+void DrawGearIcon(ImDrawList* dl, ImVec2 center, float radius,
+                  ImU32 color, ImU32 holeColor) {
+    const int numTeeth = 8;
+    const float toothWidth = radius * 0.3f;
+    const float toothLength = radius * 0.4f;
+    const float pi = 3.14159265f;
+
+    // 绘制齿轮齿（8个矩形）
+    for (int i = 0; i < numTeeth; i++) {
+        float angle = (i * 2.0f * pi / numTeeth);
+        float cos_a = std::cos(angle);
+        float sin_a = std::sin(angle);
+        float innerR = radius * 0.7f;
+        float outerR = radius + toothLength;
+
+        ImVec2 p1(center.x + cos_a * innerR - sin_a * toothWidth * 0.5f,
+                 center.y + sin_a * innerR + cos_a * toothWidth * 0.5f);
+        ImVec2 p2(center.x + cos_a * innerR + sin_a * toothWidth * 0.5f,
+                 center.y + sin_a * innerR - cos_a * toothWidth * 0.5f);
+        ImVec2 p3(center.x + cos_a * outerR + sin_a * toothWidth * 0.5f,
+                 center.y + sin_a * outerR - cos_a * toothWidth * 0.5f);
+        ImVec2 p4(center.x + cos_a * outerR - sin_a * toothWidth * 0.5f,
+                 center.y + sin_a * outerR + cos_a * toothWidth * 0.5f);
+
+        dl->AddQuadFilled(p1, p2, p3, p4, color);
+    }
+
+    // 绘制中心圆
+    dl->AddCircleFilled(center, radius * 0.5f, color);
+    // 绘制中心孔
+    dl->AddCircleFilled(center, radius * 0.25f, holeColor);
 }
 
 // 引用一次 currentTime 避免编译器对未使用的 unnamed-namespace 函数告警

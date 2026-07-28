@@ -33,7 +33,8 @@ class UiContext;
  */
 struct HomeScreenResult {
     bool shouldQuit;
-    bool openMerge = false;     ///< true 表示进入 MergeScreen 视频合并界面
+    bool openMerge    = false;  ///< true 表示进入 MergeScreen 视频合并界面
+    bool openSettings = false;  ///< true 表示上层应打开设置界面
     std::string mediaPath;
 };
 
@@ -91,12 +92,20 @@ private:
     void renderBackground();
 
     /**
-     * @brief 渲染右侧观看历史侧栏（列表 + 单条删除 + 清空按钮）
+     * @brief 渲染右侧观看历史面板（列表 + 单条删除 + 清空按钮）
      *
      * 数据来自 init() 时缓存的 history_，点击某条即回填 selectedFile_ 触发重播，
      * 单条删除调用 HistoryStore::remove 并同步 history_，清空走确认弹窗。
+     *
+     * 面板几何由 renderUI() 统一计算后传入（与左侧面板共用同一套布局常量），
+     * 六边形切角背景与发光边框也在 renderUI() 中一并绘制，本函数只填内容。
+     *
+     * @param panelX 面板左上角屏幕 X
+     * @param panelY 面板左上角屏幕 Y
+     * @param panelW 面板宽度
+     * @param panelH 面板高度
      */
-    void renderHistoryPanel();
+    void renderHistoryPanel(float panelX, float panelY, float panelW, float panelH);
 
     /// 渲染「清空全部历史」二次确认模态弹窗
     void renderClearConfirmPopup();
@@ -133,6 +142,10 @@ private:
     std::string pendingDeleteId_;
     /// 是否请求弹出「清空全部」确认弹窗
     bool clearConfirmOpen_ = false;
+
+    // ==================== 设置入口 ====================
+    /// 用户点击齿轮按钮时置 true；run() 循环检测到后设置 result.openSettings 并 break
+    bool settingsRequested_ = false;
 };
 
 } // namespace FluxPlayer

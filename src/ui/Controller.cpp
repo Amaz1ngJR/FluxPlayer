@@ -795,41 +795,15 @@ void Controller::renderVolumeAndSettings(float btnH) {
         LOG_INFO("Settings menu toggled: " + std::string(showSettingsMenu_ ? "shown" : "hidden"));
     }
 
-    // 绘制齿轮图标
+    // 绘制齿轮图标（复用 SkinRenderer::DrawGearIcon）
     {
         float cx = (settingsBtnMin.x + settingsBtnMax.x) * 0.5f;
         float cy = (settingsBtnMin.y + settingsBtnMax.y) * 0.5f;
         float radius = (settingsBtnMax.y - settingsBtnMin.y) * 0.25f;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImU32 col = ScaleAlpha(sk.colors.accentPrimary, 0.86f);
-
-        // 绘制齿轮齿（8个矩形）
-        const int numTeeth = 8;
-        const float toothWidth = radius * 0.3f;
-        const float toothLength = radius * 0.4f;
-        for (int i = 0; i < numTeeth; i++) {
-            float angle = (i * 2.0f * 3.14159f / numTeeth);
-            float cos_a = std::cos(angle);
-            float sin_a = std::sin(angle);
-            float innerR = radius * 0.7f;
-            float outerR = radius + toothLength;
-
-            ImVec2 p1(cx + cos_a * innerR - sin_a * toothWidth * 0.5f,
-                     cy + sin_a * innerR + cos_a * toothWidth * 0.5f);
-            ImVec2 p2(cx + cos_a * innerR + sin_a * toothWidth * 0.5f,
-                     cy + sin_a * innerR - cos_a * toothWidth * 0.5f);
-            ImVec2 p3(cx + cos_a * outerR + sin_a * toothWidth * 0.5f,
-                     cy + sin_a * outerR - cos_a * toothWidth * 0.5f);
-            ImVec2 p4(cx + cos_a * outerR - sin_a * toothWidth * 0.5f,
-                     cy + sin_a * outerR + cos_a * toothWidth * 0.5f);
-
-            dl->AddQuadFilled(p1, p2, p3, p4, col);
-        }
-
-        // 绘制中心圆
-        dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.5f, col);
-        // 绘制中心孔
-        dl->AddCircleFilled(ImVec2(cx, cy), radius * 0.25f, ToImU32(sk.colors.bgVoid));
+        DrawGearIcon(ImGui::GetWindowDrawList(),
+                     ImVec2(cx, cy), radius,
+                     ScaleAlpha(sk.colors.accentPrimary, 0.86f),
+                     ToImU32(sk.colors.bgVoid));
     }
 
     // 音量图标按钮（固定位置）

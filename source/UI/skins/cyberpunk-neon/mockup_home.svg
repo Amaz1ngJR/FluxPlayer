@@ -1,68 +1,220 @@
 <svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Runtime-aligned Home surface: 520x400 card, local-file and URL entry only. -->
+  <!-- REDESIGNED Home surface — concept-inspired: title above panels, two angular hex-cut panels. -->
   <defs>
-    <linearGradient id="rail" x1="0" y1="0" x2="1" y2="0">
+    <linearGradient id="railH" x1="0" y1="0" x2="1440" y2="0" gradientUnits="userSpaceOnUse">
       <stop stop-color="#00E8FF" stop-opacity="0"/>
-      <stop offset=".26" stop-color="#00E8FF"/>
-      <stop offset=".7" stop-color="#A855FF"/>
-      <stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#00E8FF"/>
+      <stop offset="0.52" stop-color="#2DA7FF"/>
+      <stop offset="0.78" stop-color="#A855FF"/>
+      <stop offset="1"    stop-color="#FF3DF2" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="progress" x1="0" y1="0" x2="1" y2="0">
-      <stop stop-color="#00E8FF"/>
-      <stop offset=".55" stop-color="#2DA7FF"/>
-      <stop offset="1" stop-color="#A855FF"/>
+    <linearGradient id="cyanBorder" x1="96" y1="0" x2="800" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF" stop-opacity="0.95"/>
+      <stop offset="0.6" stop-color="#00AADA" stop-opacity="0.5"/>
+      <stop offset="1"   stop-color="#00E8FF" stop-opacity="0.12"/>
     </linearGradient>
-    <radialGradient id="leftGlow" cx="0" cy="0" r="1" gradientTransform="translate(150 130) scale(330)">
-      <stop stop-color="#2DA7FF" stop-opacity=".12"/>
-      <stop offset="1" stop-color="#030511" stop-opacity="0"/>
+    <linearGradient id="violetBorder" x1="856" y1="0" x2="1344" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A855FF" stop-opacity="0.16"/>
+      <stop offset="0.4" stop-color="#A855FF" stop-opacity="0.65"/>
+      <stop offset="1"   stop-color="#FF3DF2"/>
+    </linearGradient>
+    <linearGradient id="energy" x1="484" y1="0" x2="956" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.2"  stop-color="#00E8FF"/>
+      <stop offset="0.5"  stop-color="#EAF8FF"/>
+      <stop offset="0.8"  stop-color="#A855FF"/>
+      <stop offset="1"    stop-color="#A855FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="bridge" x1="800" y1="0" x2="856" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E8FF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#A855FF" stop-opacity="0.5"/>
+    </linearGradient>
+    <radialGradient id="bgVoid" cx="0.5" cy="0.42" r="0.7">
+      <stop stop-color="#071B31"/>
+      <stop offset="0.55" stop-color="#050A18"/>
+      <stop offset="1"    stop-color="#02040E"/>
     </radialGradient>
-    <radialGradient id="rightGlow" cx="0" cy="0" r="1" gradientTransform="translate(1290 760) scale(330)">
-      <stop stop-color="#A855FF" stop-opacity=".12"/>
-      <stop offset="1" stop-color="#030511" stop-opacity="0"/>
-    </radialGradient>
-    <filter id="glow"><feGaussianBlur stdDeviation="7"/></filter>
+    <filter id="strongGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softGlow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
-  <rect width="1440" height="900" fill="#030511"/>
-  <rect width="1440" height="900" fill="url(#leftGlow)"/>
-  <rect width="1440" height="900" fill="url(#rightGlow)"/>
-  <path d="M0 2H1440M0 898H1440" stroke="url(#rail)" stroke-width="3"/>
-  <g opacity=".14" stroke="#00E8FF">
-    <path d="M720 378L25 900M720 378L190 900M720 378L360 900M720 378L530 900M720 378L910 900M720 378L1080 900M720 378L1250 900M720 378L1415 900"/>
-    <path d="M573 488H867M492 548H948M392 626H1048M268 723H1172M112 844H1328"/>
+
+  <!-- ── Background ── -->
+  <rect width="1440" height="900" fill="url(#bgVoid)"/>
+
+  <!-- Faint diagonal circuit traces -->
+  <g stroke="#00E8FF" stroke-opacity="0.055" stroke-width="1">
+    <path d="M96 176L30 60M800 176L900 40M856 176L760 40M1344 176L1410 60"/>
+    <path d="M96 794L30 870M800 794L880 880M856 794L770 880M1344 794L1414 876"/>
   </g>
-  <!-- Runtime glow circles from HomeScreen::renderBackground (1440 x 900 reference frame). -->
-  <g fill="#2DA7FF">
-    <circle cx="144" cy="135" r="280" opacity=".077"/>
-    <circle cx="144" cy="135" r="154" opacity=".099"/>
+
+  <!-- Node dots on traces -->
+  <g fill="#00E8FF" opacity="0.20">
+    <circle cx="72" cy="112" r="2"/><circle cx="46" cy="74" r="1.5"/>
+    <circle cx="836" cy="110" r="2"/><circle cx="862" cy="80" r="1.5"/>
+    <circle cx="1368" cy="112" r="2"/>
   </g>
-  <circle cx="144" cy="135" r="70" fill="#00E8FF" opacity=".143"/>
-  <g fill="#A855FF">
-    <circle cx="1296" cy="765" r="260" opacity=".088"/>
-    <circle cx="1296" cy="765" r="143" opacity=".121"/>
+
+  <!-- Top/bottom rails -->
+  <path d="M0 2H1440"   stroke="url(#railH)" stroke-width="2.5"/>
+  <path d="M0 898H1440" stroke="url(#railH)" stroke-width="2.5"/>
+
+  <!-- Screen corner brackets -->
+  <g stroke="#136C8F" stroke-width="1.5" fill="none">
+    <path d="M28 28H84L100 44M1412 28H1356L1340 44M28 872H84L100 856M1412 872H1356L1340 856"/>
   </g>
-  <circle cx="1296" cy="765" r="65" fill="#FF3DF2" opacity=".165"/>
-  <circle cx="1224" cy="108" r="120" fill="#2DA7FF" opacity=".066"/>
-  <g opacity=".35" fill="#00E8FF">
-    <circle cx="204" cy="292" r="1.2"/><circle cx="314" cy="174" r="1.2"/><circle cx="1180" cy="236" r="1.2"/>
-    <circle cx="1320" cy="510" r="1.2"/><circle cx="1060" cy="715" r="1.2"/><circle cx="234" cy="756" r="1.2"/>
+  <g stroke="#00E8FF" stroke-opacity="0.48" stroke-width="1.5" fill="none">
+    <path d="M28 58H66M1374 58H1412M28 842H66M1374 842H1412"/>
   </g>
-  <rect x="456" y="246" width="528" height="408" rx="9" fill="#00E8FF" opacity=".07" filter="url(#glow)"/>
-  <rect x="460" y="250" width="520" height="400" rx="6" fill="#070D22" fill-opacity=".88" stroke="#00E8FF" stroke-opacity=".68"/>
-  <path d="M460 254H980" stroke="url(#rail)" stroke-width="4"/>
-  <path d="M460 647H980" stroke="url(#rail)" stroke-width="3"/>
-  <path d="M460 274V250H484M956 250H980V274M460 626V650H484M956 650H980V626" stroke="#00E8FF" stroke-width="2.5"/>
-  <path d="M466 277V256H487M953 256H974V277M466 623V644H487M953 644H974V623" stroke="#A855FF" stroke-opacity=".5"/>
-  <text x="720" y="312" text-anchor="middle" font-family="Consolas, monospace" font-size="38" letter-spacing="4" fill="#00E8FF">FLUX PLAYER</text>
-  <path d="M508 325H583M857 325H932" stroke="#00E8FF" stroke-opacity=".42"/>
-  <text x="720" y="343" text-anchor="middle" font-family="Consolas, monospace" font-size="13" letter-spacing="2.4" fill="#A8C7E8">// MEDIA PLAYER SYSTEM //</text>
-  <rect x="560" y="379" width="320" height="48" rx="3" fill="#00E8FF" fill-opacity=".04" stroke="#00E8FF"/>
-  <text x="720" y="409" text-anchor="middle" font-family="Consolas, monospace" font-size="14" letter-spacing="1" fill="#00E8FF">&gt;  OPEN LOCAL FILE</text>
-  <text x="720" y="450" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#6F89A8">or drag &amp; drop a file here</text>
-  <path d="M550 478H890" stroke="url(#rail)" stroke-width="1"/>
-  <text x="720" y="506" text-anchor="middle" font-family="Consolas, monospace" font-size="12" letter-spacing="1.4" fill="#00E8FF" fill-opacity=".7">[ NETWORK URL ]</text>
-  <rect x="492" y="521" width="358" height="39" rx="3" fill="#050816" stroke="#00E8FF" stroke-opacity=".5"/>
-  <text x="508" y="545" font-family="Consolas, monospace" font-size="12" fill="#6F89A8">rtsp://... or https://bilibili.com/video/...</text>
-  <rect x="858" y="521" width="90" height="39" rx="3" fill="#A855FF" fill-opacity=".04" stroke="#A855FF"/>
-  <text x="903" y="545" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#A855FF">OPEN URL</text>
-  <text x="720" y="620" text-anchor="middle" font-family="Consolas, monospace" font-size="11" letter-spacing="1.2" fill="#6F89A8">MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS</text>
+  <text x="48"   y="22" font-family="Consolas,monospace" font-size="9" fill="#3C5870" letter-spacing="2.5">FLUX / LAUNCH CONSOLE</text>
+  <text x="1392" y="22" text-anchor="end" font-family="Consolas,monospace" font-size="9" fill="#3C5870" letter-spacing="2.5">SOURCE LINK // READY</text>
+
+  <!-- ── Title area: decorative circuit art + FLUX PLAYER heading ── -->
+  <!-- Compact hex/circuit emblem, center (720,86) -->
+  <g filter="url(#softGlow)">
+    <circle cx="720" cy="86" r="38" stroke="#136C8F" stroke-width="1.2" stroke-dasharray="2 8"/>
+    <circle cx="720" cy="86" r="28" stroke="#00E8FF" stroke-opacity="0.30"/>
+    <path d="M720 50L748 67V101L720 118L692 101V67Z" stroke="#136C8F" stroke-width="1.5"/>
+    <path d="M720 58L742 71V95L720 108L698 95V71Z" fill="#050D20" stroke="url(#energy)" stroke-width="1.5"/>
+  </g>
+  <g filter="url(#strongGlow)">
+    <path d="M700 86H710L715 76L721 96L727 81L732 86H742" stroke="#00E8FF" stroke-width="2.5"/>
+    <circle cx="720" cy="86" r="13" stroke="#00E8FF" stroke-opacity="0.32"/>
+  </g>
+  <!-- Flanking horizontal circuit arms -->
+  <g opacity="0.45" stroke="#00E8FF">
+    <path d="M350 72H440L458 86M350 100H424M980 100H1090M982 86L1000 72H1090"/>
+    <path d="M350 86H390M1050 86H1090" stroke-width="2"/>
+  </g>
+  <g opacity="0.28" stroke="#A855FF">
+    <path d="M440 58H530L542 72M898 72L910 58H1000M484 114L496 100H580M860 100H944L956 114"/>
+  </g>
+
+  <!-- FLUX | icon | PLAYER 分体式标题 (3-layer glow, 左右对称，紧贴图标) -->
+  <!-- 左侧 FLUX -->
+  <text x="656" y="92" text-anchor="end" font-family="Consolas,monospace" font-size="38" fill="#A855FF" fill-opacity="0.30" letter-spacing="6">FLUX</text>
+  <text x="652" y="88" text-anchor="end" font-family="Consolas,monospace" font-size="38" fill="#00E8FF" fill-opacity="0.24" letter-spacing="6">FLUX</text>
+  <text x="654" y="90" text-anchor="end" font-family="Consolas,monospace" font-size="38" fill="#EAF8FF" letter-spacing="6">FLUX</text>
+  <!-- 右侧 PLAYER -->
+  <text x="788" y="92" text-anchor="start" font-family="Consolas,monospace" font-size="38" fill="#A855FF" fill-opacity="0.30" letter-spacing="6">PLAYER</text>
+  <text x="784" y="88" text-anchor="start" font-family="Consolas,monospace" font-size="38" fill="#00E8FF" fill-opacity="0.24" letter-spacing="6">PLAYER</text>
+  <text x="786" y="90" text-anchor="start" font-family="Consolas,monospace" font-size="38" fill="#EAF8FF" letter-spacing="6">PLAYER</text>
+  <!-- 副标题 (居中，在图标下方) -->
+  <text x="720" y="127" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#7792B2" letter-spacing="4">// By Amaz1ng v0.7.5 //</text>
+  <!-- Energy separator under subtitle -->
+  <path d="M484 140H608M832 140H956" stroke="url(#energy)" stroke-width="1.5"/>
+  <circle cx="720" cy="140" r="3" fill="#00E8FF"/>
+
+  <!-- ── Left panel: ACTIONS — hex-cut angular border ── -->
+  <!-- Outer glow -->
+  <path d="M128 186H762L796 220V764L762 798H128L96 764V220Z"
+        fill="#050A1A" fill-opacity="0.96" stroke="url(#cyanBorder)" stroke-width="2"/>
+  <!-- Inner accent border -->
+  <path d="M142 200H748L782 234V750L748 784H142L110 750V234L142 200Z"
+        stroke="#136C8F" stroke-opacity="0.70"/>
+  <!-- Corner accent marks -->
+  <path d="M142 200H290M110 234V320" stroke="#00E8FF" stroke-width="2"/>
+  <path d="M750 784H610M782 750V660" stroke="#00E8FF" stroke-opacity="0.5" stroke-width="1.5"/>
+
+  <!-- Panel label -->
+  <text x="150" y="226" font-family="Consolas,monospace" font-size="11" fill="#00E8FF" letter-spacing="3">01 / MEDIA SOURCE</text>
+  <text x="150" y="248" font-family="Consolas,monospace" font-size="12" fill="#91ADCC">Select or stream your media file</text>
+
+  <!-- OPEN LOCAL FILE button -->
+  <circle cx="162" cy="295" r="4" fill="#00E8FF" opacity="0.85"/>
+  <g filter="url(#softGlow)">
+    <rect x="150" y="282" width="596" height="52" rx="3" fill="#061329" stroke="#00E8FF" stroke-width="1.5"/>
+  </g>
+  <path d="M186 298H206L215 306H240V320H186V298Z" stroke="#00E8FF" stroke-width="1.5"/>
+  <text x="440" y="313" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#EAF8FF" letter-spacing="2">OPEN LOCAL FILE</text>
+  <path d="M718 299H730L742 306L730 313H718" stroke="#00E8FF" stroke-width="1.5"/>
+  <text x="440" y="352" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#6F89A8">or drag &amp; drop a file here</text>
+
+  <!-- MERGE VIDEOS button -->
+  <circle cx="162" cy="389" r="4" fill="#A855FF" opacity="0.85"/>
+  <rect x="150" y="376" width="596" height="52" rx="3" fill="#0C0820" stroke="#A855FF" stroke-width="1.5"/>
+  <text x="440" y="407" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#A855FF" letter-spacing="2">+  MERGE VIDEOS</text>
+
+  <!-- Section divider inside panel -->
+  <path d="M168 450H712" stroke="#136C8F" stroke-opacity="0.50"/>
+  <text x="440" y="476" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#53708E" letter-spacing="2">02 / NETWORK STREAM</text>
+
+  <!-- URL input + OPEN URL button -->
+  <rect x="150" y="490" width="500" height="38" rx="3" fill="#030817" stroke="#00E8FF" stroke-opacity="0.40"/>
+  <text x="164" y="514" font-family="Consolas,monospace" font-size="11" fill="#5A7A94">rtsp://... or https://bilibili.com/video/...</text>
+  <rect x="660" y="490" width="86" height="38" rx="3" fill="#A855FF" fill-opacity="0.08" stroke="#A855FF" stroke-width="1.5"/>
+  <text x="703" y="514" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#A855FF">OPEN URL</text>
+
+  <!-- Settings gear: below URL input row, centered, 38×38 -->
+  <rect x="406" y="540" width="38" height="38" rx="3" fill="#00E8FF" fill-opacity="0.06" stroke="#00E8FF" stroke-width="1.5"/>
+  <g transform="translate(425, 559)" fill="#00E8FF" fill-opacity="0.85">
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(45)"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(90)"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(135)"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(180)"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(225)"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(270)"/>
+    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(315)"/>
+    <circle r="6.5"/><circle r="3.2" fill="#050A1A"/>
+  </g>
+
+  <!-- Bottom info inside left panel -->
+  <text x="440" y="754" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#4A6480" letter-spacing="1.2">MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS</text>
+
+  <!-- Bridge connector between panels -->
+  <rect x="800" y="478" width="56" height="2" fill="url(#bridge)"/>
+  <circle cx="800" cy="479" r="3" fill="#00E8FF" opacity="0.52"/>
+  <circle cx="856" cy="479" r="3" fill="#A855FF" opacity="0.52"/>
+
+  <!-- ── Right panel: WATCH HISTORY — hex-cut angular border ── -->
+  <path d="M876 186H1316L1344 220V764L1316 798H876L856 764V220Z"
+        fill="#050A1A" fill-opacity="0.96" stroke="url(#violetBorder)" stroke-width="2"/>
+  <path d="M890 200H1302L1330 234V750L1302 784H890L870 750V234L890 200Z"
+        stroke="#6336A4" stroke-opacity="0.68"/>
+  <path d="M890 200H1040M870 234V310" stroke="#A855FF" stroke-width="2"/>
+  <path d="M1302 784H1160M1330 750V670" stroke="#FF3DF2" stroke-opacity="0.48" stroke-width="1.5"/>
+
+  <!-- Panel label -->
+  <text x="898" y="226" font-family="Consolas,monospace" font-size="11" fill="#A855FF" letter-spacing="3">WATCH HISTORY</text>
+  <path d="M898 236H1312" stroke="#A855FF" stroke-opacity="0.28"/>
+
+  <!-- History items (terminal list) -->
+  <text x="898" y="266" font-family="Consolas,monospace" font-size="9" fill="#5A7A94" letter-spacing="1">01</text>
+  <text x="918" y="266" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">&gt; 4K_Footage_Timelapse.mp4</text>
+  <text x="918" y="284" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">12:34  ·  local</text>
+  <text x="1322" y="266" text-anchor="end" font-family="Consolas,monospace" font-size="11" fill="#FF3B7A" opacity="0.72">×</text>
+  <path d="M898 296H1312" stroke="#2A3E54"/>
+
+  <text x="898" y="318" font-family="Consolas,monospace" font-size="9" fill="#5A7A94" letter-spacing="1">02</text>
+  <text x="918" y="318" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">&gt; [bilibili] 编曲教程 第三季</text>
+  <text x="918" y="336" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">45:22  ·  bilibili</text>
+  <text x="1322" y="318" text-anchor="end" font-family="Consolas,monospace" font-size="11" fill="#FF3B7A" opacity="0.72">×</text>
+  <path d="M898 348H1312" stroke="#2A3E54"/>
+
+  <text x="898" y="370" font-family="Consolas,monospace" font-size="9" fill="#5A7A94" letter-spacing="1">03</text>
+  <text x="918" y="370" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">&gt; Big_Buck_Bunny_720p.mkv</text>
+  <text x="918" y="388" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">9:56  ·  local</text>
+  <text x="1322" y="370" text-anchor="end" font-family="Consolas,monospace" font-size="11" fill="#FF3B7A" opacity="0.72">×</text>
+  <path d="M898 400H1312" stroke="#2A3E54"/>
+
+  <text x="898" y="422" font-family="Consolas,monospace" font-size="9" fill="#3A4E62" letter-spacing="1">04</text>
+  <text x="918" y="422" font-family="Consolas,monospace" font-size="12" fill="#8AACC0">&gt; rtsp://192.168.1.1/live</text>
+  <text x="918" y="440" font-family="Consolas,monospace" font-size="10" fill="#3A4E62">--:--  ·  stream</text>
+  <text x="1322" y="422" text-anchor="end" font-family="Consolas,monospace" font-size="11" fill="#FF3B7A" opacity="0.42">×</text>
+
+  <!-- CLEAR ALL button at bottom -->
+  <rect x="898" y="740" width="414" height="32" rx="3" fill="#A855FF" fill-opacity="0.08" stroke="#A855FF" stroke-opacity="0.60" stroke-width="1.5"/>
+  <text x="1105" y="761" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#A855FF" letter-spacing="2">CLEAR ALL</text>
+
+  <!-- Bottom status strip -->
+  <text x="102"  y="882" font-family="Consolas,monospace" font-size="9" fill="#3A5A74" letter-spacing="1.5">LOCAL MEDIA</text>
+  <text x="1338" y="882" text-anchor="end" font-family="Consolas,monospace" font-size="9" fill="#3A5A74" letter-spacing="1.5">NETWORK STREAM / WEB VIDEO</text>
+  <path d="M102 862H1338" stroke="url(#railH)" stroke-width="1.2"/>
+
 </svg>

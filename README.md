@@ -46,7 +46,11 @@
 - 🎨 皮肤系统（Skin System）：语义 token 驱动的 UI 主题，支持 JSON 皮肤包加载、三层搜索（用户/开发/内置）、热加载（文件变更自动刷新，无需重启）、Appearance 子页切换皮肤，默认内置 `cyberpunk-neon`
 
 <div align="center">
+  <img src="source/UI/skins/cyberpunk-neon/mockup_home.svg" width="720" alt="播放器主界面预览" />
+  <br/>
   <img src="source/UI/skins/cyberpunk-neon/mockup_player.svg" width="720" alt="播放器界面预览" />
+  <br/>
+  <img src="source/UI/skins/cyberpunk-neon/mockup_merge.svg" width="720" alt="视频合并界面预览" />
   <br/>
   <img src="source/UI/skins/cyberpunk-neon/mockup_skin_settings.svg" width="720" alt="皮肤设置预览" />
 </div>
@@ -723,6 +727,12 @@ screenshotDir=Screenshot
 # 取值：png (无损压缩) | jpg (有损高质量) | yuv (I420 原始数据) | nv12 (NV12 原始数据)
 # 说明：yuv/nv12 为原始像素数据，无编码开销，额外生成同名 .txt 元数据文件
 screenshotFormat=png
+# screenshotToastEnabled: 截图后是否显示 Toast 提示 (true / false)
+screenshotToastEnabled=true
+# screenshotFlashEnabled: 截图时是否显示闪光动画 (true / false)
+screenshotFlashEnabled=true
+# screenshotSoundEnabled: 截图时是否播放音效 (true / false)
+screenshotSoundEnabled=true
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）

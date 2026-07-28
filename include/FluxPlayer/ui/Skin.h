@@ -181,6 +181,8 @@ struct SkinHomeSurface {
     float urlFramePaddingY = 10.0f;
     float errorGap = 8.0f;
     float footerBottomGap = 4.0f;
+    float settingsButtonSize = 30.0f;   ///< 卡片右上角设置齿轮按钮边长
+    float settingsButtonInset = 10.0f;  ///< 设置按钮距卡片右上角的内缩
     float loginModalW = 440.0f;
     float loginButtonH = 30.0f;
     float loginStoredButtonW = 140.0f;
@@ -239,9 +241,9 @@ struct SkinHudSurface {
     float margin = 10.0f;
     float mediaInfoW = 450.0f;
     float mediaInfoH = 250.0f;
-    float mediaInfoWebH = 320.0f;
-    float statsW = 240.0f;
-    float statsH = 180.0f;
+    float mediaInfoWebH = 365.0f;
+    float statsW = 400.0f;
+    float statsH = 330.0f;
 };
 
 struct SkinSettingsSurface {

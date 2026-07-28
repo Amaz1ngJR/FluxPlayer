@@ -72,6 +72,15 @@ screenshotDir=Screenshot
 #       会额外生成同名 .txt 元数据文件（含宽高、格式、FFplay 查看命令）。
 #       查看示例：ffplay -f rawvideo -pixel_format yuv420p -video_size 1920x1080 文件名.yuv
 screenshotFormat=png
+# screenshotToastEnabled: 截图后是否显示 Toast 提示 (true / false)
+# 默认：true
+screenshotToastEnabled=true
+# screenshotFlashEnabled: 截图时是否显示闪光动画 (true / false)
+# 默认：true
+screenshotFlashEnabled=true
+# screenshotSoundEnabled: 截图时是否播放音效 (true / false)
+# 默认：true
+screenshotSoundEnabled=true
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）

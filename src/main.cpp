@@ -22,6 +22,10 @@
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include "FluxPlayer/utils/HistoryStore.h"
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+#include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <string>
 #include <memory>
@@ -408,6 +412,42 @@ int main(int argc, char* argv[]) {
             home.destroy();
 
             if (hr.shouldQuit || ui.shouldClose()) break;
+
+            // ── 设置界面（空壳 Controller，无媒体，关闭后回 HomeScreen） ──
+            if (hr.openSettings) {
+                Player dummyPlayer;
+                Controller settingsCtrl(dummyPlayer, *ui.window());
+                if (!settingsCtrl.init(ui)) {
+                    LOG_ERROR("Settings controller init failed");
+                    break;
+                }
+                settingsCtrl.openSettingsDialog();
+
+                while (!ui.shouldClose() && settingsCtrl.isSettingsDialogOpen()) {
+                    ui.window()->pollEvents();
+
+                    ImGui_ImplOpenGL3_NewFrame();
+                    ImGui_ImplGlfw_NewFrame();
+                    ImGui::NewFrame();
+
+                    settingsCtrl.render();
+
+                    ImGui::Render();
+                    int dispW, dispH;
+                    glfwGetFramebufferSize(ui.window()->getGLFWWindow(), &dispW, &dispH);
+                    glViewport(0, 0, dispW, dispH);
+                    auto sk = SkinManager::instance().current();
+                    if (sk) glClearColor(sk->colors.bgVoid.r, sk->colors.bgVoid.g,
+                                         sk->colors.bgVoid.b, 1.0f);
+                    else    glClearColor(0.07f, 0.07f, 0.09f, 1.0f);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                    ui.window()->swapBuffers();
+                }
+
+                settingsCtrl.destroy();
+                continue;  // 回 HomeScreen
+            }
 
             // ── 视频合并界面（不进入 Player 流程，结束后回 HomeScreen） ──
             if (hr.openMerge) {

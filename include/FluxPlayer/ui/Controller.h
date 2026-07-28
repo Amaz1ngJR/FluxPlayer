@@ -76,6 +76,11 @@ public:
 
     void setVisible(bool visible) { visible_ = visible; }
     bool isVisible() const { return visible_; }
+
+    /// 强制打开设置对话框（主页无媒体状态下使用）
+    void openSettingsDialog() { showSettingsMenu_ = true; }
+    /// 查询设置对话框是否仍处于打开状态
+    bool isSettingsDialogOpen() const { return showSettingsMenu_; }
     void toggleVisible() { forceVisible_ = !forceVisible_; if (!forceVisible_) visible_ = false; }
 
     void setShowMediaInfo(bool show) { showMediaInfo_ = show; }

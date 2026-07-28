@@ -1,0 +1,178 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Merge Videos surface: central panel 1000×640 with file list + output settings + action buttons -->
+  <defs>
+    <linearGradient id="rail" x1="0" y1="0" x2="1440" y2="0">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#00E8FF"/>
+      <stop offset="0.52" stop-color="#2DA7FF"/>
+      <stop offset="0.78" stop-color="#A855FF"/>
+      <stop offset="1"    stop-color="#FF3DF2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="panelTop" x1="220" y1="0" x2="1220" y2="0">
+      <stop stop-color="#A855FF" stop-opacity="0"/>
+      <stop offset="0.2"  stop-color="#A855FF" stop-opacity="0.8"/>
+      <stop offset="0.8"  stop-color="#00E8FF" stop-opacity="0.8"/>
+      <stop offset="1"    stop-color="#00E8FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="panelBot" x1="220" y1="0" x2="1220" y2="0">
+      <stop stop-color="#A855FF" stop-opacity="0"/>
+      <stop offset="0.35" stop-color="#A855FF"/>
+      <stop offset="0.65" stop-color="#FF3DF2"/>
+      <stop offset="1"    stop-color="#A855FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="energy" x1="484" y1="0" x2="956" y2="0">
+      <stop stop-color="#A855FF" stop-opacity="0"/>
+      <stop offset="0.3"  stop-color="#A855FF"/>
+      <stop offset="0.7"  stop-color="#00E8FF"/>
+      <stop offset="1"    stop-color="#00E8FF" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="bgVoid" cx="0.5" cy="0.5" r="0.7">
+      <stop stop-color="#071B31"/>
+      <stop offset="0.55" stop-color="#050A18"/>
+      <stop offset="1"    stop-color="#02040E"/>
+    </radialGradient>
+    <filter id="strongGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="softGlow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1440" height="900" fill="url(#bgVoid)"/>
+
+  <!-- Subtle diagonal traces -->
+  <g stroke="#A855FF" stroke-opacity="0.06" stroke-width="1">
+    <path d="M220 130L100 40M1220 130L1340 40M220 770L80 860M1220 770L1360 860"/>
+  </g>
+  <g fill="#A855FF" opacity="0.18">
+    <circle cx="160" cy="85" r="2"/><circle cx="1280" cy="85" r="2"/>
+    <circle cx="130" cy="815" r="2"/><circle cx="1310" cy="815" r="2"/>
+  </g>
+
+  <!-- Top/bottom rails -->
+  <path d="M0 2H1440"   stroke="url(#rail)" stroke-width="2.5"/>
+  <path d="M0 898H1440" stroke="url(#rail)" stroke-width="2.5"/>
+
+  <!-- Screen corner brackets -->
+  <g stroke="#136C8F" stroke-width="1.5" fill="none">
+    <path d="M28 28H84L100 44M1412 28H1356L1340 44M28 872H84L100 856M1412 872H1356L1340 856"/>
+  </g>
+  <g stroke="#A855FF" stroke-opacity="0.48" stroke-width="1.5" fill="none">
+    <path d="M28 58H66M1374 58H1412M28 842H66M1374 842H1412"/>
+  </g>
+  <text x="48"   y="22" font-family="Consolas,monospace" font-size="9" fill="#3C5870" letter-spacing="2.5">FLUX / MERGE TOOL</text>
+  <text x="1392" y="22" text-anchor="end" font-family="Consolas,monospace" font-size="9" fill="#3C5870" letter-spacing="2.5">READY</text>
+
+  <!-- Title area -->
+  <text x="724" y="82" text-anchor="middle" font-family="Consolas,monospace" font-size="48" fill="#A855FF" fill-opacity="0.30" letter-spacing="8">MERGE VIDEOS</text>
+  <text x="716" y="78" text-anchor="middle" font-family="Consolas,monospace" font-size="48" fill="#00E8FF" fill-opacity="0.24" letter-spacing="8">MERGE VIDEOS</text>
+  <text x="720" y="80" text-anchor="middle" font-family="Consolas,monospace" font-size="48" fill="#EAF8FF" letter-spacing="8">MERGE VIDEOS</text>
+  <text x="720" y="105" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#7792B2" letter-spacing="4">CONCATENATE MULTIPLE FILES INTO ONE</text>
+  <path d="M450 118H610M830 118H990" stroke="url(#energy)" stroke-width="1.5"/>
+  <circle cx="720" cy="118" r="3" fill="#A855FF"/>
+
+  <!-- Main panel: 1000×640 hex-cut border -->
+  <path d="M244 130H1196L1220 154V746L1196 770H244L220 746V154Z"
+        fill="#050A1A" fill-opacity="0.96" stroke="url(#panelTop)" stroke-width="2"/>
+  <path d="M258 144H1182L1206 168V732L1182 756H258L234 732V168L258 144Z"
+        stroke="#6336A4" stroke-opacity="0.68"/>
+  <path d="M258 144H440M234 168V260" stroke="#A855FF" stroke-width="2"/>
+  <path d="M1182 756H1000M1206 732V640" stroke="#00E8FF" stroke-opacity="0.5" stroke-width="1.5"/>
+  <path d="M220 750H1220" stroke="url(#panelBot)" stroke-width="3"/>
+
+  <!-- Panel header -->
+  <text x="268" y="174" font-family="Consolas,monospace" font-size="11" fill="#A855FF" letter-spacing="3">CLIP LIST</text>
+  <path d="M268 182H680" stroke="#A855FF" stroke-opacity="0.28"/>
+  <text x="268" y="200" font-family="Consolas,monospace" font-size="10" fill="#7792B2">Select clips to trim · Drag to reorder</text>
+
+  <!-- === 左栏：片段列表（宽度 ~430px） === -->
+  <!-- Item 1 (selected) -->
+  <rect x="268" y="215" width="430" height="64" rx="3" fill="#0A1E32" stroke="#00E8FF" stroke-width="1.5"/>
+  <text x="288" y="236" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">01</text>
+  <text x="312" y="236" font-family="Consolas,monospace" font-size="12" fill="#EAF8FF">&gt; nature_documentary_4k.mp4</text>
+  <text x="312" y="254" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">00:00.000 &gt; 00:12.340  [trimmed]</text>
+  <text x="312" y="268" font-family="Consolas,monospace" font-size="9" fill="#5A7A94">1920×1080 · H.264 · 2.4 GB</text>
+  <!-- Delete button -->
+  <text x="672" y="248" font-family="Consolas,monospace" font-size="16" fill="#FF3B7A" opacity="0.72">×</text>
+
+  <!-- Item 2 -->
+  <rect x="268" y="287" width="430" height="64" rx="3" fill="#061329" stroke="#00E8FF" stroke-opacity="0.30"/>
+  <text x="288" y="308" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">02</text>
+  <text x="312" y="308" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">&gt; interview_segment_01.mp4</text>
+  <text x="312" y="326" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">[full]</text>
+  <text x="312" y="340" font-family="Consolas,monospace" font-size="9" fill="#5A7A94">1920×1080 · H.264 · 1.6 GB</text>
+  <text x="672" y="320" font-family="Consolas,monospace" font-size="16" fill="#FF3B7A" opacity="0.72">×</text>
+
+  <!-- Item 3 -->
+  <rect x="268" y="359" width="430" height="64" rx="3" fill="#061329" stroke="#00E8FF" stroke-opacity="0.30"/>
+  <text x="288" y="380" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">03</text>
+  <text x="312" y="380" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">&gt; outro_credits_4k.mkv</text>
+  <text x="312" y="398" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">00:02.500 &gt; end  [trimmed]</text>
+  <text x="312" y="412" font-family="Consolas,monospace" font-size="9" fill="#5A7A94">3840×2160 · HEVC · 4.8 GB</text>
+  <text x="672" y="392" font-family="Consolas,monospace" font-size="16" fill="#FF3B7A" opacity="0.72">×</text>
+
+  <!-- Add files button -->
+  <rect x="268" y="431" width="430" height="36" rx="3" fill="#00E8FF" fill-opacity="0.04" stroke="#00E8FF" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <text x="483" y="453" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#00E8FF">+  ADD FILES</text>
+
+  <!-- START MERGE button (above BACK) -->
+  <rect x="268" y="635" width="430" height="48" rx="3" fill="#A855FF" fill-opacity="0.12" stroke="#A855FF" stroke-width="2" filter="url(#glow)"/>
+  <text x="483" y="664" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#A855FF" letter-spacing="2">START MERGE</text>
+
+  <!-- BACK button (at original START MERGE position) -->
+  <rect x="268" y="695" width="430" height="36" rx="3" fill="#030817" stroke="#5A7A94" stroke-opacity="0.50"/>
+  <text x="483" y="718" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#7792B2">BACK</text>
+
+  <!-- === 右栏：预览 + 编辑区 (宽度 ~450px) === -->
+  <text x="730" y="174" font-family="Consolas,monospace" font-size="11" fill="#00E8FF" letter-spacing="3">CLIP EDITOR</text>
+  <path d="M730 182H1172" stroke="#00E8FF" stroke-opacity="0.28"/>
+  <text x="730" y="200" font-family="Consolas,monospace" font-size="10" fill="#7792B2">Trim IN / OUT points · Preview frames</text>
+
+  <!-- Preview panel (16:9 aspect, ~442×249) -->
+  <rect x="730" y="215" width="442" height="249" rx="3" fill="#020508" stroke="#00E8FF" stroke-width="2"/>
+  <text x="951" y="345" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#5A7A94">[Preview Frame]</text>
+  <!-- IN point indicator (cyan corner) -->
+  <path d="M732 217H762M732 217V247" stroke="#00E8FF" stroke-width="2.5"/>
+  <text x="738" y="233" font-family="Consolas,monospace" font-size="9" fill="#00E8FF">IN</text>
+
+  <!-- Filename -->
+  <text x="730" y="485" font-family="Consolas,monospace" font-size="11" fill="#EAF8FF">nature_documentary_4k.mp4</text>
+
+  <!-- IN slider (cyan) -->
+  <text x="730" y="510" font-family="Consolas,monospace" font-size="10" fill="#00E8FF">IN</text>
+  <rect x="760" y="498" width="412" height="18" rx="2" fill="#030817" stroke="#00E8FF" stroke-opacity="0.40"/>
+  <rect x="760" y="498" width="120" height="18" rx="2" fill="#00E8FF" fill-opacity="0.25"/>
+  <circle cx="880" cy="507" r="6" fill="#00E8FF"/>
+  <text x="730" y="532" font-family="Consolas,monospace" font-size="10" fill="#7792B2">00:00.000</text>
+
+  <!-- OUT slider (violet) -->
+  <text x="730" y="560" font-family="Consolas,monospace" font-size="10" fill="#A855FF">OUT</text>
+  <rect x="760" y="548" width="412" height="18" rx="2" fill="#030817" stroke="#A855FF" stroke-opacity="0.40"/>
+  <rect x="760" y="548" width="330" height="18" rx="2" fill="#A855FF" fill-opacity="0.25"/>
+  <circle cx="1090" cy="557" r="6" fill="#A855FF"/>
+  <text x="730" y="582" font-family="Consolas,monospace" font-size="10" fill="#7792B2">00:12.340</text>
+
+  <!-- Duration -->
+  <text x="730" y="608" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">Duration: 00:12.340 (trimmed from 00:36:39)</text>
+
+  <!-- Action buttons (RESET / DUPLICATE) -->
+  <rect x="730" y="625" width="200" height="36" rx="3" fill="#030817" stroke="#5A7A94" stroke-opacity="0.50"/>
+  <text x="830" y="648" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#7792B2">RESET</text>
+  <rect x="940" y="625" width="232" height="36" rx="3" fill="#00E8FF" fill-opacity="0.06" stroke="#00E8FF"/>
+  <text x="1056" y="648" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#00E8FF">DUPLICATE CLIP</text>
+
+  <!-- Summary at bottom -->
+  <text x="730" y="705" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">Total: 3 clips  ·  8.8 GB  ·  Output: merged_output.mp4</text>
+
+  <!-- Cancel button (right bottom) -->
+  <rect x="730" y="720" width="442" height="24" rx="3" fill="#030817" stroke="#5A7A94" stroke-opacity="0.45"/>
+  <text x="951" y="737" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#7792B2">CANCEL</text>
+
+  <!-- Bottom status -->
+  <text x="102"  y="882" font-family="Consolas,monospace" font-size="9" fill="#3A5A74" letter-spacing="1.5">VIDEO MERGE TOOL</text>
+  <text x="1338" y="882" text-anchor="end" font-family="Consolas,monospace" font-size="9" fill="#3A5A74" letter-spacing="1.5">MP4 · MKV · AVI · MOV · FLV</text>
+  <path d="M102 862H1338" stroke="url(#rail)" stroke-width="1.2"/>
+
+</svg>
