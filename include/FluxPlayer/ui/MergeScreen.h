@@ -54,6 +54,12 @@ struct MergeClipUiState {
     int         sourceInstanceId = 0; ///< 同一源文件多次添加时的实例序号（仅显示用）
     bool        probed = false;       ///< 是否已探测到源时长
     std::string error;                ///< 该片段的错误（范围非法 / 探测失败）
+
+    // 视频元数据（用于显示）
+    int         width = 0;            ///< 视频宽度
+    int         height = 0;           ///< 视频高度
+    std::string codecName;            ///< 编码格式（如 "H.264", "HEVC"）
+    int64_t     fileSize = 0;         ///< 文件大小（字节）
 };
 
 /**
@@ -125,6 +131,13 @@ private:
     std::string resultHint_;                ///< 完成态附加提示（转码/丢音轨等）
 
     bool backRequested_ = false;            ///< 用户请求返回 HomeScreen
+
+    // —— 分辨率策略 UI 状态 ——
+    MergeOptions::ResolutionMode resolutionMode_ = MergeOptions::ResolutionMode::Unified;
+    bool useFirstClipResolution_ = true;    ///< Unified 模式：使用首个 clip 分辨率
+    int customWidth_ = 1920;                ///< Unified 模式：自定义宽度
+    int customHeight_ = 1080;               ///< Unified 模式：自定义高度
+    bool enableHardwareAccel_ = true;       ///< 硬件加速开关
 
     // —— 预览状态 ——
     unsigned int previewTex_ = 0;           ///< 预览 OpenGL 纹理（0=未创建；存 GLuint，头文件用 unsigned int）

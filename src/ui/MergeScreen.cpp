@@ -19,6 +19,11 @@
 #include "FluxPlayer/utils/VideoMerger.h"
 #include "FluxPlayer/utils/VideoFramePreviewer.h"
 
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+}
+
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
@@ -32,6 +37,7 @@
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
+#include <sys/stat.h>
 
 namespace FluxPlayer {
 
@@ -344,6 +350,55 @@ void MergeScreen::pollMerger() {
 // 片段操作
 // ═══════════════════════════════════════════════════════
 
+// 辅助函数：探测视频元数据（分辨率、编码、文件大小）
+static void probeVideoMetadata(const std::string& path, MergeClipUiState& ui) {
+    // 获取文件大小
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_stat64(path.c_str(), &st) == 0) {
+        ui.fileSize = st.st_size;
+    }
+#else
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) {
+        ui.fileSize = st.st_size;
+    }
+#endif
+
+    // 使用 FFmpeg 探测视频流信息
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return;
+    if (avformat_find_stream_info(fmt, nullptr) < 0) {
+        avformat_close_input(&fmt);
+        return;
+    }
+
+    // 查找视频流
+    for (unsigned i = 0; i < fmt->nb_streams; ++i) {
+        AVStream* st = fmt->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            ui.width = st->codecpar->width;
+            ui.height = st->codecpar->height;
+
+            // 获取编码格式名称
+            const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
+            if (codec) {
+                // 转换为常见名称
+                std::string name = codec->name;
+                if (name == "h264") ui.codecName = "H.264";
+                else if (name == "hevc") ui.codecName = "HEVC";
+                else if (name == "vp9") ui.codecName = "VP9";
+                else if (name == "av1") ui.codecName = "AV1";
+                else if (name == "mpeg4") ui.codecName = "MPEG-4";
+                else ui.codecName = codec->name;
+            }
+            break;
+        }
+    }
+
+    avformat_close_input(&fmt);
+}
+
 void MergeScreen::addClip(const std::string& path) {
     MergeClipUiState ui;
     ui.clip.path = path;
@@ -361,6 +416,10 @@ void MergeScreen::addClip(const std::string& path) {
     // 探测失败（时长未知）时仍可整段合并，但精确滑块受限。
     ui.clip.durationSec = VideoFramePreviewer::probeDuration(path);
     ui.probed = ui.clip.durationSec > 0.0;
+
+    // 探测视频元数据（分辨率、编码、文件大小）
+    probeVideoMetadata(path, ui);
+
     clips_.push_back(std::move(ui));
     if (selectedClip_ < 0) {
         selectedClip_ = (int)clips_.size() - 1;
@@ -402,10 +461,18 @@ void MergeScreen::startMerge() {
     mclips.reserve(clips_.size());
     for (const auto& c : clips_) mclips.push_back(c.clip);
 
+    // 构建合并选项
+    MergeOptions options;
+    options.resolutionMode = resolutionMode_;
+    options.useFirstClipResolution = useFirstClipResolution_;
+    options.customWidth = customWidth_;
+    options.customHeight = customHeight_;
+    options.enableHardwareAccel = enableHardwareAccel_;
+
     std::string output = makeOutputPath();
     errorMessage_.clear();
     resultHint_.clear();
-    if (!merger_->start(mclips, output)) {
+    if (!merger_->start(mclips, output, options)) {
         errorMessage_ = merger_->error().empty() ? "Failed to start merge" : merger_->error();
         return;
     }
@@ -631,8 +698,11 @@ void MergeScreen::renderClipList(float listW, float listH) {
     auto snap = SkinManager::instance().current();
     const auto& sk = *snap;
 
-    // 按钮固定高度：ADD 32 + 间距5 + MERGE 42 + 间距5 + BACK 32 = 116px
-    const float btnTotalH = 32.0f + 5.0f + 42.0f + 5.0f + 32.0f;
+    // 按钮固定高度：
+    // 标题区 ~30px + 分辨率配置 ~140px + ADD 36 + 间距10 + MERGE 42 + 间距10 + BACK 32 = ~300px
+    // 列表滚动区需要预留足够空间
+    const float configH = 140.0f;  // 分辨率配置区高度（主选项同行后更紧凑）
+    const float btnTotalH = 36.0f + 10.0f + 42.0f + 10.0f + 32.0f + 10.0f + configH;
 
     // 标题区
     ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
@@ -680,7 +750,7 @@ void MergeScreen::renderClipList(float listW, float listH) {
 
         ImVec2 cardPos = ImGui::GetCursorScreenPos();
         float cardW = listW;
-        float cardH = 54.0f;
+        float cardH = 68.0f;  // 增加高度以容纳第三行元数据
 
         ImU32 cardBg = isSel ? ToImU32(sk.colors.bgPanelRaised) : ToImU32(sk.colors.bgPanel);
         ImU32 cardBorder = isSel ? ToImU32(sk.colors.accentPrimary) : ScaleAlpha(sk.colors.linePrimary, 0.30f);
@@ -734,11 +804,56 @@ void MergeScreen::renderClipList(float listW, float listH) {
         }
         ImGui::PopStyleColor();
 
-        ImGui::SetCursorScreenPos(ImVec2(cardPos.x + cardW - 26.0f, cardPos.y + cardH * 0.5f - 7.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ToImU32(sk.colors.stateError));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-        if (ImGui::SmallButton("x")) remove = (int)i;
-        ImGui::PopStyleColor(2);
+        // 第三行：分辨率、编码、文件大小（mockup 样式）
+        ImGui::SetCursorScreenPos(ImVec2(cardPos.x + 40.0f, cardPos.y + 40.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+        if (c.width > 0 && c.height > 0) {
+            char metaBuf[128];
+            // 格式化文件大小
+            char sizeBuf[32] = "";
+            if (c.fileSize > 0) {
+                double sizeGB = c.fileSize / (1024.0 * 1024.0 * 1024.0);
+                if (sizeGB >= 0.1) {
+                    std::snprintf(sizeBuf, sizeof(sizeBuf), " · %.1f GB", sizeGB);
+                } else {
+                    double sizeMB = c.fileSize / (1024.0 * 1024.0);
+                    std::snprintf(sizeBuf, sizeof(sizeBuf), " · %.1f MB", sizeMB);
+                }
+            }
+
+            std::snprintf(metaBuf, sizeof(metaBuf), "%d×%d · %s%s",
+                          c.width, c.height,
+                          c.codecName.empty() ? "Unknown" : c.codecName.c_str(),
+                          sizeBuf);
+            ImGui::TextUnformatted(metaBuf);
+        }
+        ImGui::PopStyleColor();
+
+        // 删除按钮 - 自定义绘制 × 符号（mockup: font-size 16, opacity 0.72）
+        ImVec2 deletePos(cardPos.x + cardW - 30.0f, cardPos.y + cardH * 0.5f - 12.0f);
+        ImVec2 deleteSize(24, 24);
+
+        // 可点击区域
+        ImGui::SetCursorScreenPos(deletePos);
+        if (ImGui::InvisibleButton(("##del" + std::to_string(i)).c_str(), deleteSize)) {
+            remove = (int)i;
+        }
+
+        // 绘制 × 符号（两条对角线）
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImU32 deleteCol = ImGui::GetColorU32(ImVec4(1.0f, 0.23f, 0.48f, 0.72f)); // #FF3B7A with opacity
+        ImVec2 center(deletePos.x + deleteSize.x * 0.5f, deletePos.y + deleteSize.y * 0.5f);
+        float crossSize = 8.0f;  // × 符号的大小
+
+        // 左上到右下的斜线
+        drawList->AddLine(ImVec2(center.x - crossSize, center.y - crossSize),
+                          ImVec2(center.x + crossSize, center.y + crossSize),
+                          deleteCol, 2.5f);
+
+        // 右上到左下的斜线
+        drawList->AddLine(ImVec2(center.x + crossSize, center.y - crossSize),
+                          ImVec2(center.x - crossSize, center.y + crossSize),
+                          deleteCol, 2.5f);
 
         ImGui::SetCursorScreenPos(ImVec2(cardPos.x, cardPos.y + cardH + 5.0f));
 
@@ -764,21 +879,286 @@ void MergeScreen::renderClipList(float listW, float listH) {
     ImGui::Dummy(ImVec2(0, 4.0f));
 
     {
-        ImVec4 addBg = ImVec4(0, 0, 0, 0);
-        ImVec4 addHov = ToImVec4(sk.colors.accentPrimary); addHov.w *= 0.06f;
+        // mockup 设计：虚线边框 + 半透明背景填充
+        ImVec4 addBg = ToImVec4(sk.colors.accentPrimary); addBg.w = 0.04f;
+        ImVec4 addHov = ToImVec4(sk.colors.accentPrimary); addHov.w = 0.08f;
+        ImVec4 addAct = ToImVec4(sk.colors.accentPrimary); addAct.w = 0.12f;
         ImGui::PushStyleColor(ImGuiCol_Button, addBg);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, addHov);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, addHov);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, addAct);
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
-        ImGui::PushStyleColor(ImGuiCol_Border, ToImVec4(sk.colors.accentPrimary));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));  // 隐藏默认边框
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);     // 禁用边框
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
-        if (ImGui::Button("+  ADD FILES", ImVec2(listW, 32))) addFilesViaDialog();
+
+        // 记录按钮位置
+        ImVec2 btnPos = ImGui::GetCursorScreenPos();
+        ImVec2 btnSize(listW, 36);  // mockup 中是 36px 高度
+        bool clicked = ImGui::Button("+  ADD FILES", btnSize);
+
+        // 在按钮上方绘制虚线边框
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 borderCol = ImGui::GetColorU32(ToImVec4(sk.colors.accentPrimary));
+        float dashLen = 4.0f;
+        float gapLen = 4.0f;
+        float halfBorder = 0.75f;  // 边框宽度的一半
+
+        // 顶边虚线
+        for (float x = btnPos.x; x < btnPos.x + btnSize.x; x += dashLen + gapLen) {
+            float endX = std::min(x + dashLen, btnPos.x + btnSize.x);
+            dl->AddLine(ImVec2(x, btnPos.y + halfBorder), ImVec2(endX, btnPos.y + halfBorder), borderCol, 1.5f);
+        }
+        // 底边虚线
+        for (float x = btnPos.x; x < btnPos.x + btnSize.x; x += dashLen + gapLen) {
+            float endX = std::min(x + dashLen, btnPos.x + btnSize.x);
+            dl->AddLine(ImVec2(x, btnPos.y + btnSize.y - halfBorder), ImVec2(endX, btnPos.y + btnSize.y - halfBorder), borderCol, 1.5f);
+        }
+        // 左边虚线
+        for (float y = btnPos.y; y < btnPos.y + btnSize.y; y += dashLen + gapLen) {
+            float endY = std::min(y + dashLen, btnPos.y + btnSize.y);
+            dl->AddLine(ImVec2(btnPos.x + halfBorder, y), ImVec2(btnPos.x + halfBorder, endY), borderCol, 1.5f);
+        }
+        // 右边虚线
+        for (float y = btnPos.y; y < btnPos.y + btnSize.y; y += dashLen + gapLen) {
+            float endY = std::min(y + dashLen, btnPos.y + btnSize.y);
+            dl->AddLine(ImVec2(btnPos.x + btnSize.x - halfBorder, y), ImVec2(btnPos.x + btnSize.x - halfBorder, endY), borderCol, 1.5f);
+        }
+
+        if (clicked) addFilesViaDialog();
+
         ImGui::PopStyleVar(2);
         ImGui::PopStyleColor(5);
     }
 
-    ImGui::Dummy(ImVec2(0, 5.0f));
+    ImGui::Dummy(ImVec2(0, 8.0f));
+
+    // —— 分辨率策略选择（符合 mockup 设计）——
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
+        ImGui::TextUnformatted("Resolution:");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 6.0f));
+
+        bool isKeepOriginal = (resolutionMode_ == MergeOptions::ResolutionMode::KeepOriginal);
+        bool isUnified = (resolutionMode_ == MergeOptions::ResolutionMode::Unified);
+
+        // 自定义绘制 radio button 以匹配 mockup 样式
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float radioRadius = 6.0f;
+        float radioInnerRadius = 3.0f;
+
+        // Keep Original radio button（整行可点击）
+        {
+            ImVec2 startPos = ImGui::GetCursorScreenPos();
+            ImVec2 center(startPos.x + 10, startPos.y + 10);
+
+            // 先绘制 InvisibleButton 捕获点击
+            ImGui::SetCursorScreenPos(startPos);
+            bool clicked = ImGui::InvisibleButton("##keeporiginal", ImVec2(140, 20));
+
+            // 再绘制圆圈和文字
+            ImU32 outerCol = isKeepOriginal ?
+                ImGui::GetColorU32(ToImVec4(sk.colors.accentPrimary)) :
+                ImGui::GetColorU32(ToImVec4(sk.colors.textMuted));
+
+            dl->AddCircle(center, radioRadius, outerCol, 0, 1.5f);
+            if (isKeepOriginal) {
+                dl->AddCircleFilled(center, radioInnerRadius, outerCol);
+            }
+
+            // 文字垂直居中对齐：圆心 y + 4 像素（字体基线偏移）
+            ImGui::SetCursorScreenPos(ImVec2(startPos.x + 22, startPos.y + 5));
+            ImGui::PushStyleColor(ImGuiCol_Text, isKeepOriginal ?
+                ToImVec4(sk.colors.textPrimary) : ToImVec4(sk.colors.textSecondary));
+            ImGui::TextUnformatted("Keep Original");
+            ImGui::PopStyleColor();
+
+            if (clicked) {
+                resolutionMode_ = MergeOptions::ResolutionMode::KeepOriginal;
+            }
+
+            // 手动设置下一个控件的位置（确保在同一行）
+            ImGui::SetCursorScreenPos(ImVec2(startPos.x + 150, startPos.y));
+        }
+
+        // Unified radio button（整行可点击）
+        {
+            ImVec2 startPos = ImGui::GetCursorScreenPos();
+            ImVec2 center(startPos.x + 10, startPos.y + 10);
+
+            // 先绘制 InvisibleButton 捕获点击
+            ImGui::SetCursorScreenPos(startPos);
+            bool clicked = ImGui::InvisibleButton("##unified", ImVec2(100, 20));
+
+            // 再绘制圆圈和文字
+            ImU32 outerCol = isUnified ?
+                ImGui::GetColorU32(ToImVec4(sk.colors.accentPrimary)) :
+                ImGui::GetColorU32(ToImVec4(sk.colors.textMuted));
+
+            dl->AddCircle(center, radioRadius, outerCol, 0, 1.5f);
+            if (isUnified) {
+                dl->AddCircleFilled(center, radioInnerRadius, outerCol);
+            }
+
+            // 文字垂直居中对齐：圆心 y + 4 像素（字体基线偏移）
+            ImGui::SetCursorScreenPos(ImVec2(startPos.x + 22, startPos.y + 5));
+            ImGui::PushStyleColor(ImGuiCol_Text, isUnified ?
+                ToImVec4(sk.colors.accentPrimary) : ToImVec4(sk.colors.textSecondary));
+            ImGui::TextUnformatted("Unified");
+            ImGui::PopStyleColor();
+
+            if (clicked) {
+                resolutionMode_ = MergeOptions::ResolutionMode::Unified;
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0, 6.0f));
+
+        if (isUnified) {
+            ImGui::Indent(26.0f);  // mockup 中子选项缩进
+            float smallRadioRadius = 5.0f;
+            float smallRadioInnerRadius = 2.5f;
+
+            // First clip radio button
+            {
+                ImVec2 startPos = ImGui::GetCursorScreenPos();
+                ImVec2 center(startPos.x + smallRadioRadius + 2, startPos.y + 9);
+
+                // 先绘制 InvisibleButton 捕获点击
+                ImGui::SetCursorScreenPos(startPos);
+                bool clicked = ImGui::InvisibleButton("##firstclip", ImVec2(100, 18));
+
+                // 再绘制圆圈和文字
+                ImU32 outerCol = useFirstClipResolution_ ?
+                    ImGui::GetColorU32(ToImVec4(sk.colors.accentPrimary)) :
+                    ImGui::GetColorU32(ToImVec4(sk.colors.textMuted));
+
+                dl->AddCircle(center, smallRadioRadius, outerCol, 0, 1.5f);
+                if (useFirstClipResolution_) {
+                    dl->AddCircleFilled(center, smallRadioInnerRadius, outerCol);
+                }
+
+                ImGui::SetCursorScreenPos(ImVec2(startPos.x + smallRadioRadius * 2 + 8, startPos.y + 5));
+                ImGui::PushStyleColor(ImGuiCol_Text, useFirstClipResolution_ ?
+                    ToImVec4(sk.colors.textMuted) : ToImVec4(sk.colors.textMuted));
+                ImGui::TextUnformatted("First clip");
+                ImGui::PopStyleColor();
+
+                if (clicked) {
+                    useFirstClipResolution_ = true;
+                }
+            }
+
+            ImGui::Dummy(ImVec2(0, 4.0f));
+
+            // Custom radio button
+            {
+                ImVec2 startPos = ImGui::GetCursorScreenPos();
+                ImVec2 center(startPos.x + smallRadioRadius + 2, startPos.y + 9);
+
+                // 先绘制 InvisibleButton 捕获点击
+                ImGui::SetCursorScreenPos(startPos);
+                bool clicked = ImGui::InvisibleButton("##custom", ImVec2(80, 18));
+
+                // 再绘制圆圈和文字
+                ImU32 outerCol = !useFirstClipResolution_ ?
+                    ImGui::GetColorU32(ToImVec4(sk.colors.accentPrimary)) :
+                    ImGui::GetColorU32(ToImVec4(sk.colors.textMuted));
+
+                dl->AddCircle(center, smallRadioRadius, outerCol, 0, 1.5f);
+                if (!useFirstClipResolution_) {
+                    dl->AddCircleFilled(center, smallRadioInnerRadius, outerCol);
+                }
+
+                ImGui::SetCursorScreenPos(ImVec2(startPos.x + smallRadioRadius * 2 + 8, startPos.y + 5));
+                ImGui::PushStyleColor(ImGuiCol_Text, !useFirstClipResolution_ ?
+                    ToImVec4(sk.colors.accentPrimary) : ToImVec4(sk.colors.textMuted));
+                ImGui::TextUnformatted("Custom");
+                ImGui::PopStyleColor();
+
+                if (clicked) {
+                    useFirstClipResolution_ = false;
+                }
+
+                // 如果选中 Custom，在同一行后面绘制输入框
+                if (!useFirstClipResolution_) {
+                    ImGui::SameLine(0, 10.0f);
+
+                    // 设置输入框样式以匹配 mockup
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ToImVec4(sk.colors.bgPanel));
+                    ImGui::PushStyleColor(ImGuiCol_Border, ToImVec4(sk.colors.textMuted));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 2.0f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+
+                    ImGui::SetNextItemWidth(60.0f);
+                    ImGui::InputInt("##w", &customWidth_, 0, 0);
+                    if (customWidth_ < 128) customWidth_ = 128;
+                    if (customWidth_ > 7680) customWidth_ = 7680;
+
+                    ImGui::SameLine(0, 10.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+                    ImGui::Text("x");
+                    ImGui::PopStyleColor();
+
+                    ImGui::SameLine(0, 10.0f);
+                    ImGui::SetNextItemWidth(60.0f);
+                    ImGui::InputInt("##h", &customHeight_, 0, 0);
+                    if (customHeight_ < 128) customHeight_ = 128;
+                    if (customHeight_ > 4320) customHeight_ = 4320;
+
+                    ImGui::PopStyleVar(3);
+                    ImGui::PopStyleColor(2);
+                }
+            }
+
+            ImGui::Unindent(26.0f);
+        }
+
+        ImGui::Dummy(ImVec2(0, 8.0f));
+
+        // Hardware Accel checkbox（整行可点击）
+        {
+            ImVec2 startPos = ImGui::GetCursorScreenPos();
+            ImVec2 checkSize(14, 14);
+
+            // 先绘制 InvisibleButton 捕获点击
+            ImGui::SetCursorScreenPos(startPos);
+            bool clicked = ImGui::InvisibleButton("##hwaccel", ImVec2(150, 18));
+
+            // 再绘制 checkbox
+            ImVec2 checkMin = startPos;
+            ImVec2 checkMax(startPos.x + checkSize.x, startPos.y + checkSize.y);
+
+            ImU32 bgCol = enableHardwareAccel_ ?
+                ImGui::GetColorU32(ImVec4(0, 0.91f, 1.0f, 0.15f)) :
+                ImGui::GetColorU32(ImVec4(0, 0, 0, 0));
+            ImU32 borderCol = ImGui::GetColorU32(ToImVec4(sk.colors.accentPrimary));
+
+            dl->AddRectFilled(checkMin, checkMax, bgCol, 2.0f);
+            dl->AddRect(checkMin, checkMax, borderCol, 2.0f, 0, 1.5f);
+
+            if (enableHardwareAccel_) {
+                // Draw checkmark
+                ImVec2 p1(startPos.x + 3, startPos.y + 7);
+                ImVec2 p2(startPos.x + 6, startPos.y + 10);
+                ImVec2 p3(startPos.x + 12, startPos.y + 2);
+                dl->AddLine(p1, p2, borderCol, 2.0f);
+                dl->AddLine(p2, p3, borderCol, 2.0f);
+            }
+
+            ImGui::SetCursorScreenPos(ImVec2(startPos.x + checkSize.x + 6, startPos.y + 2));
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
+            ImGui::TextUnformatted("Hardware Accel");
+            ImGui::PopStyleColor();
+
+            if (clicked) {
+                enableHardwareAccel_ = !enableHardwareAccel_;
+            }
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 8.0f));
 
     {
         ImVec4 mergeBg = ToImVec4(sk.colors.accentSecondary); mergeBg.w *= 0.12f;
@@ -1033,11 +1413,221 @@ void MergeScreen::renderMerging(float contentW) {
     ImGui::TextUnformatted(msg);
     ImGui::PopStyleColor();
 
-    ImGui::Dummy(ImVec2(0, 16));
+    ImGui::Dummy(ImVec2(0, 24));
     double p = merger_->progress();
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ToImVec4(sk.colors.accentSecondary));
     ImGui::ProgressBar((float)p, ImVec2(contentW, 24));
     ImGui::PopStyleColor();
+
+    // 合并期间始终显示实际处理链路。旧逻辑仅在硬件成功时绘制这一块，导致硬件
+    // 初始化失败并回退软件后，解码器、编码器和零拷贝状态全部从界面上消失。
+    ImGui::Dummy(ImVec2(0, 32));
+    auto hwInfo = merger_->getHWAccelInfo();
+    {
+        const bool isTranscode = merger_->transcoded();
+
+        // 标题同时覆盖转码和无需编解码的流拷贝路径。
+        const char* title = "Merge Pipeline";
+        float titleW = ImGui::CalcTextSize(title).x;
+        ImGui::SetCursorPosX((contentW - titleW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textPrimary));
+        ImGui::TextUnformatted(title);
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 16));
+
+        // 即使正在初始化或已回退软件，也给出明确的处理设备，避免空白状态。
+        const std::string pipelineDevice = !isTranscode
+            ? "Stream Copy"
+            : (hwInfo.hwDeviceType.empty() ? "CPU / Software" : hwInfo.hwDeviceType);
+        ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]);
+        float devW = ImGui::CalcTextSize(pipelineDevice.c_str()).x;
+        ImGui::SetCursorPosX((contentW - devW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
+        ImGui::TextUnformatted(pipelineDevice.c_str());
+        ImGui::PopStyleColor();
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0, 12));
+
+        // 解码器和编码器（分行显示）
+        float leftMargin = ImGui::GetStyle().WindowPadding.x + 60;
+
+        // 解码器行
+        ImGui::SetCursorPosX(leftMargin);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+        ImGui::SetWindowFontScale(1.1f);  // 稍微放大字体
+        ImGui::Text("Decode:");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 12.0f);  // 增加间距
+
+        if (!isTranscode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
+            ImGui::SetWindowFontScale(1.1f);
+            ImGui::Text("BYPASS");
+            ImGui::SetWindowFontScale(1.0f);
+        } else if (hwInfo.isHardwareDecoding) {
+            // 绘制闪电图标
+            ImVec2 curPos = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            float iconSize = 14.0f;  // 增大图标
+            ImU32 lightningColor = ImGui::ColorConvertFloat4ToU32(ToImVec4(sk.colors.accentSecondary));
+            // 闪电形状：7个点组成的折线
+            ImVec2 points[7] = {
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + 2.0f),
+                ImVec2(curPos.x + iconSize * 0.2f, curPos.y + iconSize * 0.5f),
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + iconSize * 0.5f),
+                ImVec2(curPos.x, curPos.y + iconSize + 2.0f),
+                ImVec2(curPos.x + iconSize * 0.4f, curPos.y + iconSize * 0.6f),
+                ImVec2(curPos.x + iconSize * 0.3f, curPos.y + iconSize * 0.4f),
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + 2.0f)
+            };
+            drawList->AddPolyline(points, 7, lightningColor, 0, 2.0f);
+
+            // 移动光标到图标右侧
+            ImGui::Dummy(ImVec2(iconSize + 8.0f, 0));
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
+            ImGui::SetWindowFontScale(1.1f);
+            ImGui::Text("HW");
+            ImGui::SetWindowFontScale(1.0f);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
+            ImGui::SetWindowFontScale(1.1f);
+            ImGui::Text("SW");
+            ImGui::SetWindowFontScale(1.0f);
+        }
+        ImGui::PopStyleColor();
+
+        // 后台线程尚未打开首个输入时显示 initializing，打开后立即替换为真实名称。
+        const char* decoderDetail = !isTranscode ? "packet remux"
+            : (hwInfo.decoderName.empty() ? "initializing..." : hwInfo.decoderName.c_str());
+        ImGui::SameLine(0, 8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textPrimary));
+        ImGui::SetWindowFontScale(1.1f);
+        ImGui::Text("(%s)", decoderDetail);
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 12));  // 增加行间距
+
+        // 编码器行
+        ImGui::SetCursorPosX(leftMargin);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+        ImGui::SetWindowFontScale(1.1f);
+        ImGui::Text("Encode:");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 12.0f);  // 增加间距
+
+        if (!isTranscode) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
+            ImGui::SetWindowFontScale(1.1f);
+            ImGui::Text("BYPASS");
+            ImGui::SetWindowFontScale(1.0f);
+        } else if (hwInfo.isHardwareEncoding) {
+            // 绘制闪电图标
+            ImVec2 curPos = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            float iconSize = 14.0f;  // 增大图标
+            ImU32 lightningColor = ImGui::ColorConvertFloat4ToU32(ToImVec4(sk.colors.accentSecondary));
+            ImVec2 points[7] = {
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + 2.0f),
+                ImVec2(curPos.x + iconSize * 0.2f, curPos.y + iconSize * 0.5f),
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + iconSize * 0.5f),
+                ImVec2(curPos.x, curPos.y + iconSize + 2.0f),
+                ImVec2(curPos.x + iconSize * 0.4f, curPos.y + iconSize * 0.6f),
+                ImVec2(curPos.x + iconSize * 0.3f, curPos.y + iconSize * 0.4f),
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + 2.0f)
+            };
+            drawList->AddPolyline(points, 7, lightningColor, 0, 2.0f);
+
+            // 移动光标到图标右侧
+            ImGui::Dummy(ImVec2(iconSize + 8.0f, 0));
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
+            ImGui::SetWindowFontScale(1.1f);
+            ImGui::Text("HW");
+            ImGui::SetWindowFontScale(1.0f);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textSecondary));
+            ImGui::SetWindowFontScale(1.1f);
+            ImGui::Text("SW");
+            ImGui::SetWindowFontScale(1.0f);
+        }
+        ImGui::PopStyleColor();
+
+        const char* encoderDetail = !isTranscode ? "packet remux"
+            : (hwInfo.encoderName.empty() ? "initializing..." : hwInfo.encoderName.c_str());
+        ImGui::SameLine(0, 8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textPrimary));
+        ImGui::SetWindowFontScale(1.1f);
+        ImGui::Text("(%s)", encoderDetail);
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopStyleColor();
+
+        // 零拷贝状态（醒目显示或说明原因）
+        ImGui::Dummy(ImVec2(0, 20));  // 增加间距
+        if (!isTranscode) {
+            // 流拷贝只重封装压缩包，不产生像素帧，因此不存在 CPU/GPU 帧拷贝。
+            const char* reason = "Packet remux (no decode / encode)";
+            float reasonW = ImGui::CalcTextSize(reason).x;
+            ImGui::SetCursorPosX((contentW - reasonW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+            ImGui::TextUnformatted(reason);
+            ImGui::PopStyleColor();
+        } else if (hwInfo.isZeroCopy) {
+            // 绘制闪电图标 + 文本（居中）
+            const char* zcLabel = "GPU Zero-Copy Pipeline";
+            ImGui::SetWindowFontScale(1.2f);  // 放大字体
+            float textW = ImGui::CalcTextSize(zcLabel).x;
+            ImGui::SetWindowFontScale(1.0f);
+            float iconSize = 18.0f;  // 增大图标
+            float spacing = 10.0f;
+            float totalW = iconSize + spacing + textW;
+            float startX = (contentW - totalW) * 0.5f + ImGui::GetStyle().WindowPadding.x;
+
+            ImGui::SetCursorPosX(startX);
+            ImVec2 curPos = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            ImU32 lightningColor = ImGui::ColorConvertFloat4ToU32(ToImVec4(sk.colors.accentPrimary));
+            ImVec2 points[7] = {
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + 2.0f),
+                ImVec2(curPos.x + iconSize * 0.2f, curPos.y + iconSize * 0.5f),
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + iconSize * 0.5f),
+                ImVec2(curPos.x, curPos.y + iconSize + 2.0f),
+                ImVec2(curPos.x + iconSize * 0.4f, curPos.y + iconSize * 0.6f),
+                ImVec2(curPos.x + iconSize * 0.3f, curPos.y + iconSize * 0.4f),
+                ImVec2(curPos.x + iconSize * 0.5f, curPos.y + 2.0f)
+            };
+            drawList->AddPolyline(points, 7, lightningColor, 0, 2.5f);
+
+            // 移动光标到图标右侧
+            ImGui::Dummy(ImVec2(iconSize + spacing, 0));
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
+            ImGui::SetWindowFontScale(1.2f);
+            ImGui::TextUnformatted(zcLabel);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleColor();
+        } else {
+            // 硬件链路不完整时说明需要拷贝；纯软件回退时明确告诉用户当前由 CPU
+            // 处理。初始化阶段单独显示状态，避免误认为软件路径已经最终确定。
+            const bool initializing = hwInfo.decoderName.empty() || hwInfo.encoderName.empty();
+            const char* reason = initializing
+                ? "Initializing codec pipeline..."
+                : ((hwInfo.isHardwareEncoding || hwInfo.isHardwareDecoding)
+                    ? "CPU-GPU copy required for format conversion"
+                    : "Software pipeline (CPU frames)");
+            ImGui::SetWindowFontScale(1.05f);
+            float reasonW = ImGui::CalcTextSize(reason).x;
+            ImGui::SetCursorPosX((contentW - reasonW) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+            ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+            ImGui::TextUnformatted(reason);
+            ImGui::SetWindowFontScale(1.0f);
+            ImGui::PopStyleColor();
+        }
+    }
 
     ImGui::Dummy(ImVec2(0, 24));
     float bx = (contentW - 120.0f) * 0.5f + ImGui::GetStyle().WindowPadding.x;

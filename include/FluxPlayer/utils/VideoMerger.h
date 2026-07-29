@@ -51,6 +51,32 @@ struct MergeClip {
 };
 
 /**
+ * @brief 合并选项：分辨率策略与硬件加速配置
+ */
+struct MergeOptions {
+    /// 分辨率策略
+    enum class ResolutionMode {
+        KeepOriginal,  ///< 保留原分辨率（每段不缩放，中途重建编码器）
+        Unified        ///< 统一分辨率（所有段缩放到相同目标）
+    };
+
+    ResolutionMode resolutionMode = ResolutionMode::Unified;
+
+    /// Unified 模式：目标分辨率来源
+    bool useFirstClipResolution = true;  ///< true=使用首个 clip 分辨率（默认）
+    int customWidth = 1920;              ///< false 时的自定义宽度
+    int customHeight = 1080;             ///< false 时的自定义高度
+
+    /// 硬件加速开关（默认开启，失败自动回退软件）
+    bool enableHardwareAccel = true;
+
+    /// KeepOriginal 兼容性警告（UI 填充，逻辑层不用）
+    static const char* keepOriginalWarning() {
+        return "输出文件可能无法在部分第三方播放器（如 VLC）中正常播放，建议用本播放器打开";
+    }
+};
+
+/**
  * @brief 多视频合并器
  *
  * 用法：
@@ -83,23 +109,29 @@ public:
      * @brief 启动后台合并线程（整段合并，向后兼容旧入口）
      * @param inputs     按合并顺序排列的本地文件路径（至少 2 个）
      * @param outputPath 输出文件完整路径（扩展名会按实际策略校正为 .mkv/.mp4）
+     * @param options    合并选项（分辨率策略、硬件加速等）
      * @return 已在运行 / 参数非法时返回 false
      *
      * 内部把每个路径转换为「整段」MergeClip 后委托给 clip 版本，
      * 现有基础合并行为不变。
      */
-    bool start(const std::vector<std::string>& inputs, const std::string& outputPath);
+    bool start(const std::vector<std::string>& inputs,
+               const std::string& outputPath,
+               const MergeOptions& options = MergeOptions{});
 
     /**
      * @brief 启动后台合并线程（支持每个片段自定义截取范围）
      * @param clips      按合并顺序排列的片段（至少 2 个；可含同一 path 的多个片段）
      * @param outputPath 输出文件完整路径（扩展名会按实际策略校正为 .mkv/.mp4）
+     * @param options    合并选项（分辨率策略、硬件加速等）
      * @return 已在运行 / 参数非法时返回 false
      *
      * 只要存在任意片段设置了自定义 start/end，就走「精确转码」路径（.mp4），
      * 保证输出边界尽量贴合用户选取的画面；全部整段且参数一致时仍走流拷贝。
      */
-    bool start(const std::vector<MergeClip>& clips, const std::string& outputPath);
+    bool start(const std::vector<MergeClip>& clips,
+               const std::string& outputPath,
+               const MergeOptions& options = MergeOptions{});
 
     /// 请求取消：置原子标志，后台线程会尽快中止并删除半成品文件
     void cancel();
@@ -119,15 +151,31 @@ public:
     /// 失败原因（state()==Failed 时有效，mutex 保护）
     std::string error() const;
 
+    /// 获取硬件加速信息（合并过程中有效，mutex 保护）
+    struct HWAccelInfo {
+        bool isHardwareDecoding = false;      ///< 是否使用硬件解码
+        std::string decoderName;              ///< 解码器名称（如 "h264_cuvid", "h264"）
+        bool isHardwareEncoding = false;      ///< 是否使用硬件编码
+        std::string encoderName;              ///< 编码器名称（如 "h264_nvenc", "libx264"）
+        bool isZeroCopy = false;              ///< 是否零拷贝（GPU 解码→缩放→编码）
+        std::string hwDeviceType;             ///< 硬件设备类型（如 "D3D11VA", "VideoToolbox", 空表示软件）
+    };
+    HWAccelInfo getHWAccelInfo() const;
+
     /// 本次是否走了转码路径（完成后用于 UI 提示，需要 join 后读取）
     bool transcoded() const { return transcoded_.load(); }
 
     /// 本次是否因输入缺音频而丢弃了音轨（完成后用于 UI 提示）
     bool audioDropped() const { return audioDropped_.load(); }
 
+    /// 更新硬件加速信息（线程安全，转码过程中调用）
+    void updateHWAccelInfo(bool isHWDecoding, const std::string& decoderName,
+                           bool isHWEncoding, const std::string& encoderName,
+                           bool isZeroCopy, const std::string& hwDeviceType);
+
 private:
     /// 后台线程主函数：探测 → 决策 → 写出
-    void mergeLoop(std::vector<MergeClip> clips, std::string outputPath);
+    void mergeLoop(std::vector<MergeClip> clips, std::string outputPath, MergeOptions options);
 
     /// 设置失败状态与错误信息（线程安全）
     void fail(const std::string& msg);
@@ -143,9 +191,10 @@ private:
     std::atomic<bool> transcoded_{false};   ///< 是否走转码路径
     std::atomic<bool> audioDropped_{false}; ///< 是否丢弃了音轨
 
-    mutable std::mutex mutex_;   ///< 保护 error_ / outputPath_
+    mutable std::mutex mutex_;   ///< 保护 error_ / outputPath_ / hwAccelInfo_
     std::string error_;
     std::string outputPath_;
+    HWAccelInfo hwAccelInfo_;   ///< 硬件加速信息
 };
 
 } // namespace FluxPlayer

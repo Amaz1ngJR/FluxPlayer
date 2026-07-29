@@ -117,13 +117,44 @@
   <rect x="268" y="431" width="430" height="36" rx="3" fill="#00E8FF" fill-opacity="0.04" stroke="#00E8FF" stroke-width="1.5" stroke-dasharray="4 4"/>
   <text x="483" y="453" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#00E8FF">+  ADD FILES</text>
 
-  <!-- START MERGE button (above BACK) -->
-  <rect x="268" y="635" width="430" height="48" rx="3" fill="#A855FF" fill-opacity="0.12" stroke="#A855FF" stroke-width="2" filter="url(#glow)"/>
-  <text x="483" y="664" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#A855FF" letter-spacing="2">START MERGE</text>
+  <!-- Resolution Strategy Section -->
+  <text x="268" y="490" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">Resolution:</text>
 
-  <!-- BACK button (at original START MERGE position) -->
-  <rect x="268" y="695" width="430" height="36" rx="3" fill="#030817" stroke="#5A7A94" stroke-opacity="0.50"/>
-  <text x="483" y="718" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#7792B2">BACK</text>
+  <!-- Radio buttons: Keep Original and Unified (same line) -->
+  <circle cx="278" cy="508" r="6" fill="none" stroke="#7792B2" stroke-width="1.5"/>
+  <text x="290" y="512" font-family="Consolas,monospace" font-size="11" fill="#D0E8F8">Keep Original</text>
+
+  <circle cx="420" cy="508" r="6" fill="none" stroke="#00E8FF" stroke-width="1.5"/>
+  <circle cx="420" cy="508" r="3" fill="#00E8FF"/>
+  <text x="432" y="512" font-family="Consolas,monospace" font-size="11" fill="#00E8FF">Unified</text>
+
+  <!-- Unified sub-options (indented) -->
+  <circle cx="294" cy="530" r="5" fill="none" stroke="#7792B2" stroke-width="1.5"/>
+  <text x="305" y="534" font-family="Consolas,monospace" font-size="10" fill="#7792B2">First clip</text>
+
+  <circle cx="294" cy="550" r="5" fill="none" stroke="#00E8FF" stroke-width="1.5"/>
+  <circle cx="294" cy="550" r="2.5" fill="#00E8FF"/>
+  <text x="305" y="554" font-family="Consolas,monospace" font-size="10" fill="#00E8FF">Custom</text>
+
+  <!-- Custom resolution inputs -->
+  <rect x="360" y="542" width="60" height="20" rx="2" fill="#030817" stroke="#5A7A94" stroke-width="1"/>
+  <text x="390" y="555" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#D0E8F8">1920</text>
+  <text x="430" y="555" font-family="Consolas,monospace" font-size="10" fill="#7792B2">x</text>
+  <rect x="445" y="542" width="60" height="20" rx="2" fill="#030817" stroke="#5A7A94" stroke-width="1"/>
+  <text x="475" y="555" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#D0E8F8">1080</text>
+
+  <!-- Hardware Acceleration checkbox -->
+  <rect x="268" y="580" width="14" height="14" rx="2" fill="#00E8FF" fill-opacity="0.15" stroke="#00E8FF" stroke-width="1.5"/>
+  <path d="M271 587L275 591L281 582" stroke="#00E8FF" stroke-width="2" fill="none"/>
+  <text x="288" y="591" font-family="Consolas,monospace" font-size="11" fill="#00E8FF">Hardware Accel</text>
+
+  <!-- START MERGE button (moved down to accommodate resolution options) -->
+  <rect x="268" y="615" width="430" height="48" rx="3" fill="#A855FF" fill-opacity="0.12" stroke="#A855FF" stroke-width="2" filter="url(#glow)"/>
+  <text x="483" y="644" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#A855FF" letter-spacing="2">START MERGE</text>
+
+  <!-- BACK button -->
+  <rect x="268" y="675" width="430" height="36" rx="3" fill="#030817" stroke="#5A7A94" stroke-opacity="0.50"/>
+  <text x="483" y="698" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#7792B2">BACK</text>
 
   <!-- === 右栏：预览 + 编辑区 (宽度 ~450px) === -->
   <text x="730" y="174" font-family="Consolas,monospace" font-size="11" fill="#00E8FF" letter-spacing="3">CLIP EDITOR</text>

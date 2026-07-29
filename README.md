@@ -33,7 +33,7 @@
 - 🖼️ 图片查看（JPG / PNG / YUV I420 / NV12，拖放或文件对话框打开）
 - 🎥 录像功能（纯转封装原始流，无损保留画质，零重编码开销）
 - 🎙️ 录音功能（自动适配 M4A / MKA 容器）
-- 🎬 多视频合并与片段截取（主页 MERGE VIDEOS 入口）：多选/拖放添加、拖拽调序、单项删除；每个片段可设 IN/OUT 截取范围并实时预览入点/出点画面；同一文件可多次添加各取一段；智能模式：全整段且参数一致走流拷贝极速无损，含截取或参数不一致时统一转码 H.264/AAC 帧级精确；输出到录制目录
+- 🎬 多视频合并与片段截取（主页 MERGE VIDEOS 入口）：多选/拖放添加、拖拽调序、单项删除；每个片段可设 IN/OUT 截取范围并实时预览入点/出点画面；同一文件可多次添加各取一段；智能模式：全整段且参数一致走流拷贝极速无损，含截取或参数不一致时硬件加速转码 H.264/AAC 帧级精确；支持 Unified（统一分辨率）和 KeepOriginal（保持原始）分辨率策略；输出到录制目录
 - 🔁 循环播放
 - 🕒 观看历史（主页右侧侧栏）：本地视频/音频与网页视频自动记录，点击即重播；LRU 上限 10 条（最近置顶，超限淘汰最久），支持单条删除与一键清空；持久化到 `history.json`，关闭重开仍在
 - ⏩ 播放速度控制（0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x），音频最近邻重采样变速
@@ -46,6 +46,7 @@
 - 🎨 皮肤系统（Skin System）：语义 token 驱动的 UI 主题，支持 JSON 皮肤包加载、三层搜索（用户/开发/内置）、热加载（文件变更自动刷新，无需重启）、Appearance 子页切换皮肤，默认内置 `cyberpunk-neon`
 
 <div align="center">
+  <img src="source/UI/skins/cyberpunk-neon/preview.svg" width="720" alt="播放器主界面预览" />
   <img src="source/UI/skins/cyberpunk-neon/mockup_home.svg" width="720" alt="播放器主界面预览" />
   <br/>
   <img src="source/UI/skins/cyberpunk-neon/mockup_player.svg" width="720" alt="播放器界面预览" />
@@ -88,7 +89,7 @@ FluxPlayer/
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
 │   ├── video/            # 视频后处理 (FrameInterpolator 帧插值)
 │   ├── ui/               # 界面 (Window, Controller, HomeScreen, MergeScreen, OpeningScreen, UiContext, Skin/SkinManager/SkinRenderer 皮肤系统)
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, Downloader, HistoryStore)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, HWAccelDevice, Downloader, HistoryStore)
 ├── include/FluxPlayer/   # 头文件
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档

@@ -16,6 +16,7 @@
  */
 
 #include "FluxPlayer/utils/VideoMerger.h"
+#include "FluxPlayer/utils/HWAccelDevice.h"
 #include "FluxPlayer/utils/Logger.h"
 
 extern "C" {
@@ -26,9 +27,23 @@ extern "C" {
 #include <libavutil/audio_fifo.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
+#include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
+
+#if defined(_WIN32)
+#include <d3d11.h>
+extern "C" {
+#include <libavutil/hwcontext_d3d11va.h>
+}
+#elif defined(__APPLE__)
+#include <VideoToolbox/VideoToolbox.h>
+#include <CoreVideo/CoreVideo.h>
+extern "C" {
+#include <libavutil/hwcontext_videotoolbox.h>
+}
+#endif
 
 #include <filesystem>
 #include <cmath>
@@ -178,6 +193,7 @@ bool canStreamCopy(const std::vector<ClipInfo>& infos) {
 
 } // anonymous namespace
 
+
 // ─────────────────────────────────────────────
 // 生命周期
 // ─────────────────────────────────────────────
@@ -187,7 +203,9 @@ VideoMerger::~VideoMerger() {
     if (thread_.joinable()) thread_.join();
 }
 
-bool VideoMerger::start(const std::vector<std::string>& inputs, const std::string& outputPath) {
+bool VideoMerger::start(const std::vector<std::string>& inputs,
+                        const std::string& outputPath,
+                        const MergeOptions& options) {
     // 旧入口：把每个路径转换为「整段」片段后委托给 clip 版本，保证基础合并不回退
     std::vector<MergeClip> clips;
     clips.reserve(inputs.size());
@@ -196,10 +214,12 @@ bool VideoMerger::start(const std::vector<std::string>& inputs, const std::strin
         c.path = p;          // startSec=0, endSec=-1 即整段
         clips.push_back(std::move(c));
     }
-    return start(clips, outputPath);
+    return start(clips, outputPath, options);
 }
 
-bool VideoMerger::start(const std::vector<MergeClip>& clips, const std::string& outputPath) {
+bool VideoMerger::start(const std::vector<MergeClip>& clips,
+                        const std::string& outputPath,
+                        const MergeOptions& options) {
     if (running_.load()) {
         LOG_WARN("VideoMerger: 已在运行");
         return false;
@@ -220,10 +240,13 @@ bool VideoMerger::start(const std::vector<MergeClip>& clips, const std::string& 
         std::lock_guard<std::mutex> lock(mutex_);
         error_.clear();
         outputPath_ = outputPath;
+        // 每次任务都从空的处理链路状态开始，避免“再次合并”时短暂显示上一次任务的
+        // 解码器、编码器或零拷贝结果。后台线程打开编解码器后会逐项填充这些信息。
+        hwAccelInfo_ = {};
     }
     state_.store(State::Probing);
     running_.store(true);
-    thread_ = std::thread(&VideoMerger::mergeLoop, this, clips, outputPath);
+    thread_ = std::thread(&VideoMerger::mergeLoop, this, clips, outputPath, options);
     return true;
 }
 
@@ -252,6 +275,11 @@ std::string VideoMerger::error() const {
     return error_;
 }
 
+VideoMerger::HWAccelInfo VideoMerger::getHWAccelInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hwAccelInfo_;
+}
+
 void VideoMerger::fail(const std::string& msg) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -259,6 +287,18 @@ void VideoMerger::fail(const std::string& msg) {
     }
     LOG_ERROR("VideoMerger: " + msg);
     state_.store(State::Failed);
+}
+
+void VideoMerger::updateHWAccelInfo(bool isHWDecoding, const std::string& decoderName,
+                                     bool isHWEncoding, const std::string& encoderName,
+                                     bool isZeroCopy, const std::string& hwDeviceType) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hwAccelInfo_.isHardwareDecoding = isHWDecoding;
+    hwAccelInfo_.decoderName = decoderName;
+    hwAccelInfo_.isHardwareEncoding = isHWEncoding;
+    hwAccelInfo_.encoderName = encoderName;
+    hwAccelInfo_.isZeroCopy = isZeroCopy;
+    hwAccelInfo_.hwDeviceType = hwDeviceType;
 }
 
 // ─────────────────────────────────────────────
@@ -372,6 +412,7 @@ namespace {
 
 /// 转码会话：持有跨文件保持的输出与编码器状态（PTS 计数器连续递增）
 struct TranscodeCtx {
+    VideoMerger& merger;  ///< VideoMerger 引用（用于更新 hwAccelInfo_）
     AVFormatContext* out  = nullptr;
     AVCodecContext*  vEnc = nullptr;
     AVCodecContext*  aEnc = nullptr;
@@ -383,6 +424,31 @@ struct TranscodeCtx {
     bool keepAudio = false;
     int targetSampleRate = 44100;
     int targetChannels   = 2;
+
+    // ── 硬件加速相关 ──
+    std::unique_ptr<HWAccelDevice> hwDevice;  ///< 硬件设备上下文（解码+编码+缩放共享）
+    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE; ///< 硬件像素格式（D3D11: d3d11，VideoToolbox: videotoolbox）
+    bool useHardware = false;                 ///< 本次是否走硬件路径
+
+    // KeepOriginal 模式：分辨率分段管理
+    struct ResolutionPhase {
+        int width = 0;
+        int height = 0;
+        AVBufferRef* framesCtx = nullptr;  ///< 该分辨率的 hw_frames_ctx（macOS pool=0，需手搓帧）
+    };
+    std::vector<ResolutionPhase> resPhases;  ///< 各分辨率阶段（KeepOriginal 模式填充）
+    int currentPhaseIdx = -1;                ///< 当前所在阶段索引
+
+#if defined(_WIN32)
+    // Windows GPU 缩放：D3D11 VideoProcessor
+    ID3D11VideoDevice*           d3d11VidDev = nullptr;
+    ID3D11VideoContext*          d3d11VidCtx = nullptr;
+    ID3D11VideoProcessor*        d3d11VProc  = nullptr;
+    ID3D11VideoProcessorEnumerator* d3d11VPEnum = nullptr;
+#elif defined(__APPLE__)
+    // macOS GPU 缩放：VTPixelTransferSession
+    void* vtTransferSession = nullptr;  ///< VTPixelTransferSessionRef，void* 避免头文件依赖
+#endif
 };
 
 /// 通用：把一帧送编码器并把产出的包写入输出（frame==nullptr 表示 flush）
@@ -402,7 +468,681 @@ int encodeWriteFrame(AVFormatContext* out, AVCodecContext* enc, int streamIdx,
     return 0;
 }
 
-/// 构建 H.264 视频编码器并挂到输出
+// 前向声明（需要在 TranscodeCtx 定义之后）
+bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std::string& err);
+bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
+                                bool globalHeader, std::string& err);
+
+/// 探测并返回可用的硬件 H.264 编码器名称（优先级：NVENC > QSV > AMF > VideoToolbox）
+/// 返回空字符串表示无可用硬件编码器
+static std::string probeHardwareEncoder() {
+#if defined(_WIN32)
+    // Windows 优先级：NVENC（NVIDIA）> QSV（Intel）> AMF（AMD）
+    const char* candidates[] = {"h264_nvenc", "h264_qsv", "h264_amf"};
+#elif defined(__APPLE__)
+    // macOS：VideoToolbox（Apple Silicon / Intel Mac 都支持）
+    const char* candidates[] = {"h264_videotoolbox"};
+#else
+    return "";
+#endif
+
+    for (const char* name : candidates) {
+        const AVCodec* codec = avcodec_find_encoder_by_name(name);
+        if (codec) {
+            LOG_INFO(std::string("VideoMerger: found hardware encoder: ") + name);
+            return name;
+        }
+    }
+    return "";
+}
+
+/// 构建硬件 H.264 视频编码器（带 hw_device_ctx 和 hw_frames_ctx）
+/// @param globalHeader KeepOriginal 模式下，阶段一需要 true（容器 extradata），阶段二需要 false（SPS/PPS in-band）
+bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
+                                bool globalHeader, std::string& err) {
+    std::string encName = probeHardwareEncoder();
+    if (encName.empty()) {
+        err = "No hardware encoder available";
+        return false;
+    }
+
+    const AVCodec* codec = avcodec_find_encoder_by_name(encName.c_str());
+    if (!codec) {
+        err = "Hardware encoder disappeared after probe";
+        return false;
+    }
+
+    tc.vEnc = avcodec_alloc_context3(codec);
+    tc.vEnc->width = w;
+    tc.vEnc->height = h;
+    tc.vEnc->pix_fmt = tc.hwPixFmt;  // 硬件像素格式（d3d11 或 videotoolbox）
+    tc.vEnc->time_base = AVRational{1, 90000};
+    tc.vEnc->framerate = frameRate;
+    tc.vEnc->bit_rate = kVideoBitRate;
+    tc.vEnc->gop_size = 12;
+
+    // 硬件编码器和下面的硬件帧池必须引用同一个设备上下文。这样解码输出、GPU
+    // 缩放输出和编码输入都属于同一块显存，D3D11/VideoToolbox 才能保持零拷贝。
+    if (!tc.hwDevice || !tc.hwDevice->avDeviceContext()) {
+        err = "Hardware device context is not available";
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
+    tc.vEnc->hw_device_ctx = av_buffer_ref(tc.hwDevice->avDeviceContext());
+    if (!tc.vEnc->hw_device_ctx) {
+        err = "Failed to reference hardware device context";
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
+
+    // 编码器接收的是 GPU 帧，因此仅设置 hw_device_ctx 不够，还必须提供描述输入
+    // 帧格式、尺寸和分配方式的 hw_frames_ctx。NVENC 缺少它时会在 avcodec_open2()
+    // 直接报 “hw_frames_ctx must be set when using GPU frames as input”。
+#if defined(_WIN32) || defined(__APPLE__)
+    AVBufferRef* framesCtx = av_hwframe_ctx_alloc(tc.hwDevice->avDeviceContext());
+    if (!framesCtx) {
+        err = "av_hwframe_ctx_alloc failed";
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
+    AVHWFramesContext* fc = reinterpret_cast<AVHWFramesContext*>(framesCtx->data);
+    fc->format = tc.hwPixFmt;
+    fc->sw_format = AV_PIX_FMT_NV12;
+    fc->width = w;
+    fc->height = h;
+
+#if defined(_WIN32)
+    // D3D11 使用固定大小的数组纹理池。VideoProcessor 会把缩放结果直接写入这些
+    // NV12 纹理，NVENC 再读取同一纹理；RENDER_TARGET 是创建输出视图的必要标志。
+    // 16 个 surface 可覆盖解码、缩放和 NVENC 异步编码期间同时在途的帧。
+    fc->initial_pool_size = 16;
+    auto* d3d11Frames = reinterpret_cast<AVD3D11VAFramesContext*>(fc->hwctx);
+    d3d11Frames->BindFlags = D3D11_BIND_RENDER_TARGET;
+#else
+    // macOS 的 VideoToolbox 帧由 CVPixelBufferPool/调用方按需创建；FFmpeg 4.4.6
+    // 要求这里使用动态池（initial_pool_size=0），不能套用 D3D11 的固定纹理池。
+    fc->initial_pool_size = 0;
+#endif
+
+    const int framesRet = av_hwframe_ctx_init(framesCtx);
+    if (framesRet < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(framesRet, errBuf, sizeof(errBuf));
+        err = std::string("av_hwframe_ctx_init failed: ") + errBuf;
+        av_buffer_unref(&framesCtx);
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
+    // AVCodecContext 接管该引用；编码器关闭时会自动释放帧池。
+    tc.vEnc->hw_frames_ctx = framesCtx;
+#endif
+
+    // GLOBAL_HEADER：KeepOriginal 阶段一必须设（容器 extradata），阶段二不设（SPS/PPS in-band）
+    if (globalHeader || (tc.out->oformat->flags & AVFMT_GLOBALHEADER)) {
+        tc.vEnc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
+
+    // 打开编码器
+    const int ret = avcodec_open2(tc.vEnc, codec, nullptr);
+    if (ret < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        err = std::string("avcodec_open2(") + encName + ") failed: " + errBuf;
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
+
+    // 挂流到输出容器
+    AVStream* st = avformat_new_stream(tc.out, nullptr);
+    if (!st) {
+        err = "avformat_new_stream failed";
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
+    avcodec_parameters_from_context(st->codecpar, tc.vEnc);
+    st->time_base = tc.vEnc->time_base;
+    tc.vStreamIdx = st->index;
+
+    LOG_INFO(std::string("VideoMerger: hardware video encoder opened: ") + encName +
+             " " + std::to_string(w) + "x" + std::to_string(h) +
+             " (extradata=" + std::to_string(tc.vEnc->extradata_size) + " bytes)");
+    return true;
+}
+
+// ─────────────────────────────────────────────
+// GPU 硬件缩放（Unified 模式）
+// ─────────────────────────────────────────────
+
+#if defined(_WIN32)
+/// 初始化 D3D11 VideoProcessor（Unified 模式缩放用）
+bool initD3D11VideoProcessor(TranscodeCtx& tc, int srcW, int srcH, int dstW, int dstH, std::string& err) {
+    if (!tc.hwDevice || !tc.hwDevice->nativeDevice()) {
+        err = "D3D11 device not available";
+        return false;
+    }
+
+    ID3D11Device* d3dDev = static_cast<ID3D11Device*>(tc.hwDevice->nativeDevice());
+
+    // 获取 ID3D11VideoDevice
+    HRESULT hr = d3dDev->QueryInterface(__uuidof(ID3D11VideoDevice), (void**)&tc.d3d11VidDev);
+    if (FAILED(hr) || !tc.d3d11VidDev) {
+        err = "QueryInterface(ID3D11VideoDevice) failed";
+        return false;
+    }
+
+    // 获取 ID3D11DeviceContext 并查询 ID3D11VideoContext
+    ID3D11DeviceContext* d3dCtx = nullptr;
+    d3dDev->GetImmediateContext(&d3dCtx);
+    if (d3dCtx) {
+        hr = d3dCtx->QueryInterface(__uuidof(ID3D11VideoContext), (void**)&tc.d3d11VidCtx);
+        d3dCtx->Release();
+        if (FAILED(hr) || !tc.d3d11VidCtx) {
+            err = "QueryInterface(ID3D11VideoContext) failed";
+            return false;
+        }
+    } else {
+        err = "GetImmediateContext failed";
+        return false;
+    }
+
+    // 创建 VideoProcessorEnumerator
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc = {};
+    contentDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    contentDesc.InputWidth = srcW;
+    contentDesc.InputHeight = srcH;
+    contentDesc.OutputWidth = dstW;
+    contentDesc.OutputHeight = dstH;
+    contentDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+    hr = tc.d3d11VidDev->CreateVideoProcessorEnumerator(&contentDesc, &tc.d3d11VPEnum);
+    if (FAILED(hr) || !tc.d3d11VPEnum) {
+        err = "CreateVideoProcessorEnumerator failed";
+        return false;
+    }
+
+    // 创建 VideoProcessor
+    hr = tc.d3d11VidDev->CreateVideoProcessor(tc.d3d11VPEnum, 0, &tc.d3d11VProc);
+    if (FAILED(hr) || !tc.d3d11VProc) {
+        err = "CreateVideoProcessor failed";
+        return false;
+    }
+
+    LOG_INFO("VideoMerger: D3D11 VideoProcessor initialized for " +
+             std::to_string(srcW) + "x" + std::to_string(srcH) + " -> " +
+             std::to_string(dstW) + "x" + std::to_string(dstH));
+    return true;
+}
+
+/// 清理 D3D11 VideoProcessor 资源
+void cleanupD3D11VideoProcessor(TranscodeCtx& tc) {
+    if (tc.d3d11VProc) { tc.d3d11VProc->Release(); tc.d3d11VProc = nullptr; }
+    if (tc.d3d11VPEnum) { tc.d3d11VPEnum->Release(); tc.d3d11VPEnum = nullptr; }
+    if (tc.d3d11VidCtx) { tc.d3d11VidCtx->Release(); tc.d3d11VidCtx = nullptr; }
+    if (tc.d3d11VidDev) { tc.d3d11VidDev->Release(); tc.d3d11VidDev = nullptr; }
+}
+
+#elif defined(__APPLE__)
+/// 初始化 VTPixelTransferSession（Unified 模式缩放用）
+bool initVTPixelTransferSession(TranscodeCtx& tc, std::string& err) {
+    VTPixelTransferSessionRef session = nullptr;
+    OSStatus status = VTPixelTransferSessionCreate(kCFAllocatorDefault, &session);
+    if (status != noErr || !session) {
+        err = "VTPixelTransferSessionCreate failed";
+        return false;
+    }
+    tc.vtTransferSession = session;
+    LOG_INFO("VideoMerger: VTPixelTransferSession initialized");
+    return true;
+}
+
+/// 清理 VTPixelTransferSession 资源
+void cleanupVTPixelTransferSession(TranscodeCtx& tc) {
+    if (tc.vtTransferSession) {
+        CFRelease((VTPixelTransferSessionRef)tc.vtTransferSession);
+        tc.vtTransferSession = nullptr;
+    }
+}
+#endif
+
+/// GPU 硬件缩放：输入硬件帧 → 输出目标尺寸硬件帧（保持宽高比 + 黑边填充）
+/// 返回 nullptr 表示失败（调用方应回退软件缩放）
+AVFrame* scaleFrameHardware(TranscodeCtx& tc, AVFrame* srcFrame, int dstW, int dstH) {
+    if (!srcFrame || !srcFrame->hw_frames_ctx) {
+        return nullptr;
+    }
+
+#if defined(_WIN32)
+    // Windows: D3D11 VideoProcessor 缩放
+    if (!tc.d3d11VProc || !tc.d3d11VidCtx) {
+        return nullptr;
+    }
+
+    // 从源帧提取 ID3D11Texture2D
+    AVHWFramesContext* srcFramesCtx = (AVHWFramesContext*)srcFrame->hw_frames_ctx->data;
+    ID3D11Texture2D* srcTexture = (ID3D11Texture2D*)srcFrame->data[0];
+    int srcIdx = (int)(intptr_t)srcFrame->data[1];
+
+    if (!srcTexture) {
+        return nullptr;
+    }
+
+    // 分配目标帧（从编码器的 hw_frames_ctx 池）
+    AVFrame* dstFrame = av_frame_alloc();
+    if (!dstFrame) {
+        return nullptr;
+    }
+
+    // Windows 可以用 av_hwframe_get_buffer（不像 macOS FFmpeg 4.4.6）
+    int ret = av_hwframe_get_buffer(tc.vEnc->hw_frames_ctx, dstFrame, 0);
+    if (ret < 0) {
+        av_frame_free(&dstFrame);
+        return nullptr;
+    }
+
+    ID3D11Texture2D* dstTexture = (ID3D11Texture2D*)dstFrame->data[0];
+    int dstIdx = (int)(intptr_t)dstFrame->data[1];
+
+    // 创建输入/输出视图
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inViewDesc = {};
+    inViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    inViewDesc.Texture2D.ArraySlice = srcIdx;
+
+    ID3D11VideoProcessorInputView* inView = nullptr;
+    HRESULT hr = tc.d3d11VidDev->CreateVideoProcessorInputView(srcTexture, tc.d3d11VPEnum, &inViewDesc, &inView);
+    if (FAILED(hr) || !inView) {
+        av_frame_free(&dstFrame);
+        return nullptr;
+    }
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outViewDesc = {};
+    D3D11_TEXTURE2D_DESC dstTextureDesc = {};
+    dstTexture->GetDesc(&dstTextureDesc);
+    if (dstTextureDesc.ArraySize > 1) {
+        // FFmpeg 的 D3D11 硬件帧通常共享一个纹理数组，data[1] 保存当前帧
+        // 对应的 array slice。输出视图的 Texture2D 成员只有 MipSlice，
+        // 数组下标必须通过 Texture2DArray.FirstArraySlice 指定。
+        outViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2DARRAY;
+        outViewDesc.Texture2DArray.MipSlice = 0;
+        outViewDesc.Texture2DArray.FirstArraySlice = static_cast<UINT>(dstIdx);
+        outViewDesc.Texture2DArray.ArraySize = 1;
+    } else {
+        // 独立二维纹理没有 array slice，只需选择第 0 级 mip。
+        outViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        outViewDesc.Texture2D.MipSlice = 0;
+    }
+
+    ID3D11VideoProcessorOutputView* outView = nullptr;
+    hr = tc.d3d11VidDev->CreateVideoProcessorOutputView(dstTexture, tc.d3d11VPEnum, &outViewDesc, &outView);
+    if (FAILED(hr) || !outView) {
+        inView->Release();
+        av_frame_free(&dstFrame);
+        return nullptr;
+    }
+
+    // 计算保持宽高比的目标区域（letterbox/pillarbox）
+    int srcW = srcFrame->width, srcH = srcFrame->height;
+    float srcAspect = (float)srcW / srcH;
+    float dstAspect = (float)dstW / dstH;
+    RECT dstRect;
+    if (srcAspect > dstAspect) {
+        // 源更宽，上下黑边
+        int scaledH = (int)(dstW / srcAspect);
+        int offsetY = (dstH - scaledH) / 2;
+        dstRect = {0, offsetY, dstW, offsetY + scaledH};
+    } else {
+        // 源更高，左右黑边
+        int scaledW = (int)(dstH * srcAspect);
+        int offsetX = (dstW - scaledW) / 2;
+        dstRect = {offsetX, 0, offsetX + scaledW, dstH};
+    }
+
+    // 执行缩放
+    D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+    stream.Enable = TRUE;
+    stream.pInputSurface = inView;
+    RECT srcRect = {0, 0, srcW, srcH};
+    tc.d3d11VidCtx->VideoProcessorSetStreamSourceRect(tc.d3d11VProc, 0, TRUE, &srcRect);
+    tc.d3d11VidCtx->VideoProcessorSetStreamDestRect(tc.d3d11VProc, 0, TRUE, &dstRect);
+
+    hr = tc.d3d11VidCtx->VideoProcessorBlt(tc.d3d11VProc, outView, 0, 1, &stream);
+
+    inView->Release();
+    outView->Release();
+
+    if (FAILED(hr)) {
+        av_frame_free(&dstFrame);
+        return nullptr;
+    }
+
+    dstFrame->pts = srcFrame->pts;
+    dstFrame->pict_type = srcFrame->pict_type;
+    return dstFrame;
+
+#elif defined(__APPLE__)
+    // macOS: VTPixelTransferSession 缩放
+    if (!tc.vtTransferSession) {
+        return nullptr;
+    }
+
+    CVPixelBufferRef srcPB = (CVPixelBufferRef)srcFrame->data[3];
+    if (!srcPB) {
+        return nullptr;
+    }
+
+    // 创建目标 CVPixelBuffer（IOSurface-backed NV12）
+    CFDictionaryRef empty = CFDictionaryCreate(kCFAllocatorDefault, nullptr, nullptr, 0,
+                                               &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    const void* keys[] = { kCVPixelBufferIOSurfacePropertiesKey };
+    const void* vals[] = { empty };
+    CFDictionaryRef attrs = CFDictionaryCreate(kCFAllocatorDefault, keys, vals, 1,
+                                               &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    CVPixelBufferRef dstPB = nullptr;
+    CVReturn cvRet = CVPixelBufferCreate(kCFAllocatorDefault, dstW, dstH,
+                                         kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                         attrs, &dstPB);
+    CFRelease(attrs);
+    CFRelease(empty);
+
+    if (cvRet != kCVReturnSuccess || !dstPB) {
+        return nullptr;
+    }
+
+    // 执行缩放（VTPixelTransferSession 自动保持宽高比 + 黑边）
+    VTPixelTransferSessionRef session = (VTPixelTransferSessionRef)tc.vtTransferSession;
+    OSStatus status = VTPixelTransferSessionTransferImage(session, srcPB, dstPB);
+    if (status != noErr) {
+        CFRelease(dstPB);
+        return nullptr;
+    }
+
+    // 包装成 AVFrame（引用计数帧，buf[0] 析构时 CFRelease）
+    AVFrame* dstFrame = av_frame_alloc();
+    if (!dstFrame) {
+        CFRelease(dstPB);
+        return nullptr;
+    }
+
+    dstFrame->format = AV_PIX_FMT_VIDEOTOOLBOX;
+    dstFrame->width = dstW;
+    dstFrame->height = dstH;
+    dstFrame->data[3] = (uint8_t*)dstPB;
+    dstFrame->buf[0] = av_buffer_create((uint8_t*)dstPB, 1,
+        [](void* opaque, uint8_t*) { if (opaque) CFRelease((CVPixelBufferRef)opaque); },
+        dstPB, 0);
+
+    if (tc.vEnc && tc.vEnc->hw_frames_ctx) {
+        dstFrame->hw_frames_ctx = av_buffer_ref(tc.vEnc->hw_frames_ctx);
+    }
+
+    dstFrame->pts = srcFrame->pts;
+    dstFrame->pict_type = srcFrame->pict_type;
+    return dstFrame;
+#else
+    return nullptr;
+#endif
+}
+
+// ─────────────────────────────────────────────
+// KeepOriginal 模式：分辨率分段管理
+// ─────────────────────────────────────────────
+
+/// 检测并切换编码器分辨率（KeepOriginal 模式）
+/// 返回 true 表示发生了切换（编码器已重建），false 表示无需切换
+bool switchEncoderResolutionIfNeeded(TranscodeCtx& tc, int newW, int newH,
+                                      AVRational frameRate, AVPacket* pkt, std::string& err) {
+    // 首次编码：记录初始分辨率
+    if (tc.currentPhaseIdx < 0) {
+        tc.currentPhaseIdx = 0;
+        TranscodeCtx::ResolutionPhase phase;
+        phase.width = newW;
+        phase.height = newH;
+#if defined(__APPLE__)
+        // macOS 需要预建 frames_ctx（pool=0）
+        if (tc.useHardware && tc.hwDevice) {
+            AVBufferRef* framesCtx = av_hwframe_ctx_alloc(tc.hwDevice->avDeviceContext());
+            if (framesCtx) {
+                AVHWFramesContext* fc = (AVHWFramesContext*)framesCtx->data;
+                fc->format = AV_PIX_FMT_VIDEOTOOLBOX;
+                fc->sw_format = AV_PIX_FMT_NV12;
+                fc->width = newW;
+                fc->height = newH;
+                fc->initial_pool_size = 0;
+                if (av_hwframe_ctx_init(framesCtx) == 0) {
+                    phase.framesCtx = framesCtx;
+                } else {
+                    av_buffer_unref(&framesCtx);
+                }
+            }
+        }
+#endif
+        tc.resPhases.push_back(phase);
+        return false;
+    }
+
+    // 检查当前分辨率是否匹配
+    const auto& curPhase = tc.resPhases[tc.currentPhaseIdx];
+    if (curPhase.width == newW && curPhase.height == newH) {
+        return false;  // 无需切换
+    }
+
+    LOG_INFO("VideoMerger: resolution switch detected: " +
+             std::to_string(curPhase.width) + "x" + std::to_string(curPhase.height) + " -> " +
+             std::to_string(newW) + "x" + std::to_string(newH));
+
+    // flush 当前编码器
+    encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, nullptr, pkt);
+
+    // 释放旧编码器
+    avcodec_free_context(&tc.vEnc);
+
+    // 重建编码器（阶段二不设 GLOBAL_HEADER，让 SPS/PPS in-band）
+    bool success = false;
+    if (tc.useHardware) {
+        success = setupHardwareVideoEncoder(tc, newW, newH, frameRate, false, err);
+    } else {
+        success = setupVideoEncoder(tc, newW, newH, frameRate, err);
+    }
+
+    if (!success) {
+        return false;
+    }
+
+    // 记录新分辨率阶段
+    tc.currentPhaseIdx = static_cast<int>(tc.resPhases.size());
+    TranscodeCtx::ResolutionPhase phase;
+    phase.width = newW;
+    phase.height = newH;
+#if defined(__APPLE__)
+    if (tc.useHardware && tc.hwDevice) {
+        AVBufferRef* framesCtx = av_hwframe_ctx_alloc(tc.hwDevice->avDeviceContext());
+        if (framesCtx) {
+            AVHWFramesContext* fc = (AVHWFramesContext*)framesCtx->data;
+            fc->format = AV_PIX_FMT_VIDEOTOOLBOX;
+            fc->sw_format = AV_PIX_FMT_NV12;
+            fc->width = newW;
+            fc->height = newH;
+            fc->initial_pool_size = 0;
+            if (av_hwframe_ctx_init(framesCtx) == 0) {
+                phase.framesCtx = framesCtx;
+            } else {
+                av_buffer_unref(&framesCtx);
+            }
+        }
+    }
+#endif
+    tc.resPhases.push_back(phase);
+
+    LOG_INFO("VideoMerger: encoder rebuilt at " +
+             std::to_string(newW) + "x" + std::to_string(newH) +
+             " (phase " + std::to_string(tc.currentPhaseIdx) +
+             ", extradata=" + std::to_string(tc.vEnc->extradata_size) + " bytes)");
+    return true;
+}
+
+// ─────────────────────────────────────────────
+// 硬件解码器
+// ─────────────────────────────────────────────
+
+/// 硬件解码器像素格式回调（get_format）：选择硬件像素格式
+static enum AVPixelFormat hwGetFormat(AVCodecContext* ctx, const enum AVPixelFormat* pixFmts) {
+    // 优先选择硬件格式
+    for (const AVPixelFormat* p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
+#if defined(_WIN32)
+        if (*p == AV_PIX_FMT_D3D11) {
+            return *p;
+        }
+#elif defined(__APPLE__)
+        if (*p == AV_PIX_FMT_VIDEOTOOLBOX) {
+            return *p;
+        }
+#endif
+    }
+    // 回退软件格式
+    return pixFmts[0];
+}
+
+/// 尝试以硬件加速打开视频解码器
+/// 成功返回解码器上下文，失败返回 nullptr（调用方应回退软件解码）
+AVCodecContext* openHardwareDecoder(AVStream* st, TranscodeCtx& tc, std::string& err) {
+    if (!tc.hwDevice || !tc.hwDevice->avDeviceContext()) {
+        err = "Hardware device not initialized";
+        return nullptr;
+    }
+
+    const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+    if (!dec) {
+        err = "Decoder not found";
+        return nullptr;
+    }
+
+    AVCodecContext* ctx = avcodec_alloc_context3(dec);
+    if (!ctx) {
+        err = "avcodec_alloc_context3 failed";
+        return nullptr;
+    }
+
+    avcodec_parameters_to_context(ctx, st->codecpar);
+    ctx->hw_device_ctx = av_buffer_ref(tc.hwDevice->avDeviceContext());
+    ctx->get_format = hwGetFormat;
+
+    int ret = avcodec_open2(ctx, dec, nullptr);
+    if (ret < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errBuf, sizeof(errBuf));
+        err = std::string("avcodec_open2(hardware) failed: ") + errBuf;
+        avcodec_free_context(&ctx);
+        return nullptr;
+    }
+
+    LOG_INFO(std::string("VideoMerger: hardware video decoder opened: ") + dec->name +
+             " (" + std::to_string(st->codecpar->width) + "x" + std::to_string(st->codecpar->height) + ")");
+    return ctx;
+}
+
+// ─────────────────────────────────────────────
+// 视频帧处理：硬件/软件分支
+// ─────────────────────────────────────────────
+
+/// 处理一个解码后的视频帧（硬件或软件路径）
+/// 返回处理后的编码器输入帧（nullptr 表示跳过或失败）
+AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int targetH,
+                            SwsContext*& sws, AVFrame*& swDstFrame,
+                            const MergeOptions& options, AVPacket* pkt, std::string& err) {
+    if (!srcFrame) return nullptr;
+
+    int srcW = srcFrame->width;
+    int srcH = srcFrame->height;
+
+    // KeepOriginal 模式：检测分辨率切换
+    if (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal) {
+        if (tc.useHardware) {
+            // 硬件路径：检测并重建编码器
+            AVRational frameRate = tc.vEnc ? tc.vEnc->framerate : AVRational{25, 1};
+            if (switchEncoderResolutionIfNeeded(tc, srcW, srcH, frameRate, pkt, err)) {
+                // 编码器已重建，继续使用新编码器
+            }
+        } else {
+            // 软件路径：KeepOriginal 同样支持分辨率切换
+            AVRational frameRate = tc.vEnc ? tc.vEnc->framerate : AVRational{25, 1};
+            switchEncoderResolutionIfNeeded(tc, srcW, srcH, frameRate, pkt, err);
+        }
+        // KeepOriginal 不缩放，直接返回源帧（或克隆）
+        if (srcFrame->hw_frames_ctx) {
+            return av_frame_clone(srcFrame);  // 硬件帧必须克隆（解码器帧池会复用）
+        } else {
+            // 软件帧：需要转换为编码器输入格式（YUV420P）
+            if (!sws) {
+                sws = sws_getContext(srcW, srcH, (AVPixelFormat)srcFrame->format,
+                                     srcW, srcH, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
+                                     nullptr, nullptr, nullptr);
+                swDstFrame = av_frame_alloc();
+                swDstFrame->format = AV_PIX_FMT_YUV420P;
+                swDstFrame->width = srcW;
+                swDstFrame->height = srcH;
+                av_frame_get_buffer(swDstFrame, 0);
+            }
+            sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, srcH,
+                      swDstFrame->data, swDstFrame->linesize);
+            return swDstFrame;  // 返回缓存帧指针（调用方不释放）
+        }
+    }
+
+    // Unified 模式：缩放到目标分辨率
+    if (srcW == targetW && srcH == targetH) {
+        // 尺寸已匹配，无需缩放
+        if (srcFrame->hw_frames_ctx) {
+            return av_frame_clone(srcFrame);
+        } else {
+            if (!sws) {
+                sws = sws_getContext(srcW, srcH, (AVPixelFormat)srcFrame->format,
+                                     targetW, targetH, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
+                                     nullptr, nullptr, nullptr);
+                swDstFrame = av_frame_alloc();
+                swDstFrame->format = AV_PIX_FMT_YUV420P;
+                swDstFrame->width = targetW;
+                swDstFrame->height = targetH;
+                av_frame_get_buffer(swDstFrame, 0);
+            }
+            sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, srcH,
+                      swDstFrame->data, swDstFrame->linesize);
+            return swDstFrame;
+        }
+    }
+
+    // 需要缩放
+    if (tc.useHardware && srcFrame->hw_frames_ctx) {
+        // 硬件路径：GPU 缩放
+        AVFrame* scaledFrame = scaleFrameHardware(tc, srcFrame, targetW, targetH);
+        if (scaledFrame) {
+            return scaledFrame;  // 新分配的帧，调用方需释放
+        }
+        // GPU 缩放失败，回退软件（需先下载到 CPU）
+        LOG_WARN("VideoMerger: GPU scaling failed, falling back to software");
+        tc.useHardware = false;  // 标记回退，后续帧走软件路径
+    }
+
+    // 软件路径：sws_scale
+    if (!sws || swDstFrame->width != targetW || swDstFrame->height != targetH) {
+        if (sws) sws_freeContext(sws);
+        sws = sws_getContext(srcW, srcH, (AVPixelFormat)srcFrame->format,
+                             targetW, targetH, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
+                             nullptr, nullptr, nullptr);
+        if (swDstFrame) av_frame_free(&swDstFrame);
+        swDstFrame = av_frame_alloc();
+        swDstFrame->format = AV_PIX_FMT_YUV420P;
+        swDstFrame->width = targetW;
+        swDstFrame->height = targetH;
+        av_frame_get_buffer(swDstFrame, 0);
+    }
+
+    sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, srcH,
+              swDstFrame->data, swDstFrame->linesize);
+    return swDstFrame;
+}
+
+/// 构建软件 H.264 视频编码器并挂到输出
 /// time_base 取细粒度 1/90000：视频 PTS 由各帧真实时间戳驱动（见 transcodeFile），
 /// 以兼容「不同输入文件帧率不一致」——若按固定帧率计数摆放，帧率不同的片段会
 /// 出现快放/慢放并与音频失步。framerate 仅作 x264 码控提示。
@@ -427,6 +1167,8 @@ bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std
     avcodec_parameters_from_context(st->codecpar, tc.vEnc);
     st->time_base = tc.vEnc->time_base;
     tc.vStreamIdx = st->index;
+    LOG_INFO(std::string("VideoMerger: software video encoder opened: ") + codec->name +
+             " " + std::to_string(w) + "x" + std::to_string(h));
     return true;
 }
 
@@ -495,6 +1237,7 @@ namespace {
 /// @param timelineBaseSec 本片段在合并时间轴上的起始秒数（前序片段累计裁剪时长）
 /// @param outConsumedSec  输出参数：本片段实际消耗时长（供调用方推进 timelineBaseSec）
 bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targetH,
+                   const MergeOptions& options,
                    std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                    double timelineBaseSec, double& outConsumedSec, std::string& err) {
     AVFormatContext* in = nullptr;
@@ -507,11 +1250,32 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
     AVCodecContext* vDec = nullptr;
     {
         AVStream* st = in->streams[info.vIdx];
-        const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
-        vDec = avcodec_alloc_context3(dec);
-        avcodec_parameters_to_context(vDec, st->codecpar);
-        if (!dec || avcodec_open2(vDec, dec, nullptr) < 0) {
-            err = "Failed to open video decoder"; avcodec_free_context(&vDec); avformat_close_input(&in); return false;
+        std::string decErr;
+        if (tc.useHardware) {
+            vDec = openHardwareDecoder(st, tc, decErr);
+            if (!vDec) {
+                LOG_WARN(std::string("VideoMerger: hardware decoder failed (") + decErr + "), falling back to software");
+                tc.useHardware = false;
+            }
+        }
+        if (!vDec) {
+            // 软件解码器回退
+            const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+            vDec = avcodec_alloc_context3(dec);
+            avcodec_parameters_to_context(vDec, st->codecpar);
+            if (!dec || avcodec_open2(vDec, dec, nullptr) < 0) {
+                err = "Failed to open video decoder"; avcodec_free_context(&vDec); avformat_close_input(&in); return false;
+            }
+        }
+
+        // 填充解码器���息（仅首个片段，供 UI 显示）
+        if (timelineBaseSec == 0.0) {
+            std::string decoderName = vDec->codec ? vDec->codec->name : "";
+            // 获取当前编码器信息
+            auto currentInfo = tc.merger.getHWAccelInfo();
+            tc.merger.updateHWAccelInfo(tc.useHardware, decoderName,
+                                        currentInfo.isHardwareEncoding, currentInfo.encoderName,
+                                        currentInfo.isZeroCopy, currentInfo.hwDeviceType);
         }
     }
 
@@ -689,17 +1453,15 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                     if (srcSec < startSec - 1e-6) { av_frame_unref(frame); continue; }       // 入点前丢弃
                     if (hasEnd && srcSec >= endSec) { videoEnd = true; av_frame_unref(frame); break; }  // 出点截断
 
-                    if (!sws) {  // 首帧惰性创建缩放器（按真实帧格式）
-                        sws = sws_getContext(frame->width, frame->height, (AVPixelFormat)frame->format,
-                                             targetW, targetH, AV_PIX_FMT_YUV420P, SWS_BILINEAR,
-                                             nullptr, nullptr, nullptr);
-                        dstV = av_frame_alloc();
-                        dstV->format = AV_PIX_FMT_YUV420P;
-                        dstV->width = targetW; dstV->height = targetH;
-                        av_frame_get_buffer(dstV, 0);
+                    // 处理帧（硬件/软件分支，缩放/KeepOriginal）
+                    std::string procErr;
+                    AVFrame* encFrame = processVideoFrame(tc, frame, targetW, targetH, sws, dstV,
+                                                           options, pkt, procErr);
+                    if (!encFrame) {
+                        LOG_ERROR(std::string("VideoMerger: processVideoFrame failed: ") + procErr);
+                        av_frame_unref(frame);
+                        continue;
                     }
-                    sws_scale(sws, frame->data, frame->linesize, 0, frame->height,
-                              dstV->data, dstV->linesize);
 
                     // 输出 PTS = 片段内相对时间(srcSec-startSec) + 时间轴偏移，换算到 1/90000。
                     // 多片段拼接时输出时间轴连续，且每段从相对 0 开始；不同帧率也与真实时间对齐。
@@ -709,8 +1471,18 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                     int64_t pts = (int64_t)((timelineBaseSec + relSec) * 90000.0 + 0.5);
                     if (pts <= tc.vLastPts) pts = tc.vLastPts + 1;  // 保证严格递增
                     tc.vLastPts = pts;
-                    dstV->pts = pts;
-                    encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, dstV, pkt);
+
+                    // 设置 PTS（注意：processVideoFrame 可能返回缓存帧 dstV 或新分配的帧）
+                    bool isNewFrame = (encFrame != dstV && encFrame != frame);
+                    if (isNewFrame) {
+                        encFrame->pts = pts;
+                        encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                        av_frame_free(&encFrame);  // 释放新分配的帧
+                    } else {
+                        encFrame->pts = pts;
+                        encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                    }
+
                     processed.store(timelineBaseSec + relSec);
                     av_frame_unref(frame);
                 }
@@ -739,17 +1511,32 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             lastSrcSec = srcSec;
             if (srcSec < startSec - 1e-6) { av_frame_unref(frame); continue; }
             if (hasEnd && srcSec >= endSec) { av_frame_unref(frame); break; }
-            if (sws) {
-                sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dstV->data, dstV->linesize);
-                double relSec = srcSec - startSec;
-                if (relSec < 0.0) relSec = 0.0;
-                if (relSec > maxRelSec) maxRelSec = relSec;
-                int64_t pts = (int64_t)((timelineBaseSec + relSec) * 90000.0 + 0.5);
-                if (pts <= tc.vLastPts) pts = tc.vLastPts + 1;
-                tc.vLastPts = pts;
-                dstV->pts = pts;
-                encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, dstV, pkt);
+
+            std::string procErr;
+            AVFrame* encFrame = processVideoFrame(tc, frame, targetW, targetH, sws, dstV,
+                                                   options, pkt, procErr);
+            if (!encFrame) {
+                av_frame_unref(frame);
+                continue;
             }
+
+            double relSec = srcSec - startSec;
+            if (relSec < 0.0) relSec = 0.0;
+            if (relSec > maxRelSec) maxRelSec = relSec;
+            int64_t pts = (int64_t)((timelineBaseSec + relSec) * 90000.0 + 0.5);
+            if (pts <= tc.vLastPts) pts = tc.vLastPts + 1;
+            tc.vLastPts = pts;
+
+            bool isNewFrame = (encFrame != dstV && encFrame != frame);
+            if (isNewFrame) {
+                encFrame->pts = pts;
+                encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                av_frame_free(&encFrame);
+            } else {
+                encFrame->pts = pts;
+                encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+            }
+
             av_frame_unref(frame);
         }
     }
@@ -773,18 +1560,52 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 }
 
 /// 统一转码主流程：建立输出与编码器，逐文件转码，最后 flush
-bool runTranscode(const std::vector<ClipInfo>& infos, const std::string& outputPath,
-                  bool keepAudio, std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
+bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const std::string& outputPath,
+                  bool keepAudio, const MergeOptions& options,
+                  std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                   std::string& err) {
-    TranscodeCtx tc;
+    TranscodeCtx tc{merger};  // 初始化 merger 引用
     tc.keepAudio = keepAudio;
     if (keepAudio) {
         tc.targetSampleRate = infos.front().sampleRate > 0 ? infos.front().sampleRate : 44100;
         tc.targetChannels   = infos.front().channels   > 0 ? infos.front().channels   : 2;
     }
-    int targetW = infos.front().width;
-    int targetH = infos.front().height;
+
+    // 决定目标分辨率
+    int targetW, targetH;
+    if (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal) {
+        // KeepOriginal：取首个 clip 分辨率作为初始编码器配置（后续会动态切换）
+        targetW = infos.front().width;
+        targetH = infos.front().height;
+    } else {
+        // Unified：使用配置的目标分辨率
+        if (options.useFirstClipResolution) {
+            targetW = infos.front().width;
+            targetH = infos.front().height;
+        } else {
+            targetW = options.customWidth;
+            targetH = options.customHeight;
+        }
+    }
     AVRational frameRate = infos.front().frameRate;
+
+    // 初始化硬件设备（如果启用）
+    if (options.enableHardwareAccel) {
+        std::string hwErr;
+        tc.hwDevice = HWAccelDevice::create(HWAccelDevice::Type::Auto, &hwErr);
+        if (tc.hwDevice && tc.hwDevice->isValid()) {
+            tc.useHardware = true;
+#if defined(_WIN32)
+            tc.hwPixFmt = AV_PIX_FMT_D3D11;
+#elif defined(__APPLE__)
+            tc.hwPixFmt = AV_PIX_FMT_VIDEOTOOLBOX;
+#endif
+            LOG_INFO(std::string("VideoMerger: hardware acceleration enabled (") + tc.hwDevice->typeName() + ")");
+        } else {
+            LOG_WARN(std::string("VideoMerger: hardware device initialization failed (") + hwErr + "), using software");
+            tc.useHardware = false;
+        }
+    }
 
     if (avformat_alloc_output_context2(&tc.out, nullptr, nullptr, outputPath.c_str()) < 0 || !tc.out) {
         err = "Failed to create output context"; return false;
@@ -794,6 +1615,14 @@ bool runTranscode(const std::vector<ClipInfo>& infos, const std::string& outputP
         if (tc.fifo) av_audio_fifo_free(tc.fifo);
         if (tc.vEnc) avcodec_free_context(&tc.vEnc);
         if (tc.aEnc) avcodec_free_context(&tc.aEnc);
+#if defined(_WIN32)
+        cleanupD3D11VideoProcessor(tc);
+#elif defined(__APPLE__)
+        cleanupVTPixelTransferSession(tc);
+#endif
+        for (auto& phase : tc.resPhases) {
+            if (phase.framesCtx) av_buffer_unref(&phase.framesCtx);
+        }
         if (tc.out) {
             if (!(tc.out->oformat->flags & AVFMT_NOFILE) && tc.out->pb) avio_closep(&tc.out->pb);
             avformat_free_context(tc.out);
@@ -801,8 +1630,75 @@ bool runTranscode(const std::vector<ClipInfo>& infos, const std::string& outputP
         }
     };
 
-    if (!setupVideoEncoder(tc, targetW, targetH, frameRate, err)) { cleanup(); return false; }
+    // 构建编码器（硬件或软件）
+    bool encoderOk = false;
+    if (tc.useHardware) {
+        // KeepOriginal 模式阶段一需要 GLOBAL_HEADER
+        bool globalHeader = (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal);
+        encoderOk = setupHardwareVideoEncoder(tc, targetW, targetH, frameRate, globalHeader, err);
+        if (!encoderOk) {
+            LOG_WARN(std::string("VideoMerger: hardware encoder setup failed (") + err + "), falling back to software");
+            tc.useHardware = false;
+        }
+    }
+    if (!encoderOk) {
+        encoderOk = setupVideoEncoder(tc, targetW, targetH, frameRate, err);
+    }
+    if (!encoderOk) { cleanup(); return false; }
+
     if (keepAudio && !setupAudioEncoder(tc, err)) { cleanup(); return false; }
+
+    // 填充硬件加速信息（供 UI 显示）- 编码器部分
+    std::string encoderName = tc.vEnc ? tc.vEnc->codec->name : "";
+    std::string hwDeviceType = tc.useHardware && tc.hwDevice ? tc.hwDevice->typeName() : "";
+#if defined(_WIN32)
+    bool isZeroCopy = tc.useHardware && tc.d3d11VidDev;
+#elif defined(__APPLE__)
+    bool isZeroCopy = tc.useHardware && tc.vtTransferSession;
+#else
+    bool isZeroCopy = false;
+#endif
+    // 解码器信息会在 transcodeClip 中首次打开输入时填充
+    merger.updateHWAccelInfo(false, "", tc.useHardware, encoderName, isZeroCopy, hwDeviceType);
+
+    // 初始化 GPU 缩放器（Unified 模式 + 硬件路径）
+    if (tc.useHardware && options.resolutionMode == MergeOptions::ResolutionMode::Unified) {
+#if defined(_WIN32)
+        if (!initD3D11VideoProcessor(tc, infos.front().width, infos.front().height, targetW, targetH, err)) {
+            LOG_WARN(std::string("VideoMerger: D3D11 VideoProcessor init failed (") + err + "), will use software scaling");
+        }
+#elif defined(__APPLE__)
+        if (!initVTPixelTransferSession(tc, err)) {
+            LOG_WARN(std::string("VideoMerger: VTPixelTransferSession init failed (") + err + "), will use software scaling");
+        }
+#endif
+    }
+
+    // 更新零拷贝状态（Unified 或 KeepOriginal 都可能零拷贝）
+#if defined(_WIN32)
+    // KeepOriginal 不需要缩放器：解码 surface 可直接送给编码器，同样属于零拷贝。
+    // Unified 需要 VideoProcessor 有效，才能确认缩放过程没有回落到 CPU。
+    bool isZeroCopyFinal = tc.useHardware &&
+        (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal || tc.d3d11VidDev);
+    const std::string interopState =
+        std::string("d3d11VideoDevice=") + (tc.d3d11VidDev ? "valid" : "null");
+#elif defined(__APPLE__)
+    bool isZeroCopyFinal = tc.useHardware &&
+        (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal || tc.vtTransferSession);
+    const std::string interopState =
+        std::string("vtTransferSession=") + (tc.vtTransferSession ? "valid" : "null");
+#else
+    bool isZeroCopyFinal = false;
+    const std::string interopState = "interop=unsupported";
+#endif
+    LOG_INFO(std::string("VideoMerger: Zero-copy status - useHardware=") +
+             (tc.useHardware ? "true" : "false") +
+             ", " + interopState +
+             ", isZeroCopy=" + (isZeroCopyFinal ? "true" : "false"));
+    auto currentInfo = merger.getHWAccelInfo();
+    merger.updateHWAccelInfo(currentInfo.isHardwareDecoding, currentInfo.decoderName,
+                             currentInfo.isHardwareEncoding, currentInfo.encoderName,
+                             isZeroCopyFinal, currentInfo.hwDeviceType);
 
     if (!(tc.out->oformat->flags & AVFMT_NOFILE)) {
         if (avio_open(&tc.out->pb, outputPath.c_str(), AVIO_FLAG_WRITE) < 0) {
@@ -816,7 +1712,7 @@ bool runTranscode(const std::vector<ClipInfo>& infos, const std::string& outputP
     for (const auto& info : infos) {
         if (cancelFlag.load()) { cleanup(); return false; }
         double consumed = 0.0;
-        if (!transcodeClip(info, tc, targetW, targetH, cancelFlag, processed, timelineBaseSec, consumed, err)) {
+        if (!transcodeClip(info, tc, targetW, targetH, options, cancelFlag, processed, timelineBaseSec, consumed, err)) {
             cleanup(); return false;
         }
         // 按实际消耗时长推进时间轴；为零（异常）时回退校验裁剪时长
@@ -842,7 +1738,7 @@ bool runTranscode(const std::vector<ClipInfo>& infos, const std::string& outputP
 // 后台线程主函数
 // ─────────────────────────────────────────────
 
-void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath) {
+void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath, MergeOptions options) {
     avformat_network_init();
 
     // —— 探测阶段 ——
@@ -889,7 +1785,7 @@ void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath
     std::string err;
     bool ok = streamCopy
         ? runStreamCopy(infos, finalPath, cancelRequested_, processedDuration_, err)
-        : runTranscode(infos, finalPath, keepAudio, cancelRequested_, processedDuration_, err);
+        : runTranscode(*this, infos, finalPath, keepAudio, options, cancelRequested_, processedDuration_, err);
 
     if (cancelRequested_.load()) {
         std::error_code ec;
