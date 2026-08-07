@@ -107,6 +107,13 @@ private:
      */
     void renderHistoryPanel(float panelX, float panelY, float panelW, float panelH);
 
+    /**
+     * @brief 渲染硬件信息显示区域（在设置按钮下方）
+     *
+     * 显示：硬件解码器、硬件设备、性能档位、支持的最大播放倍数
+     */
+    void renderHardwareInfo();
+
     /// 渲染「清空全部历史」二次确认模态弹窗
     void renderClearConfirmPopup();
 

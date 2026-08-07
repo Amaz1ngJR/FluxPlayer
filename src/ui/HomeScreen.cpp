@@ -17,6 +17,7 @@
 #include "FluxPlayer/utils/CookieStore.h"
 #include "FluxPlayer/utils/WebLogin.h"
 #include "FluxPlayer/utils/HistoryStore.h"
+#include "FluxPlayer/utils/HardwareInfo.h"
 #include <imgui.h>
 #include <imgui_internal.h>      // 需要 ImGui 内部 API（GetBackgroundDrawList 等）
 #include <imgui_impl_glfw.h>
@@ -733,18 +734,6 @@ void HomeScreen::renderUI() {
         ImGui::PopStyleColor();
     }
 
-    // 底部支持格式列表（text.muted，固定在面板底部）
-    {
-        const char* hint = "MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS";
-        float hw = ImGui::CalcTextSize(hint).x;
-        float bottomY = panelH - ImGui::GetStyle().WindowPadding.y - ImGui::GetTextLineHeight() - home.footerBottomGap;
-        ImGui::SetCursorPosY(bottomY);
-        ImGui::SetCursorPosX((contentW - hw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
-        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
-        ImGui::TextUnformatted(hint);
-        ImGui::PopStyleColor();
-    }
-
     // 设置入口：URL 行下方居中的方形齿轮按钮（对应 mockup 的 38×38 gear）
     // 齿轮不用 ⚙ (U+2699) 文本，因为默认 UI 字体只合并了 CJK 常用区，
     // 该码位仅存在于字幕字体的扩展区里，用文本会渲染成方块。
@@ -785,6 +774,72 @@ void HomeScreen::renderUI() {
             settingsRequested_ = true;
             LOG_INFO("HomeScreen settings button clicked");
         }
+    }
+
+    // ── 硬件信息显示区域 ──
+    // 分隔线
+    ImGui::Dummy(ImVec2(0, home.sectionGap * 1.5f));
+    {
+        ImDrawList* wdl = ImGui::GetWindowDrawList();
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
+        cursor.y += home.separatorOffsetY;
+        wdl->AddLine(ImVec2(cursor.x, cursor.y), ImVec2(cursor.x + contentW, cursor.y),
+                     ScaleAlpha(sk.colors.linePrimary, 0.50f), 1.0f);
+        ImGui::Dummy(ImVec2(0, home.separatorAfterGap));
+    }
+
+    // 硬件信息标题
+    {
+        const char* label = "03 / HARDWARE INFO";
+        float lw = ImGui::CalcTextSize(label).x;
+        ImGui::SetCursorPosX((contentW - lw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 10.0f));
+    }
+
+    // 硬件信息显示框
+    {
+        float boxW = contentW;
+        float boxH = 125.0f;  // 增加高度确保第4行完全在框内
+
+        ImDrawList* wdl = ImGui::GetWindowDrawList();
+        ImVec2 boxPos = ImGui::GetCursorScreenPos();
+        ImVec2 boxMin = boxPos;
+        ImVec2 boxMax = ImVec2(boxPos.x + boxW, boxPos.y + boxH);
+
+        // 半透明深色背景
+        ImU32 boxBg = IM_COL32(3, 8, 23, 217);  // #030817 85% opacity
+        wdl->AddRectFilled(boxMin, boxMax, boxBg, sk.metrics.radius.button);
+
+        // 青色边框
+        ImU32 borderColor = ScaleAlpha(sk.colors.accentPrimary, 0.30f);
+        wdl->AddRect(boxMin, boxMax, borderColor, sk.metrics.radius.button);
+
+        // 推进光标到框内开始位置
+        ImGui::Dummy(ImVec2(0, 10.0f));
+        ImGui::Indent(14.0f);
+
+        // 渲染硬件信息内容
+        renderHardwareInfo();
+
+        ImGui::Unindent(14.0f);
+
+        // 硬件信息框后只需要很小的间距，不需要填充到框底部
+    }
+
+    // 底部支持格式列表（text.muted，居中显示）
+    {
+        float extraGap = screenH > 800.0f ? 10.0f : 20.0f;  // 全屏用小间距向上移，窗口用正常间距
+        ImGui::Dummy(ImVec2(0, extraGap));
+
+        const char* hint = "MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS";
+        float hw = ImGui::CalcTextSize(hint).x;
+        ImGui::SetCursorPosX((contentW - hw) * 0.5f + ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, ScaleAlpha(sk.colors.textMuted, 0.75f));
+        ImGui::TextUnformatted(hint);
+        ImGui::PopStyleColor();
     }
 
     // ── 登录询问弹窗 ──
@@ -1131,3 +1186,175 @@ void HomeScreen::renderClearConfirmPopup() {
 }
 
 } // namespace FluxPlayer
+
+// ═══════════════════════════════════════════════════════
+// renderHardwareInfo — 硬件信息显示区域
+// ═══════════════════════════════════════════════════════
+
+void FluxPlayer::HomeScreen::renderHardwareInfo() {
+    auto snap = SkinManager::instance().current();
+    if (!snap) return;
+    const auto& sk = *snap;
+
+    // 获取硬件信息
+    std::string hwDevice = HardwareInfo::getCurrentHardwareDevice();
+    std::string hwDeviceDisplay = HardwareInfo::getCurrentHardwareDeviceDisplay();
+    std::string gpuInfo = HardwareInfo::getGPUInfo();
+    auto perf = HardwareInfo::estimatePerformance();
+
+    // 获取可用的硬件解码器
+    auto decoders = HardwareInfo::detectAvailableDecoders();
+    std::vector<std::string> hwCodecs;
+    for (const auto& dec : decoders) {
+        if (dec.isHardware && std::find(hwCodecs.begin(), hwCodecs.end(), dec.codecName) == hwCodecs.end()) {
+            hwCodecs.push_back(dec.codecName);
+        }
+    }
+
+    // 格式化解码器列表
+    std::string decoderText = hwCodecs.empty() ? "软件解码" : "";
+    for (size_t i = 0; i < hwCodecs.size() && i < 3; ++i) {
+        decoderText += hwCodecs[i];
+        if (i < hwCodecs.size() - 1) decoderText += "/";
+    }
+    if (!hwCodecs.empty()) {
+        decoderText += " " + hwDeviceDisplay;
+    }
+
+    // 计算性能百分比
+    int perfPercent = 50;
+    if (perf.performanceTier == "高性能") {
+        perfPercent = 80;
+    } else if (perf.performanceTier == "中等") {
+        perfPercent = 60;
+    } else if (perf.performanceTier == "基础") {
+        perfPercent = 40;
+    }
+
+    ImVec4 labelColor = ToImVec4(sk.colors.textMuted);
+    labelColor.w = 0.85f;
+
+    // 第1行：解码器
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
+        ImGui::TextUnformatted("解码器：");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8.0f);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
+        ImGui::TextUnformatted(decoderText.c_str());
+        ImGui::PopStyleColor();
+
+        if (!hwCodecs.empty()) {
+            ImGui::SameLine();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            cursor.x += 12.0f;
+            cursor.y += ImGui::GetTextLineHeight() * 0.5f;
+            ImU32 greenColor = IM_COL32(0, 255, 136, 255);
+            dl->AddCircleFilled(cursor, 2.5f, greenColor);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 1.0f, 0.53f, 1.0f));
+            ImGui::Text("已启用");
+            ImGui::PopStyleColor();
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0, 4.0f));
+
+    // 第2行：硬件设备
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
+        ImGui::TextUnformatted("硬件设备：");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
+        ImGui::TextUnformatted((gpuInfo + " (" + hwDeviceDisplay + ")").c_str());
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 4.0f));
+
+    // 第3行：性能档位 + 进度条
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
+        ImGui::TextUnformatted("性能档位：");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textPrimary));
+        ImGui::TextUnformatted(perf.performanceTier.c_str());
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine(0, 16.0f);
+
+        // 绘制进度条
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 barStart = ImGui::GetCursorScreenPos();
+        barStart.y += ImGui::GetTextLineHeight() * 0.2f;
+
+        float barW = 80.0f;
+        float barH = 12.0f;
+        ImVec2 barMin = barStart;
+        ImVec2 barMax = ImVec2(barStart.x + barW, barStart.y + barH);
+
+        // 背景
+        ImU32 bgColor = ScaleAlpha(sk.colors.accentPrimary, 0.15f);
+        dl->AddRectFilled(barMin, barMax, bgColor, 2.0f);
+
+        // 填充
+        float fillW = barW * perfPercent / 100.0f;
+        ImVec2 fillMax = ImVec2(barStart.x + fillW, barStart.y + barH);
+        ImU32 fillColor = ScaleAlpha(sk.colors.accentPrimary, 0.65f);
+        dl->AddRectFilled(barMin, fillMax, fillColor, 2.0f);
+
+        // 百分比文本（居中在进度条上）
+        char percentText[16];
+        snprintf(percentText, sizeof(percentText), "%d%%", perfPercent);
+        ImVec2 textSize = ImGui::CalcTextSize(percentText);
+        ImVec2 textPos(barStart.x + (barW - textSize.x) * 0.5f, barStart.y + (barH - textSize.y) * 0.5f);
+
+        dl->AddText(textPos, ToImU32(sk.colors.textPrimary), percentText);
+
+        // 推进光标位置（跳过进度条）
+        ImGui::Dummy(ImVec2(barW, barH));
+    }
+
+    ImGui::Dummy(ImVec2(0, 4.0f));
+
+    // 第4行：播放倍数
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
+        ImGui::TextUnformatted("播放倍数：");
+        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 8.0f);
+
+        char speedText[64];
+        snprintf(speedText, sizeof(speedText), "1080p: %dx", perf.maxSpeed1080p);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
+        ImGui::TextUnformatted(speedText);
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine(0, 12.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
+        ImGui::TextUnformatted("|");
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine(0, 12.0f);
+        snprintf(speedText, sizeof(speedText), "4K: %dx", perf.maxSpeed4K);
+        ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
+        ImGui::TextUnformatted(speedText);
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine(0, 16.0f);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
+        cursor.y += ImGui::GetTextLineHeight() * 0.5f;
+        ImU32 dotColor = ScaleAlpha(sk.colors.accentPrimary, 0.5f);
+        dl->AddCircleFilled(cursor, 1.5f, dotColor);
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
+        ImGui::Text("支持高倍数播放");
+        ImGui::PopStyleColor();
+    }
+}

@@ -162,6 +162,42 @@
     <circle r="6.5"/><circle r="3.2" fill="#050A1A"/>
   </g>
 
+  <!-- ── Hardware Info Section: below settings button ── -->
+  <!-- Section divider -->
+  <path d="M168 600H712" stroke="#136C8F" stroke-opacity="0.50"/>
+  <text x="440" y="626" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#53708E" letter-spacing="2">03 / HARDWARE INFO</text>
+
+  <!-- Hardware info display box -->
+  <rect x="150" y="640" width="596" height="92" rx="3" fill="#030817" fill-opacity="0.85" stroke="#00E8FF" stroke-opacity="0.30"/>
+
+  <!-- Hardware info content -->
+  <g font-family="Consolas,monospace" font-size="10">
+    <!-- Line 1: Decoder -->
+    <text x="164" y="660" fill="#7792B2">解码器：</text>
+    <text x="240" y="660" fill="#00E8FF">H.264/H.265 VideoToolbox</text>
+    <circle cx="530" cy="656" r="2.5" fill="#00FF88"/>
+    <text x="540" y="660" fill="#00FF88" font-size="9">已启用</text>
+
+    <!-- Line 2: Hardware Device -->
+    <text x="164" y="680" fill="#7792B2">硬件设备：</text>
+    <text x="240" y="680" fill="#A855FF">Apple M1 (VideoToolbox)</text>
+
+    <!-- Line 3: Performance Tier -->
+    <text x="164" y="700" fill="#7792B2">性能档位：</text>
+    <text x="240" y="700" fill="#EAF8FF">高性能</text>
+    <rect x="330" y="692" width="80" height="12" rx="2" fill="#00E8FF" fill-opacity="0.15"/>
+    <rect x="330" y="692" width="64" height="12" rx="2" fill="#00E8FF" fill-opacity="0.45"/>
+    <text x="370" y="701" text-anchor="middle" fill="#EAF8FF" font-size="9">80%</text>
+
+    <!-- Line 4: Max Speed Support -->
+    <text x="164" y="720" fill="#7792B2">播放倍数：</text>
+    <text x="240" y="720" fill="#00E8FF">1080p → 8x</text>
+    <text x="340" y="720" fill="#5A7A94">|</text>
+    <text x="360" y="720" fill="#A855FF">4K → 4x</text>
+    <circle cx="450" cy="716" r="1.5" fill="#00E8FF" opacity="0.5"/>
+    <text x="458" y="720" fill="#5A7A94" font-size="9">支持高倍数播放</text>
+  </g>
+
   <!-- Bottom info inside left panel -->
   <text x="440" y="754" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#4A6480" letter-spacing="1.2">MP4  MKV  AVI  MOV  FLV  WebM  RTSP  RTMP  HTTP  HLS</text>
 
