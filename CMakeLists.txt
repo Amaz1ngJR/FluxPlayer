@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.7.7 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.8.0 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -424,6 +424,9 @@ install(DIRECTORY assets/fonts/   DESTINATION fonts)
 # pic2.png 是纯音频封面兜底图，Player 通过 Config::getResourcePath("pic2.png")
 # 加载（Win/Linux 解析为 <exe>/resources/），故装到 resources/ 而非 source/
 install(FILES source/pic2.png DESTINATION resources)
+# video_01.mp4 是启动真实解码测速样片，HardwareInfo 通过
+# Config::getResourcePath("video/video_01.mp4") 查找。
+install(FILES source/video/video_01.mp4 DESTINATION resources/video)
 # 安装阶段同步把皮肤包当作只读资源放到 resources/skins，
 # 与运行期 Config::getResourcePath("skins") 的解析路径对齐
 # 只安装运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg

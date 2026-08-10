@@ -266,7 +266,7 @@ public:
 
     /**
      * 设置播放速度
-     * @param speed 速率倍数（0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0）
+     * @param speed 速率倍数（0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0 / 4.0 / 8.0 / 16.0）
      */
     void setPlaybackSpeed(double speed);
 
@@ -519,9 +519,11 @@ private:
     std::atomic<bool> sawFirstKeyframe_{false};     // 实时流：是否已收到第一个关键帧（IDR），起播阶段丢弃 IDR 之前的视频包以追到最新画面（仅 demux 线程读写）
 
     // 播放速率控制
-    std::atomic<double> playbackRate_{1.0};     // 当前播放速率（0.5 ~ 2.0）
+    std::atomic<double> playbackRate_{1.0};     // 当前播放速率（0.5 ~ 16.0，受硬件性能上限限制）
     void* speedSwrContext_{nullptr};            // 音频变速重采样器（SwrContext*，pImpl 隔离）
     uint64_t frameDropCounter_{0};              // 丢帧计数器（用于均匀分布丢帧）
+    uint64_t frameRenderCounter_{0};            // 渲染帧计数器（高倍数抽帧用）
+    bool isLocalFile_{true};                    // 是否为本地文件（用于高倍数抽帧判断）
 
     // 帧插值器（慢放时生成中间帧）
     std::unique_ptr<FrameInterpolator> frameInterpolator_;

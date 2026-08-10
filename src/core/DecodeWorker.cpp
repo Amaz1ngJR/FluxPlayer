@@ -325,9 +325,10 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         }
     }
 
-    // 强制入队 PTS 单调递增：估算累加与真实 PTS 交替到达时小幅回退（< 0.5s）会绕过倒退检测，
-    // 队列内出现非单调 PTS 会让 lastRenderedPTS_ 跳回，进度条抖动。夹紧到 lastEnqueued + 1ms。
-    if (player_->isLiveStream_) {
+    // 强制入队 PTS 单调递增：硬件解码/容器时间戳偶尔可能吐出回退 PTS，
+    // 高倍速下会直接把 VClock 拉回旧位置，表现为画面和进度突然倒退后卡住。
+    // seek/flush 时 lastEnqueuedVideoPTS_ 会随 serial 变化清零，因此这里可覆盖本地文件和实时流。
+    if (std::isfinite(framePTS)) {
         double lastEnq = player_->lastEnqueuedVideoPTS_.load();
         if (lastEnq > 0.0 && framePTS < lastEnq + 0.001) {
             framePTS = lastEnq + 0.001;
@@ -416,8 +417,14 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
         // 音频回调若还需要跳过帧内的几十毫秒，会用 pendingAudioOffset_ 做细粒度处理。
         if (audioPTS >= catchupTarget - kAudioCatchupToleranceSec) {
             player_->audioCatchupTargetPTS_.store(-1.0);
-            LOG_INFO("Audio catch-up reached target=" + std::to_string(catchupTarget) +
-                     "s at PTS=" + std::to_string(audioPTS) + "s");
+            // 日志节流：用真实时钟，避免高倍速时刷屏
+            static auto lastLogTime = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLogTime).count() >= 1000) {
+                LOG_INFO("Audio catch-up reached target=" + std::to_string(catchupTarget) +
+                         "s at PTS=" + std::to_string(audioPTS) + "s");
+                lastLogTime = now;
+            }
         }
     }
 

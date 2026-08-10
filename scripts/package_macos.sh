@@ -56,6 +56,10 @@ cp -r "$BIN_DIR/fonts"   "$APP_BUNDLE/Contents/MacOS/"
 # macOS 优先解析 ../Resources/，故直接放在 Resources 根下
 cp "$ROOT/source/pic2.png" "$APP_BUNDLE/Contents/Resources/pic2.png"
 
+# video_01.mp4：硬件解码测速样片，HardwareInfo 通过 Config::getResourcePath("video/video_01.mp4") 加载
+mkdir -p "$APP_BUNDLE/Contents/Resources/video"
+cp "$ROOT/source/video/video_01.mp4" "$APP_BUNDLE/Contents/Resources/video/video_01.mp4"
+
 # 皮肤包：Config::getResourcePath("skins") 在 macOS 优先解析到 ../Resources/skins，
 # 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
 mkdir -p "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon"

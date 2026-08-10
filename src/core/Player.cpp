@@ -28,6 +28,8 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/HardwareInfo.h"
+#include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/ui/Toast.h"
 #include "FluxPlayer/ui/ScreenshotEffect.h"
 
@@ -61,6 +63,7 @@ namespace {
 // 单次音频设备回调内最多跳过的旧音频量。追赶旧音频不能无限循环，
 // 否则设备线程迟迟不提交新 buffer，主时钟反而会停住。
 constexpr double kMaxAudioCatchupDiscardSec = 0.25;
+constexpr int kMaxHighSpeedFrameDropsPerTick = 64;
 
 /**
  * 用 FFmpeg 将任意格式图片数据解码为 RGBA 像素
@@ -347,6 +350,7 @@ bool Player::open(const std::string& filePath) {
 
     setState(PlayerState::OPENING);
     filePath_ = filePath;
+    isLocalFile_ = !isNetworkUrl(filePath) && !StreamExtractor::needsExtraction(filePath);
     // 保存实时流重连参数：连接断开后用于完整重开 demuxer
     liveReopenPath_ = actualPath;
     liveReopenHeaders_ = httpHeaders;
@@ -744,6 +748,14 @@ void Player::run() {
 
             // 每秒打印一次状态
             updatePlaybackStats(currentTime, lastPrint, lastBytesRead);
+
+            // 有限时长媒体达到结尾时主动结束。高倍速下 demux/decode 可能追不上
+            // 合成推进后的音频主时钟，不能只等 EOF 包到达，否则 UI 时间会越过总时长。
+            if (!isLiveStream_ && duration_ > 0.0 && getCurrentTime() >= duration_ - 0.001) {
+                LOG_INFO("Reached media duration, stopping playback");
+                shouldQuit_.store(true);
+                break;
+            }
         }
 
         // GLFW 右上角关闭按钮只会设置窗口的 should-close 标志，并不会经过
@@ -787,6 +799,7 @@ void Player::renderVideoFrame(double& lastFrameTime) {
         // 渲染期间即便 decode 线程 flush 视频队列，这份引用的数据仍有效。
         // frame 指向 leasedFrame（有效时），下方原有 frame->... 逻辑不变。
         Frame leasedFrame;
+        Frame selectedFrame;
         Frame* frame = nullptr;
 
         // 预缓冲期间不取帧，等待队列填充到安全水位
@@ -807,19 +820,15 @@ void Player::renderVideoFrame(double& lastFrameTime) {
         if (!clockController_->isDecodingToTarget()) {
             // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
             // peekRef 取独立引用看 PTS，不消费；到显示时间才 consume() 推进 keep-last。
-            if (queueManager_->videoFrameQueue()->peekRef(leasedFrame)) {
+            int droppedThisTick = 0;
+            while (queueManager_->videoFrameQueue()->peekRef(leasedFrame)) {
                 double nextPTS = leasedFrame.getPTS();
                 double masterClock = clockController_->avSync()->getMasterClock();
-                // 下一帧的 PTS <= 主时钟，说明该显示了
-                if (nextPTS <= masterClock + 0.005) {
-                    frame = &leasedFrame;     // leasedFrame 持有独立引用，渲染全程有效
-                    queueManager_->videoFrameQueue()->consume();   // 一次原子操作推进 keep-last 状态机
-                } else {
-                    // 还没到显示时间：短暂 sleep 避免主循环空转把 FPS 推到 100+
-                    // 但在截图效果激活时，跳过 sleep 以保持高帧率渲染动画
+                double rate = playbackRate_.load();
+
+                // 下一帧还没到显示时间：保持当前画面，等待主时钟追上。
+                if (nextPTS > masterClock + 0.005) {
                     if (!screenshotEffect_ || !screenshotEffect_->isActive()) {
-                        // sleep 时长取剩余时间的 80%，留出 swapBuffers/UI 的余量；
-                        // 上限 20ms 防止个别异常 PTS 导致长时间卡顿
                         double waitSec = nextPTS - masterClock - 0.002;
                         if (waitSec > 0.001) {
                             int waitMs = static_cast<int>(std::min(waitSec * 800.0, 20.0));
@@ -828,14 +837,58 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                             }
                         }
                     }
+                    break;
                 }
+
+                // 高倍速仍以音频为主时钟。视频侧在一个渲染 tick 内持续消费
+                // 已到时的视频帧，但保留最后一个作为本轮渲染候选。否则浅队列
+                // 在 16x 下可能每轮都被“late/drop”规则清空，最终只复用缓存画面。
+                if (rate >= 2.0) {
+                    if (frame) {
+                        droppedFrames_.fetch_add(1);
+                    }
+                    selectedFrame.refFrom(leasedFrame);
+                    frame = &selectedFrame;
+                    if (!isLiveStream_ && duration_ > 0.0 && std::isfinite(nextPTS)) {
+                        nextPTS = std::max(0.0, std::min(nextPTS, duration_));
+                    }
+                    clockController_->avSync()->updateVideoClock(nextPTS);
+                    lastFrameTime = nextPTS;
+                    queueManager_->videoFrameQueue()->consume();
+                    ++droppedThisTick;
+                    if (droppedThisTick >= kMaxHighSpeedFrameDropsPerTick) {
+                        break;
+                    }
+                    continue;
+                }
+
+                bool dropFrame = false;
+                if (rate > 1.0) {
+                    dropFrame = shouldDropFrameForSpeed(leasedFrame.getAVFrame(), rate);
+                }
+
+                if (dropFrame && droppedThisTick < kMaxHighSpeedFrameDropsPerTick) {
+                    droppedFrames_.fetch_add(1);
+                    clockController_->avSync()->updateVideoClock(nextPTS);
+                    lastFrameTime = nextPTS;
+                    queueManager_->videoFrameQueue()->consume();
+                    ++droppedThisTick;
+                    continue;
+                }
+
+                selectedFrame.refFrom(leasedFrame);
+                frame = &selectedFrame;
+                queueManager_->videoFrameQueue()->consume();
+                break;
             }
         }
         // else: seek状态：不取帧，frame保持为空，后面渲染缓存纹理
 
         if (frame) {
             double framePTS = frame->getPTS();
-            double rate = playbackRate_.load();
+            if (!isLiveStream_ && duration_ > 0.0 && std::isfinite(framePTS)) {
+                framePTS = std::max(0.0, std::min(framePTS, duration_));
+            }
 
             // 第一帧到来时，如果分辨率从 demux 阶段的 0x0 变为实际值，resize 窗口
             AVFrame* avFrameCheck = frame->getAVFrame();
@@ -852,17 +905,6 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 }
                 glfwSetWindowSize(window_->getGLFWWindow(), cw, ch);
                 LOG_INFO("Window resized to match video: " + std::to_string(cw) + "x" + std::to_string(ch));
-            }
-
-            // 快放（>1.0x）：智能丢帧，保留 I 帧，优先丢 B 帧
-            if (rate > 1.0 && shouldDropFrameForSpeed(frame->getAVFrame(), rate)) {
-                droppedFrames_.fetch_add(1);
-                renderer_->clear(0.0f, 0.0f, 0.0f, 1.0f);
-                if (renderer_->hasValidTexture()) renderer_->renderCachedFrame();
-                if (renderCallback_) renderCallback_();
-                window_->swapBuffers();
-                glfwPollEvents();
-                return;
             }
 
             // 检查 PTS 有效性，无效时不更新时钟。估算帧 PTS 单调累加，仍可驱动时钟
@@ -1015,20 +1057,31 @@ void Player::quit() {
 }
 
 double Player::getCurrentTime() const {
-    // 纯音频模式：没有视频帧渲染，直接返回音频时钟
-    if (audioOnly_ && clockController_) {
-        return clockController_->avSync()->getAudioClock();
+    auto clampToDuration = [this](double t) {
+        if (!isLiveStream_ && duration_ > 0.0 && std::isfinite(t)) {
+            return std::max(0.0, std::min(t, duration_));
+        }
+        return t;
+    };
+
+    // 只要有音频输出，就以音频时钟作为 UI 进度和同步基准。
+    // 高倍速仍由音频回调按 playbackRate 插值推进，视频只负责追随和抽帧。
+    if (audioOutput_ && clockController_) {
+        return clampToDuration(clockController_->avSync()->getAudioClock());
     }
-    // 实时流：优先用音频时钟驱动进度条（按真实采样率推进，平滑稳定）；
-    // 无音频时降级到外部时钟（墙钟推进），否则进度条会一直停在 0。
-    // 不能直接用 lastRenderedPTS_：视频帧 PTS 抖动 + 主循环偶尔卡顿会让其非匀速增长，进度条跳变。
+    // 无音频实时流降级到外部时钟（墙钟推进），否则进度条会一直停在 0。
+    // 不能直接用 lastRenderedPTS_：视频帧 PTS 抖动 + 主循环偶尔卡顿会让其非匀速增长。
     if (isLiveStream_ && clockController_) {
-        return audioOutput_ ? clockController_->avSync()->getAudioClock() : clockController_->avSync()->getExternalClock();
+        return clockController_->avSync()->getExternalClock();
+    }
+    // 无音频的高倍速视频只能退回外部主时钟，否则播放时间会被渲染帧率限制。
+    if (playbackRate_.load() >= 2.0 && clockController_) {
+        return clampToDuration(clockController_->avSync()->getMasterClock());
     }
     // 返回最后实际渲染的帧的 PTS，而不是 AVSync 的时钟。
     // seek 时 lastRenderedPTS_ 已被 seek() 立即设为目标值，且精确跳转期渲染冻结不会改写它，
     // 故进度条即时停在目标 —— 无需额外针对 decodingToTarget_ 的兜底分支。
-    return lastRenderedPTS_.load();
+    return clampToDuration(lastRenderedPTS_.load());
 }
 
 double Player::getDuration() const {
@@ -1568,6 +1621,9 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     const int sampleSize = 2;
     const int frameBytes = audioChannels_ * sampleSize;
     double rate = playbackRate_.load();
+    const double outputDuration = static_cast<double>(bufferSize) /
+                                  static_cast<double>(frameBytes) /
+                                  static_cast<double>(audioSampleRate_);
 
     // 需要从队列消耗的字节数 = 输出字节数 × 速率
     // 快放消耗更多内容（压缩播放），慢放消耗更少（拉伸播放）
@@ -1707,26 +1763,53 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
     audioQueueDepth_.store(queueDepth);
 
-    if (hasValidFrame && clockController_ && audioSampleRate_ > 0) {
-        double consumedMediaDuration = static_cast<double>(inSamples) / audioSampleRate_;
-        double currentAudioPTS = firstFramePTS + consumedMediaDuration;
-        double previousAudioPTS = clockController_->avSync()->getAudioClock();
+    if (clockController_ && audioSampleRate_ > 0) {
+        // 这里需要“上一次回调实际提交的基准”，不能使用带墙钟插值的
+        // getAudioClock()。高倍速欠载时，后者已经向前插值 elapsed * rate，
+        // 下方再累加 outputDuration * rate 会把同一段设备播放时间计算两遍，
+        // 日志中 16x 每秒推进约 32 秒正是由此产生。
+        double previousAudioPTS = clockController_->avSync()->getAudioClockBase();
+        double currentAudioPTS = previousAudioPTS;
+        bool shouldUpdateClock = hasValidFrame;
 
         // 音频帧 PTS 是变速切换时最稳定的媒体时间锚点。
         // 旧的非 1x 路径会在已按 playbackRate 插值过的时钟上继续累加时长，
         // 导致 AClock 先漂到过前，再在切回 1x 时从队列帧 PTS 跳回去。
         // 这里仍保留单调性兜底：一旦发现即将倒退，就把追赶目标推进到当前 AClock，
         // 并保持本次时钟不变，后续回调/解码线程会主动丢弃落后的音频数据。
-        if (currentAudioPTS + kAudioCatchupToleranceSec < previousAudioPTS) {
-            audioCatchupTargetPTS_.store(previousAudioPTS);
-            currentAudioPTS = previousAudioPTS;
+        if (hasValidFrame) {
+            double consumedMediaDuration = static_cast<double>(inSamples) / audioSampleRate_;
+            currentAudioPTS = firstFramePTS + consumedMediaDuration;
+            if (currentAudioPTS + kAudioCatchupToleranceSec < previousAudioPTS) {
+                audioCatchupTargetPTS_.store(previousAudioPTS);
+                currentAudioPTS = previousAudioPTS;
+            }
         }
-        if (audioSyncTarget >= 0.0 &&
-            currentAudioPTS >= audioSyncTarget - kAudioCatchupToleranceSec) {
+
+        // 4x/8x/16x 下音频队列短暂打空是常态。此时设备仍按墙钟输出
+        // 一个 buffer（可能是静音），如果 AClock 不推进，音频主时钟会停住，
+        // 视频追到该点后就只能等待。高倍速欠载时用输出时长 * rate 合成推进，
+        // 让“音频主时钟”保持为播放调度主钟，而不是被队列瞬时欠载拖死。
+        if (rate >= 4.0 && inputFilled < inputNeeded && !audioDrainedEof_.load()) {
+            double syntheticPTS = previousAudioPTS + outputDuration * rate;
+            if (duration_ > 0.0) {
+                syntheticPTS = std::min(syntheticPTS, duration_);
+            }
+            currentAudioPTS = std::max(currentAudioPTS, syntheticPTS);
+            shouldUpdateClock = true;
+        }
+
+        if (audioSyncTarget >= 0.0 && currentAudioPTS >= audioSyncTarget - kAudioCatchupToleranceSec) {
             audioCatchupTargetPTS_.store(-1.0);
         }
 
-        clockController_->avSync()->updateAudioClock(currentAudioPTS);
+        if (!isLiveStream_ && duration_ > 0.0 && std::isfinite(currentAudioPTS)) {
+            currentAudioPTS = std::max(0.0, std::min(currentAudioPTS, duration_));
+        }
+
+        if (shouldUpdateClock) {
+            clockController_->avSync()->updateAudioClock(currentAudioPTS);
+        }
     }
 
     return bufferSize;
@@ -1786,16 +1869,48 @@ bool Player::shouldDropFrameForSpeed(const AVFrame* avFrame, double rate) {
     if (avFrame->key_frame) return false;
 #endif
 
-    // B 帧按概率丢弃（双向预测帧不被其他帧依赖，丢弃无副作用）
-    // 丢弃概率 = (rate - 1.0) / rate：1.25x→20%, 1.5x→33%, 2.0x→50%
-    if (avFrame->pict_type == AV_PICTURE_TYPE_B) {
-        uint64_t threshold = static_cast<uint64_t>((rate - 1.0) / rate * 100);
-        return (frameDropCounter_++ % 100) < threshold;
+    // 判断是否启用高倍数抽帧：本地文件 + 硬件加速 + 高倍数（>=2x）
+    bool hwAccelEnabled = Config::getInstance().get().hwaccel;
+    bool useHighSpeedSkip = isLocalFile_ && hwAccelEnabled && (rate >= 2.0);
+
+    // 调试日志：首次8倍速时打印条件
+    static bool logged8x = false;
+    if (rate >= 8.0 && !logged8x) {
+        LOG_INFO("🔍 High-speed drop check: isLocalFile=" + std::to_string(isLocalFile_) +
+                 " hwAccel=" + std::to_string(hwAccelEnabled) +
+                 " rate=" + std::to_string(rate) +
+                 " useHighSpeedSkip=" + std::to_string(useHighSpeedSkip));
+        logged8x = true;
     }
 
-    // P 帧仅在 2.0x 时以 25% 概率丢弃
-    if (avFrame->pict_type == AV_PICTURE_TYPE_P && rate >= kPFrameDropMinRate) {
-        return (frameDropCounter_++ % kPFrameDropInterval) == 0;
+    if (useHighSpeedSkip) {
+        // 高倍数智能抽帧：按固定间隔保留帧，保持原视频fps渲染
+        // 例如：2x时每2帧保留1帧，4x时每4帧保留1帧，8x时每8帧保留1帧
+        int skipInterval = static_cast<int>(std::floor(rate));
+        frameRenderCounter_++;
+
+        // B 帧：优先丢弃（双向预测帧不被其他帧依赖）
+        if (avFrame->pict_type == AV_PICTURE_TYPE_B) {
+            return (frameRenderCounter_ % skipInterval) != 0;
+        }
+
+        // P 帧：按间隔保留（前向预测帧，保留部分以保持画面连贯）
+        if (avFrame->pict_type == AV_PICTURE_TYPE_P) {
+            return (frameRenderCounter_ % skipInterval) != 0;
+        }
+    } else {
+        // 低倍数（<2x）或网络流：原有概率丢帧逻辑
+        // B 帧按概率丢弃（双向预测帧不被其他帧依赖，丢弃无副作用）
+        // 丢弃概率 = (rate - 1.0) / rate：1.25x→20%, 1.5x→33%, 2.0x→50%
+        if (avFrame->pict_type == AV_PICTURE_TYPE_B) {
+            uint64_t threshold = static_cast<uint64_t>((rate - 1.0) / rate * 100);
+            return (frameDropCounter_++ % 100) < threshold;
+        }
+
+        // P 帧仅在 2.0x 时以 25% 概率丢弃
+        if (avFrame->pict_type == AV_PICTURE_TYPE_P && rate >= kPFrameDropMinRate) {
+            return (frameDropCounter_++ % kPFrameDropInterval) == 0;
+        }
     }
 
     return false;
@@ -2045,7 +2160,19 @@ void Player::stopInternal() {
 }
 
 void Player::setPlaybackSpeedInternal(double speed) {
+    double requestedSpeed = speed;
+    int maxSpeed = HardwareInfo::maxSupportedPlaybackSpeed(videoWidth_, videoHeight_);
+    speed = std::max(0.5, std::min(speed, static_cast<double>(maxSpeed)));
+    if (std::abs(requestedSpeed - speed) > 0.001) {
+        LOG_WARN("Playback speed " + std::to_string(requestedSpeed) +
+                 "x exceeds hardware estimate, clamped to " + std::to_string(speed) + "x");
+    }
+
     double oldSpeed = playbackRate_.exchange(speed);
+
+    // 重置抽帧计数器，确保切换速度时抽帧逻辑重新开始
+    frameRenderCounter_ = 0;
+
     double catchupTarget = -1.0;
     if (clockController_) {
         double audioClock = clockController_->avSync()->getAudioClock();
@@ -2055,9 +2182,41 @@ void Player::setPlaybackSpeedInternal(double speed) {
         // 也不能只用 VClock：纯音频/视频暂未推进时 AClock 才是可靠位置。
         catchupTarget = std::max(audioClock, videoClock);
         clockController_->avSync()->setPlaybackRate(speed);
+
+        // 主流播放器模型：有音频输出时始终使用音频主时钟，视频按 master
+        // 判定 early/late 并丢弃过期帧；只有无音频时才退回外部时钟。
+        ClockType newClockType = audioOutput_ ? ClockType::AUDIO_CLOCK : ClockType::EXTERNAL_CLOCK;
+        clockController_->avSync()->setClockType(newClockType);
+        LOG_INFO("Clock type switched to " + std::to_string(static_cast<int>(newClockType)) +
+                 " for speed " + std::to_string(speed) + "x");
     }
 
-    if (std::abs(oldSpeed - speed) > 0.001 && catchupTarget >= 0.0) {
+    // 4x/8x/16x 允许音频欠载时由合成主时钟继续推进，解码器吞吐不足时视频
+    // packet/frame 队列可能落后主时钟数十秒。退出高倍速后若只把 rate 改成 1，
+    // 渲染循环会把所有落后帧判为 late 并无等待消费，看起来仍在高速播放。
+    //
+    // 本地文件可随机访问，因此在切速边界直接 seek 到用户切换瞬间看到的主时间点，
+    // 让 demux、解码器、音视频队列和 AVSync 通过既有 serial/seek 流程一次性重对齐。
+    // 实时流不可回退或随机跳转，仍使用下面的音频追赶逻辑保持连续播放。
+    const bool speedChanged = std::abs(oldSpeed - speed) > 0.001;
+    const bool leavingHighSpeed = speedChanged && oldSpeed >= 4.0 && speed < 4.0;
+    bool realignedBySeek = false;
+    if (leavingHighSpeed && isLocalFile_ && !isLiveStream_ && catchupTarget >= 0.0) {
+        double seekTarget = catchupTarget;
+        if (duration_ > 0.0 && std::isfinite(duration_)) {
+            seekTarget = std::max(0.0, std::min(seekTarget, duration_));
+        }
+        LOG_INFO("Leaving high-speed mode: realigning local playback at " +
+                 std::to_string(seekTarget) + "s");
+        // seek 自己会通过 decodingToTarget_ 丢弃目标前的音视频帧；先取消旧的
+        // “仅音频追赶”任务，避免两个独立目标在解码线程和音频回调中同时生效。
+        audioCatchupTargetPTS_.store(-1.0);
+        pendingAudioOffset_.store(0);
+        seekInternal(seekTarget);
+        realignedBySeek = true;
+    }
+
+    if (speedChanged && !realignedBySeek && catchupTarget >= 0.0) {
         audioCatchupTargetPTS_.store(catchupTarget);
         pendingAudioOffset_.store(0);
         if (clockController_) {

@@ -20,6 +20,7 @@
 #include "FluxPlayer/ui/SkinManager.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include "FluxPlayer/utils/HistoryStore.h"
 #include <imgui.h>
@@ -115,11 +116,7 @@ const char* stateName(PlayerState s) {
 
 } // anonymous namespace
 
-static inline bool isNetworkPath(const std::string& p) {
-    return p.find("rtsp://") == 0 || p.find("rtmp://") == 0 ||
-           p.find("rtp://")  == 0 || p.find("http://") == 0 ||
-           p.find("https://") == 0;
-}
+// FluxPlayer::isNetworkUrl() 已移至 PathUtils.h，使用 isNetworkUrl()
 
 /**
  * @brief 记录一次观看历史（旁路功能，失败仅警告不阻断播放）
@@ -146,7 +143,7 @@ static void recordHistory(const std::string& mediaPath, const Player& player) {
         entry.title = info.title.empty() ? mediaPath : info.title;
         entry.uploader = info.uploader;
         entry.platform = info.platform;
-    } else if (isNetworkPath(mediaPath)) {
+    } else if (FluxPlayer::isNetworkUrl(mediaPath)) {
         entry.sourceType = HistorySourceType::NetworkUrl;
         entry.title = mediaPath;
     } else {
@@ -195,7 +192,7 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
     // - 本地文件：直接探测文件
     // - 网络流 / 网页流：复用 Player 已打开的 AVFormatContext，避免重复连接
     MediaInfo mediaInfo;
-    if (!isNetworkPath(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
+    if (!FluxPlayer::isNetworkUrl(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
         if (!mediaInfo.extractFromFile(mediaPath)) {
             LOG_WARN("Failed to extract media info; UI may show incomplete fields");
         }
@@ -291,7 +288,7 @@ static std::string playMediaCli(const std::string& mediaPath) {
     }
 
     MediaInfo mediaInfo;
-    if (!isNetworkPath(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
+    if (!FluxPlayer::isNetworkUrl(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
         mediaInfo.extractFromFile(mediaPath);
     } else if (AVFormatContext* fmtCtx = player.getFormatContext()) {
         mediaInfo.extractFromContext(fmtCtx);

@@ -194,7 +194,7 @@ bool Config::load() {
                 else if (key == "playbackSpeed") {
                     try {
                         double speed = std::stod(value);
-                        if (speed >= 0.5 && speed <= 2.0) settings_.playbackSpeed = speed;
+                        if (speed >= 0.5 && speed <= 16.0) settings_.playbackSpeed = speed;
                     } catch (...) {}
                 }
                 else if (key == "frameInterpolation") settings_.frameInterpolation = (value == "true" || value == "1");
@@ -291,7 +291,8 @@ bool Config::save() {
 
     file << "[Speed]\n";
     file << "# 说明：默认播放速度倍率\n";
-    file << "# 取值：0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0\n";
+    file << "# 取值：0.5 / 0.75 / 1.0 / 1.25 / 1.5 / 2.0 / 4.0 / 8.0 / 16.0\n";
+    file << "# 高倍数选项会根据当前硬件性能在 UI 中自动裁剪\n";
     file << "# 默认：1.0\n";
     file << "playbackSpeed=" << settings_.playbackSpeed << "\n";
     file << "# 说明：慢放时是否启用帧插值（关闭则使用简单重复帧）\n";

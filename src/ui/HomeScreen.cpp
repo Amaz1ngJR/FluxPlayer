@@ -18,6 +18,7 @@
 #include "FluxPlayer/utils/WebLogin.h"
 #include "FluxPlayer/utils/HistoryStore.h"
 #include "FluxPlayer/utils/HardwareInfo.h"
+#include "FluxPlayer/utils/Config.h"
 #include <imgui.h>
 #include <imgui_internal.h>      // 需要 ImGui 内部 API（GetBackgroundDrawList 等）
 #include <imgui_impl_glfw.h>
@@ -107,6 +108,9 @@ bool HomeScreen::init() {
 
     // 应用皮肤样式
     setupStyle();
+
+    // 启动真实解码测速。后台执行，不阻塞主界面；完成后硬件能力显示和倍速上限会自动使用实测结果。
+    HardwareInfo::startBenchmarkAsync();
 
     // 加载观看历史到内存缓存（每次进入 HomeScreen 重新读盘，保证跨重启/跨播放可见）
     history_ = HistoryStore::loadAll();
@@ -1201,6 +1205,7 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
     std::string hwDeviceDisplay = HardwareInfo::getCurrentHardwareDeviceDisplay();
     std::string gpuInfo = HardwareInfo::getGPUInfo();
     auto perf = HardwareInfo::estimatePerformance();
+    bool hwaccelEnabled = Config::getInstance().get().hwaccel;
 
     // 获取可用的硬件解码器
     auto decoders = HardwareInfo::detectAvailableDecoders();
@@ -1212,22 +1217,28 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
     }
 
     // 格式化解码器列表
-    std::string decoderText = hwCodecs.empty() ? "软件解码" : "";
-    for (size_t i = 0; i < hwCodecs.size() && i < 3; ++i) {
-        decoderText += hwCodecs[i];
-        if (i < hwCodecs.size() - 1) decoderText += "/";
+    std::string decoderText = (!hwaccelEnabled || hwCodecs.empty()) ? "软件解码" : "";
+    if (hwaccelEnabled) {
+        for (size_t i = 0; i < hwCodecs.size() && i < 3; ++i) {
+            decoderText += hwCodecs[i];
+            if (i < hwCodecs.size() - 1) decoderText += "/";
+        }
     }
-    if (!hwCodecs.empty()) {
+    if (hwaccelEnabled && !hwCodecs.empty()) {
         decoderText += " " + hwDeviceDisplay;
     }
 
     // 计算性能百分比
     int perfPercent = 50;
-    if (perf.performanceTier == "高性能") {
+    if (perf.benchmarkRunning) {
+        perfPercent = 55;
+    } else if (perf.maxSpeed1080p >= 16) {
+        perfPercent = 95;
+    } else if (perf.maxSpeed1080p >= 8) {
         perfPercent = 80;
-    } else if (perf.performanceTier == "中等") {
+    } else if (perf.maxSpeed1080p >= 4) {
         perfPercent = 60;
-    } else if (perf.performanceTier == "基础") {
+    } else {
         perfPercent = 40;
     }
 
@@ -1245,7 +1256,7 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
         ImGui::TextUnformatted(decoderText.c_str());
         ImGui::PopStyleColor();
 
-        if (!hwCodecs.empty()) {
+        if (hwaccelEnabled && !hwCodecs.empty()) {
             ImGui::SameLine();
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 cursor = ImGui::GetCursorScreenPos();
@@ -1281,8 +1292,12 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
         ImGui::TextUnformatted("性能档位：");
         ImGui::PopStyleColor();
         ImGui::SameLine(0, 8.0f);
+        std::string tierText = perf.performanceTier;
+        if (perf.benchmarkRunning) {
+            tierText += "（实测中）";
+        }
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textPrimary));
-        ImGui::TextUnformatted(perf.performanceTier.c_str());
+        ImGui::TextUnformatted(tierText.c_str());
         ImGui::PopStyleColor();
 
         ImGui::SameLine(0, 16.0f);
@@ -1329,7 +1344,11 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
         ImGui::SameLine(0, 8.0f);
 
         char speedText[64];
-        snprintf(speedText, sizeof(speedText), "1080p: %dx", perf.maxSpeed1080p);
+        if (perf.benchmarkRunning) {
+            snprintf(speedText, sizeof(speedText), "1080p: 检测中");
+        } else {
+            snprintf(speedText, sizeof(speedText), "1080p: %dx", perf.maxSpeed1080p);
+        }
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimary));
         ImGui::TextUnformatted(speedText);
         ImGui::PopStyleColor();
@@ -1340,7 +1359,11 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
         ImGui::PopStyleColor();
 
         ImGui::SameLine(0, 12.0f);
-        snprintf(speedText, sizeof(speedText), "4K: %dx", perf.maxSpeed4K);
+        if (perf.benchmarkRunning) {
+            snprintf(speedText, sizeof(speedText), "4K: 检测中");
+        } else {
+            snprintf(speedText, sizeof(speedText), "4K: %dx", perf.maxSpeed4K);
+        }
         ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentSecondary));
         ImGui::TextUnformatted(speedText);
         ImGui::PopStyleColor();
@@ -1354,7 +1377,15 @@ void FluxPlayer::HomeScreen::renderHardwareInfo() {
 
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8.0f);
         ImGui::PushStyleColor(ImGuiCol_Text, labelColor);
-        ImGui::Text("支持高倍数播放");
+        if (perf.benchmarkRunning) {
+            ImGui::TextUnformatted("真实解码测速中");
+        } else if (perf.benchmarked) {
+            char benchmarkText[64];
+            snprintf(benchmarkText, sizeof(benchmarkText), "实测 %.1fx 解码吞吐", perf.measuredDecodeSpeed);
+            ImGui::TextUnformatted(benchmarkText);
+        } else {
+            ImGui::TextUnformatted("静态估算");
+        }
         ImGui::PopStyleColor();
     }
 }

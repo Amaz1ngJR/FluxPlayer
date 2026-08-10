@@ -9,6 +9,7 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/Downloader.h"
+#include "FluxPlayer/utils/HardwareInfo.h"
 
 #include <tinyfiledialogs.h>
 
@@ -412,9 +413,13 @@ void Controller::renderBottomOverlay() {
     // 获取当前播放时间和总时长
     double currentTime = player_.getCurrentTime();
     double duration = player_.getDuration();
+    if (duration > 0.0 && std::isfinite(currentTime)) {
+        currentTime = std::max(0.0, std::min(currentTime, duration));
+    }
 
     // 计算进度（0.0 - 1.0）
     float progress = (duration > 0.0) ? static_cast<float>(currentTime / duration) : 0.0f;
+    progress = std::max(0.0f, std::min(progress, 1.0f));
 
     // 如果正在拖动，使用拖动的进度值
     if (isDraggingProgress_) progress = draggedProgress_;
@@ -1316,14 +1321,23 @@ void Controller::renderSpeedButton(float btnH) {
     ImGui::PushStyleColor(ImGuiCol_PopupBg, popupBg);
 
     if (ImGui::BeginPopup("##SpeedPopup")) {
-        constexpr float kSpeeds[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
-        const char* kLabels[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"};
+        // 根据当前视频分辨率和硬件性能估算最大倍数；未知分辨率按 1080p 档。
+        int maxSpeed = HardwareInfo::maxSupportedPlaybackSpeed(videoWidth_, videoHeight_);
 
-        for (int i = 0; i < 6; i++) {
-            bool isSelected = (std::abs(currentSpeed - kSpeeds[i]) < 0.01);
+        // 所有可用的倍速选项
+        constexpr float kAllSpeeds[] = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 4.0f, 8.0f, 16.0f};
+        const char* kAllLabels[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x", "4.0x", "8.0x", "16.0x"};
+
+        for (int i = 0; i < IM_ARRAYSIZE(kAllSpeeds); i++) {
+            // 只显示不超过硬件能力的倍数（慢放和正常速度总是显示）
+            if (kAllSpeeds[i] > maxSpeed && kAllSpeeds[i] > 1.0f) {
+                continue;
+            }
+
+            bool isSelected = (std::abs(currentSpeed - kAllSpeeds[i]) < 0.01);
             if (isSelected) ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.accentPrimarySoft));
-            if (ImGui::Selectable(kLabels[i], isSelected, 0, ImVec2(popup.speedOptionW, 0))) {
-                player_.setPlaybackSpeed(kSpeeds[i]);
+            if (ImGui::Selectable(kAllLabels[i], isSelected, 0, ImVec2(popup.speedOptionW, 0))) {
+                player_.setPlaybackSpeed(kAllSpeeds[i]);
                 ImGui::CloseCurrentPopup();
             }
             if (isSelected) ImGui::PopStyleColor();
@@ -1809,17 +1823,37 @@ void Controller::renderSettingsModal() {
         }
 
         // 默认播放速度
-        const char* kSpeedLabels[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x"};
-        const double kSpeedVals[]  = {0.5,    0.75,    1.0,    1.25,    1.5,    2.0};
+        const char* kSpeedLabels[] = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x", "4.0x", "8.0x", "16.0x"};
+        const double kSpeedVals[]  = {0.5,    0.75,    1.0,    1.25,    1.5,    2.0,    4.0,    8.0,    16.0};
+        int maxDefaultSpeed = HardwareInfo::maxSupportedPlaybackSpeed(1920, 1080);
         int curIdx = 2;
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < IM_ARRAYSIZE(kSpeedVals); ++i) {
             if (std::abs(s.playbackSpeed - kSpeedVals[i]) < 0.01) { curIdx = i; break; }
         }
+        if (kSpeedVals[curIdx] > maxDefaultSpeed && kSpeedVals[curIdx] > 1.0) {
+            for (int i = IM_ARRAYSIZE(kSpeedVals) - 1; i >= 0; --i) {
+                if (kSpeedVals[i] <= maxDefaultSpeed || kSpeedVals[i] <= 1.0) {
+                    curIdx = i;
+                    break;
+                }
+            }
+        }
         ImGui::SetNextItemWidth(pageContentW * settingsUi.mediumFieldRatio);
-        if (ImGui::Combo("Default Playback Speed", &curIdx, kSpeedLabels, IM_ARRAYSIZE(kSpeedLabels))) {
-            s.playbackSpeed = kSpeedVals[curIdx];
-            player_.setPlaybackSpeed(kSpeedVals[curIdx]);
-            cfgInst.save();
+        if (ImGui::BeginCombo("Default Playback Speed", kSpeedLabels[curIdx])) {
+            for (int i = 0; i < IM_ARRAYSIZE(kSpeedVals); ++i) {
+                if (kSpeedVals[i] > maxDefaultSpeed && kSpeedVals[i] > 1.0) {
+                    continue;
+                }
+                bool selected = (i == curIdx);
+                if (ImGui::Selectable(kSpeedLabels[i], selected)) {
+                    curIdx = i;
+                    s.playbackSpeed = kSpeedVals[curIdx];
+                    player_.setPlaybackSpeed(kSpeedVals[curIdx]);
+                    cfgInst.save();
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
     }
 

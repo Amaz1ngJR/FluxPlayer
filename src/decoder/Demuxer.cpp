@@ -7,6 +7,7 @@
 
 #include "FluxPlayer/decoder/Demuxer.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
 
 namespace FluxPlayer {
@@ -107,10 +108,10 @@ bool Demuxer::open(const std::string& filename) {
  */
 AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) const {
     const bool isPipe = (filename.find("pipe:") == 0);
-    const bool isNetwork = (filename.find("rtsp://") == 0 ||
-                            filename.find("rtmp://") == 0 ||
-                            filename.find("http://") == 0 ||
-                            filename.find("https://") == 0);
+    const bool isNetwork = (FluxPlayer::isNetworkUrl(filename) ||
+                            FluxPlayer::isNetworkUrl(filename) ||
+                            FluxPlayer::isNetworkUrl(filename) ||
+                            FluxPlayer::isNetworkUrl(filename));
     if (!isNetwork && !isPipe) {
         return nullptr;
     }
@@ -138,7 +139,7 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
 
     // === HTTP/HLS 专用选项 ===
     // HLS 通过 HTTP 分片传输，断流重连至关重要
-    if (filename.find("http://") == 0 || filename.find("https://") == 0) {
+    if (FluxPlayer::isNetworkUrl(filename) || FluxPlayer::isNetworkUrl(filename)) {
         av_dict_set(&options, "reconnect", "1", 0);                  // 连接断开后重连
         av_dict_set(&options, "reconnect_streamed", "1", 0);         // 流传输中也重连
         av_dict_set(&options, "reconnect_on_network_error", "1", 0); // 网络错误时重连
@@ -150,7 +151,7 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
     }
 
     // === RTSP 专用选项 ===
-    if (filename.find("rtsp://") == 0) {
+    if (FluxPlayer::isNetworkUrl(filename)) {
         av_dict_set(&options, "rtsp_transport", "tcp", 0);     // TCP 更稳定
         av_dict_set(&options, "stimeout", "5000000", 0);       // 连接超时 5 秒
         av_dict_set(&options, "buffer_size", "1048576", 0);    // 1MB 接收缓冲区，减少丢包
@@ -164,14 +165,14 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
     // === 代理设置 ===
     const auto& cfg = Config::getInstance().get();
     if (cfg.proxyEnabled && !cfg.httpProxy.empty()) {
-        if (filename.find("http://") == 0 || filename.find("https://") == 0) {
+        if (FluxPlayer::isNetworkUrl(filename) || FluxPlayer::isNetworkUrl(filename)) {
             av_dict_set(&options, "http_proxy", cfg.httpProxy.c_str(), 0);
             LOG_DEBUG("Proxy enabled: " + cfg.httpProxy);
         }
     }
 
     // === RTMP 专用选项 ===
-    if (filename.find("rtmp://") == 0) {
+    if (FluxPlayer::isNetworkUrl(filename)) {
         av_dict_set(&options, "rtmp_live", "live", 0);  // 直播模式，禁用 seek
         LOG_DEBUG("RTMP options: rtmp_live=live");
     }
@@ -367,9 +368,7 @@ bool Demuxer::isLiveStream() const {
 
     // 通过 URL 协议头补充检测（RTMP 流实际被解析为 FLV 格式）
     const char* url = m_formatCtx->url ? m_formatCtx->url : "";
-    bool isNetworkProtocol = (std::string(url).find("rtsp://") == 0 ||
-                             std::string(url).find("rtmp://") == 0 ||
-                             std::string(url).find("rtp://") == 0);
+    bool isNetworkProtocol = FluxPlayer::isNetworkUrl(url);
 
     return hasInvalidDuration || isStreamFormat || isNetworkProtocol;
 }

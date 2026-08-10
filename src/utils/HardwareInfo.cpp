@@ -4,6 +4,10 @@
  */
 
 #include "FluxPlayer/utils/HardwareInfo.h"
+#include "FluxPlayer/decoder/Demuxer.h"
+#include "FluxPlayer/decoder/Frame.h"
+#include "FluxPlayer/decoder/VideoDecoder.h"
+#include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/Logger.h"
 
 extern "C" {
@@ -19,10 +23,179 @@ extern "C" {
 #include <windows.h>
 #endif
 
-#include <sstream>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <thread>
 
 namespace FluxPlayer {
+
+namespace {
+
+constexpr int kBenchmarkMaxFrames = 360;
+constexpr double kBenchmarkMaxWallSeconds = 4.0;
+constexpr double kBenchmarkSafetyFactor = 0.70;
+
+std::mutex gBenchmarkMutex;
+bool gBenchmarkStarted = false;
+bool gBenchmarkRunning = false;
+bool gBenchmarkDone = false;
+PerformanceEstimate gBenchmarkEstimate;
+
+std::optional<std::string> findBenchmarkSample() {
+    const char* candidates[] = {
+        "video/video_01.mp4",
+        "Subtitles/test_Subtitles.mp4"
+    };
+
+    for (const char* candidate : candidates) {
+        std::string path = Config::getResourcePath(candidate);
+        if (std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+    return std::nullopt;
+}
+
+int speedCapFromMeasured(double measuredSpeed) {
+    const double sustainable = measuredSpeed * kBenchmarkSafetyFactor;
+    if (sustainable >= 16.0) return 16;
+    if (sustainable >= 8.0) return 8;
+    if (sustainable >= 4.0) return 4;
+    if (sustainable >= 2.0) return 2;
+    return 1;
+}
+
+int estimate4KCapFrom1080p(int cap1080p) {
+    if (cap1080p >= 16) return 8;
+    if (cap1080p >= 8) return 4;
+    if (cap1080p >= 4) return 2;
+    return 1;
+}
+
+std::string tierFromMeasuredCap(int cap1080p) {
+    if (cap1080p >= 16) return "实测旗舰";
+    if (cap1080p >= 8) return "实测高性能";
+    if (cap1080p >= 4) return "实测中等";
+    return "实测基础";
+}
+
+std::optional<PerformanceEstimate> runDecodeBenchmark() {
+    auto samplePath = findBenchmarkSample();
+    if (!samplePath) {
+        LOG_WARN("Hardware decode benchmark skipped: sample video not found");
+        return std::nullopt;
+    }
+
+    Demuxer demuxer;
+    if (!demuxer.open(*samplePath)) {
+        LOG_WARN("Hardware decode benchmark skipped: failed to open " + *samplePath);
+        return std::nullopt;
+    }
+
+    AVStream* videoStream = demuxer.getVideoStream();
+    AVCodecParameters* codecParams = demuxer.getVideoCodecParams();
+    if (!videoStream || !codecParams || demuxer.getVideoStreamIndex() < 0) {
+        LOG_WARN("Hardware decode benchmark skipped: no video stream in " + *samplePath);
+        return std::nullopt;
+    }
+
+    VideoDecoder decoder;
+    if (!decoder.init(codecParams, videoStream->time_base)) {
+        LOG_WARN("Hardware decode benchmark skipped: failed to initialize decoder");
+        return std::nullopt;
+    }
+
+    double fps = demuxer.getFrameRate();
+    if (!std::isfinite(fps) || fps <= 1.0) {
+        fps = 30.0;
+    }
+
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        LOG_WARN("Hardware decode benchmark skipped: failed to allocate packet");
+        return std::nullopt;
+    }
+
+    Frame rawFrame;
+    Frame preparedFrame;
+    int decodedFrames = 0;
+    const int videoStreamIndex = demuxer.getVideoStreamIndex();
+    const auto started = std::chrono::steady_clock::now();
+
+    while (decodedFrames < kBenchmarkMaxFrames) {
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsed = std::chrono::duration<double>(now - started).count();
+        if (elapsed >= kBenchmarkMaxWallSeconds) {
+            break;
+        }
+
+        if (!demuxer.readPacket(packet)) {
+            break;
+        }
+
+        if (packet->stream_index == videoStreamIndex) {
+            decoder.sendPacket(packet);
+            while (decodedFrames < kBenchmarkMaxFrames && decoder.receiveFrame(rawFrame)) {
+                if (decoder.prepareFrame(rawFrame.getAVFrame(), preparedFrame)) {
+                    ++decodedFrames;
+                    preparedFrame.unreference();
+                }
+                rawFrame.unreference();
+            }
+        }
+
+        av_packet_unref(packet);
+    }
+
+    av_packet_unref(packet);
+    av_packet_free(&packet);
+
+    const auto finished = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(finished - started).count();
+    elapsed = std::max(elapsed, 0.001);
+
+    if (decodedFrames <= 0) {
+        LOG_WARN("Hardware decode benchmark failed: decoded zero frames");
+        return std::nullopt;
+    }
+
+    const double mediaSeconds = static_cast<double>(decodedFrames) / fps;
+    const double sampleMeasuredSpeed = mediaSeconds / elapsed;
+    const int sampleWidth = std::max(1, demuxer.getWidth());
+    const int sampleHeight = std::max(1, demuxer.getHeight());
+    const double samplePixels = static_cast<double>(sampleWidth) * static_cast<double>(sampleHeight);
+    const double reference1080pPixels = 1920.0 * 1080.0;
+    const double measured1080pSpeed = sampleMeasuredSpeed * (samplePixels / reference1080pPixels);
+    const int cap1080p = speedCapFromMeasured(measured1080pSpeed);
+
+    PerformanceEstimate estimate;
+    estimate.maxSpeed1080p = cap1080p;
+    estimate.maxSpeed4K = estimate4KCapFrom1080p(cap1080p);
+    estimate.performanceTier = tierFromMeasuredCap(cap1080p);
+    estimate.benchmarked = true;
+    estimate.benchmarkRunning = false;
+    estimate.measuredDecodeSpeed = measured1080pSpeed;
+    estimate.benchmarkSource = *samplePath;
+
+    LOG_INFO("Hardware decode benchmark complete: sample=" + *samplePath +
+             ", frames=" + std::to_string(decodedFrames) +
+             ", resolution=" + std::to_string(sampleWidth) + "x" + std::to_string(sampleHeight) +
+             ", fps=" + std::to_string(fps) +
+             ", elapsed=" + std::to_string(elapsed) +
+             "s, sampleMeasured=" + std::to_string(sampleMeasuredSpeed) +
+             "x, measured1080pEq=" + std::to_string(measured1080pSpeed) +
+             "x, cap1080p=" + std::to_string(estimate.maxSpeed1080p) +
+             "x, cap4K=" + std::to_string(estimate.maxSpeed4K) + "x");
+
+    return estimate;
+}
+
+} // namespace
 
 // ==================== 硬件设备类型转换 ====================
 
@@ -189,6 +362,7 @@ std::string HardwareInfo::getGPUInfo() {
             if (brandStr.find("M1") != std::string::npos) return "Apple M1";
             if (brandStr.find("M2") != std::string::npos) return "Apple M2";
             if (brandStr.find("M3") != std::string::npos) return "Apple M3";
+            if (brandStr.find("M4") != std::string::npos) return "Apple M4";
             return "Apple Silicon";
         }
         // Intel Mac
@@ -214,10 +388,16 @@ PerformanceEstimate HardwareInfo::estimateByDeviceType(const std::string& device
     if (deviceType == "VideoToolbox") {
         // Apple Silicon / Intel Mac
         std::string gpu = getGPUInfo();
-        if (gpu.find("M1") != std::string::npos ||
-            gpu.find("M2") != std::string::npos ||
-            gpu.find("M3") != std::string::npos) {
-            // Apple Silicon: 高性能
+        if (gpu.find("M3") != std::string::npos ||
+            gpu.find("M4") != std::string::npos) {
+            // 新款 Apple Silicon：1080p 可开放 16x，4K 保守开放 8x
+            est.maxSpeed1080p = 16;
+            est.maxSpeed4K = 8;
+            est.performanceTier = "旗舰";
+        } else if (gpu.find("M1") != std::string::npos ||
+                   gpu.find("M2") != std::string::npos ||
+                   gpu.find("Apple Silicon") != std::string::npos) {
+            // 早期 Apple Silicon：高性能
             est.maxSpeed1080p = 8;
             est.maxSpeed4K = 4;
             est.performanceTier = "高性能";
@@ -228,15 +408,16 @@ PerformanceEstimate HardwareInfo::estimateByDeviceType(const std::string& device
             est.performanceTier = "中等";
         }
     } else if (deviceType == "D3D11VA" || deviceType == "CUDA") {
-        // Windows: 假设中高端独显
+        // Windows: D3D11VA/CUDA 通常对应较强硬件，菜单先开放 16x，
+        // 实际播放仍由队列和丢帧统计反馈性能是否足够。
+        est.maxSpeed1080p = 16;
+        est.maxSpeed4K = 8;
+        est.performanceTier = "旗舰";
+    } else if (deviceType == "VAAPI" || deviceType == "QSV") {
+        // Linux / Intel: 中等性能
         est.maxSpeed1080p = 8;
         est.maxSpeed4K = 4;
         est.performanceTier = "高性能";
-    } else if (deviceType == "VAAPI" || deviceType == "QSV") {
-        // Linux / Intel: 中等性能
-        est.maxSpeed1080p = 4;
-        est.maxSpeed4K = 2;
-        est.performanceTier = "中等";
     } else {
         // 软件解码: 基础性能
         est.maxSpeed1080p = 2;
@@ -248,8 +429,63 @@ PerformanceEstimate HardwareInfo::estimateByDeviceType(const std::string& device
 }
 
 PerformanceEstimate HardwareInfo::estimatePerformance() {
+    if (!Config::getInstance().get().hwaccel) {
+        return estimateByDeviceType("Software");
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gBenchmarkMutex);
+        if (gBenchmarkDone) {
+            return gBenchmarkEstimate;
+        }
+    }
+
     std::string device = getCurrentHardwareDevice();
-    return estimateByDeviceType(device);
+    auto estimate = estimateByDeviceType(device);
+    {
+        std::lock_guard<std::mutex> lock(gBenchmarkMutex);
+        estimate.benchmarkRunning = gBenchmarkRunning;
+        if (gBenchmarkRunning) {
+            estimate.benchmarkSource = "video/video_01.mp4";
+        }
+    }
+    return estimate;
+}
+
+void HardwareInfo::startBenchmarkAsync() {
+    if (!Config::getInstance().get().hwaccel) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gBenchmarkMutex);
+        if (gBenchmarkStarted || gBenchmarkDone) {
+            return;
+        }
+        gBenchmarkStarted = true;
+        gBenchmarkRunning = true;
+    }
+
+    std::thread([]() {
+        auto measured = runDecodeBenchmark();
+
+        std::lock_guard<std::mutex> lock(gBenchmarkMutex);
+        gBenchmarkRunning = false;
+        if (measured) {
+            gBenchmarkEstimate = *measured;
+            gBenchmarkDone = true;
+        }
+    }).detach();
+}
+
+int HardwareInfo::maxSupportedPlaybackSpeed(int width, int height) {
+    auto perf = estimatePerformance();
+    const int maxDim = std::max(width, height);
+    const int64_t pixels = static_cast<int64_t>(std::max(width, 0)) *
+                           static_cast<int64_t>(std::max(height, 0));
+    bool is4KOrHigher = maxDim >= 3840 || pixels >= 3840LL * 2160LL;
+    int maxSpeed = is4KOrHigher ? perf.maxSpeed4K : perf.maxSpeed1080p;
+    return std::max(1, std::min(maxSpeed, 16));
 }
 
 // ==================== 格式化硬件信息 ====================

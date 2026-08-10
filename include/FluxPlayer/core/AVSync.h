@@ -70,6 +70,16 @@ public:
     double getAudioClock() const;
 
     /**
+     * 获取最近一次提交的音频时钟基准，不叠加两次回调之间的墙钟插值。
+     *
+     * 音频设备回调在合成欠载时钟时使用该值作为累计起点；若改用
+     * getAudioClock()，其中已经包含的 elapsed * playbackRate 会与本次
+     * bufferDuration * playbackRate 重复计算，16x 会被错误推进到接近 32x。
+     * 普通 UI 和同步调度仍应使用 getAudioClock() 获取连续时钟。
+     */
+    double getAudioClockBase() const { return audioClock_.load(); }
+
+    /**
      * 获取视频时钟
      * @return 当前视频时钟（秒）
      */
@@ -144,7 +154,7 @@ public:
 
     /**
      * 设置播放速率
-     * @param rate 速率倍数（0.5 ~ 2.0），影响帧延迟计算和同步阈值
+     * @param rate 速率倍数（0.5 ~ 16.0），影响帧延迟计算和同步阈值
      * 注意：会同步更新外部时钟基准，避免速率切换时时钟跳变
      */
     void setPlaybackRate(double rate);

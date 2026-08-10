@@ -8,6 +8,7 @@
 
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/CookieStore.h"
 
@@ -234,9 +235,16 @@ static std::string runCommand(const std::string& cmd, int timeoutSec = 30) {
 // ─────────────────────────────────────────────
 
 bool StreamExtractor::needsExtraction(const std::string& url) {
-    // RTSP/RTMP 直接播放
-    if (url.find("rtsp://") == 0 || url.find("rtmp://") == 0 ||
-        url.find("rtp://") == 0) return false;
+    // 使用统一的网络URL判断
+    if (!isNetworkUrl(url)) {
+        // 不是网络URL，是本地文件，不需要提取
+        return false;
+    }
+
+    // RTSP/RTMP/RTP 直接播放，不需要提取
+    if (url.find("rtsp://") == 0 || url.find("rtmp://") == 0 || url.find("rtp://") == 0) {
+        return false;
+    }
 
     // 含已知直链扩展名则不需要提取
     std::string lower = url;
@@ -257,9 +265,8 @@ bool StreamExtractor::needsExtraction(const std::string& url) {
     }
 
     // 其他 http/https URL 且无媒体扩展名，也尝试提取
-    if (url.find("http://") == 0 || url.find("https://") == 0) return true;
-
-    return false;
+    // 使用统一的网络URL判断（已经在开头过滤了本地文件）
+    return true;
 }
 
 bool StreamExtractor::isAvailable() {
