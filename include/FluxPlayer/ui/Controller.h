@@ -55,7 +55,8 @@ public:
                       int width, int height, double duration, double videoFps,
                       const std::string& videoCodec, const std::string& videoProfile,
                       const std::string& audioCodec, const std::string& audioProfile,
-                      int audioSampleRate, int audioChannels, const std::string& channelLayout);
+                      int audioSampleRate, int audioChannels, const std::string& channelLayout,
+                      int gopSize = 0);
 
     /**
      * @brief 设置网页视频扩展信息（上传者、平台、播放量、上传日期）
@@ -167,6 +168,7 @@ private:
     int videoWidth_;
     int videoHeight_;
     double videoFps_;
+    int videoGopSize_;              ///< GOP 大小（关键帧间隔，单位：帧数）
     double duration_;
     std::string videoCodec_;
     std::string videoProfile_;      ///< 视频 Profile（如 "High", "Main"）

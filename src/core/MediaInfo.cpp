@@ -14,6 +14,41 @@ extern "C" {
 
 namespace FluxPlayer {
 
+namespace {
+
+/**
+ * 跨 FFmpeg 版本读取流索引条目数量。
+ *
+ * macOS 当前捆绑 FFmpeg 4.4（libavformat 58），索引仍是 AVStream 的公开字段；
+ * Windows 当前捆绑 FFmpeg 7.x，新版已隐藏这些字段并提供访问函数。把版本差异
+ * 收口在这里，后面的媒体信息计算不再直接依赖任一版本的 AVStream 内部布局。
+ */
+int streamIndexEntryCount(const AVStream* stream) {
+    if (!stream) return 0;
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
+    return avformat_index_get_entries_count(stream);
+#else
+    return stream->nb_index_entries;
+#endif
+}
+
+/**
+ * 跨 FFmpeg 版本按下标读取流索引条目。
+ * 返回指针仅在没有继续调用会修改 AVStream/AVFormatContext 的 FFmpeg API 时有效；
+ * 当前调用方只在一个只读循环中比较时间戳，符合两套 API 的生命周期约束。
+ */
+const AVIndexEntry* streamIndexEntryAt(AVStream* stream, int index) {
+    if (!stream || index < 0) return nullptr;
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
+    return avformat_index_get_entry(stream, index);
+#else
+    if (index >= stream->nb_index_entries) return nullptr;
+    return &stream->index_entries[index];
+#endif
+}
+
+} // namespace
+
 MediaInfo::MediaInfo()
     : duration_(0.0)
     , bitrate_(0)
@@ -350,6 +385,56 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
         } else if (stream->r_frame_rate.den && stream->r_frame_rate.num) {
             info.fps = av_q2d(stream->r_frame_rate);
         }
+
+        // 获取 GOP size（关键帧间隔）
+        // 尝试通过分析流中的关键帧索引来计算实际 GOP
+        info.gopSize = 0;
+
+        // 方法1：从流的元数据中尝试获取
+        AVDictionaryEntry* gopTag = av_dict_get(stream->metadata, "gop_size", nullptr, 0);
+        if (gopTag) {
+            info.gopSize = std::atoi(gopTag->value);
+        }
+
+        // 方法2：通过索引条目分析关键帧间隔。
+        // FFmpeg 新版本已将 AVStream::index_entries / nb_index_entries 从公开
+        // 结构中移除，必须通过 avformat_index_get_* API 访问。这样也避免直接
+        // 依赖 AVStream 私有布局，Windows 和 macOS 使用不同 FFmpeg 版本时均可编译。
+        const int indexEntryCount = streamIndexEntryCount(stream);
+        if (info.gopSize == 0 && indexEntryCount >= 2) {
+            // 计算前几个关键帧之间的平均间隔
+            int intervalCount = 0;
+            int64_t totalInterval = 0;
+            const AVIndexEntry* lastKeyframe = nullptr;
+
+            for (int i = 0; i < indexEntryCount && intervalCount < 10; ++i) {
+                const AVIndexEntry* entry = streamIndexEntryAt(stream, i);
+                if (entry && (entry->flags & AVINDEX_KEYFRAME)) {
+                    if (lastKeyframe) {
+                        // timestamp 的单位是 stream->time_base；换算成秒后再乘 FPS，
+                        // 得到相邻关键帧之间约包含的帧数。pos 是文件字节偏移，不能
+                        // 用于计算 GOP；旧代码混用了 pos 和数组下标，结果没有意义。
+                        double timeDiff = (entry->timestamp - lastKeyframe->timestamp)
+                                        * av_q2d(stream->time_base);
+                        if (timeDiff > 0 && info.fps > 0) {
+                            int frameInterval = static_cast<int>(timeDiff * info.fps + 0.5);
+                            if (frameInterval > 0 && frameInterval < 1000) {  // 合理范围内
+                                totalInterval += frameInterval;
+                                intervalCount++;
+                            }
+                        }
+                    }
+                    lastKeyframe = entry;
+                }
+            }
+
+            if (intervalCount > 0) {
+                info.gopSize = static_cast<int>(totalInterval / intervalCount);
+            }
+        }
+
+        // 如果仍然无法获取，可以使用常见的默认值估计
+        // 大多数视频：GOP 在 1-10 秒之间（25-300 帧）
 
         // 像素格式
         const char* pixFmtName = av_get_pix_fmt_name(static_cast<AVPixelFormat>(codecParams->format));

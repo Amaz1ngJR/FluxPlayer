@@ -71,6 +71,7 @@ Controller::Controller(Player& player, Window& window)
     , videoWidth_(0)
     , videoHeight_(0)
     , videoFps_(0.0)
+    , videoGopSize_(0)
     , duration_(0.0)
     , videoCodec_("")
     , videoProfile_("")
@@ -332,12 +333,14 @@ void Controller::setMediaInfo(const std::string& filename,
                                int width, int height, double duration, double videoFps,
                                const std::string& videoCodec, const std::string& videoProfile,
                                const std::string& audioCodec, const std::string& audioProfile,
-                               int audioSampleRate, int audioChannels, const std::string& channelLayout) {
+                               int audioSampleRate, int audioChannels, const std::string& channelLayout,
+                               int gopSize) {
     filename_ = filename;
     videoWidth_ = width;
     videoHeight_ = height;
     duration_ = duration;
     videoFps_ = videoFps;
+    videoGopSize_ = gopSize;
     videoCodec_ = videoCodec;
     videoProfile_ = videoProfile;
     audioCodec_ = audioCodec;
@@ -989,6 +992,15 @@ void Controller::renderMediaInfo() {
     }
 
     if (videoFps_ > 0) ImGui::Text("FPS        : %.2f", videoFps_);
+
+    // 显示 GOP（关键帧间隔）
+    if (videoGopSize_ > 0 && videoFps_ > 0) {
+        double gopSeconds = videoGopSize_ / videoFps_;
+        ImGui::Text("GOP        : %d frames (%.2f sec)", videoGopSize_, gopSeconds);
+    } else if (videoGopSize_ > 0) {
+        ImGui::Text("GOP        : %d frames", videoGopSize_);
+    }
+
     ImGui::Unindent();
     ImGui::Separator();
 

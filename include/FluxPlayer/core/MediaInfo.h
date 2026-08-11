@@ -27,6 +27,7 @@ struct StreamInfo {
     int width;                 // 宽度
     int height;                // 高度
     double fps;                // 帧率
+    int gopSize;               // GOP 大小（关键帧间隔，单位：帧数）
     std::string pixelFormat;   // 像素格式（如 "yuv420p", "nv12"）
     std::string colorSpace;    // 色彩空间（如 "bt709", "bt601"）
     std::string colorRange;    // 色彩范围（"tv", "pc"）
