@@ -128,7 +128,7 @@
   <circle cx="420" cy="508" r="3" fill="#00E8FF"/>
   <text x="432" y="512" font-family="Consolas,monospace" font-size="11" fill="#00E8FF">Unified</text>
 
-  <!-- Unified sub-options (indented) -->
+  <!-- Unified sub-options (indented): First clip shares resolution + GOP source -->
   <circle cx="294" cy="530" r="5" fill="none" stroke="#7792B2" stroke-width="1.5"/>
   <text x="305" y="534" font-family="Consolas,monospace" font-size="10" fill="#7792B2">First clip</text>
 
@@ -136,12 +136,15 @@
   <circle cx="294" cy="550" r="2.5" fill="#00E8FF"/>
   <text x="305" y="554" font-family="Consolas,monospace" font-size="10" fill="#00E8FF">Custom</text>
 
-  <!-- Custom resolution inputs -->
+  <!-- Custom video parameters: resolution and GOP share one compact row -->
   <rect x="360" y="542" width="60" height="20" rx="2" fill="#030817" stroke="#5A7A94" stroke-width="1"/>
   <text x="390" y="555" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#D0E8F8">1920</text>
   <text x="430" y="555" font-family="Consolas,monospace" font-size="10" fill="#7792B2">x</text>
   <rect x="445" y="542" width="60" height="20" rx="2" fill="#030817" stroke="#5A7A94" stroke-width="1"/>
   <text x="475" y="555" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#D0E8F8">1080</text>
+  <text x="520" y="555" font-family="Consolas,monospace" font-size="10" fill="#7792B2">GOP</text>
+  <rect x="550" y="542" width="56" height="20" rx="2" fill="#030817" stroke="#5A7A94" stroke-width="1"/>
+  <text x="578" y="555" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#D0E8F8">250</text>
 
   <!-- Hardware Acceleration checkbox -->
   <rect x="268" y="580" width="14" height="14" rx="2" fill="#00E8FF" fill-opacity="0.15" stroke="#00E8FF" stroke-width="1.5"/>

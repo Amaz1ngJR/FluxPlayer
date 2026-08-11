@@ -33,6 +33,7 @@ extern "C" {
 #include <tinyfiledialogs.h>
 
 #include <chrono>
+#include <algorithm>
 #include <ctime>
 #include <cstring>
 #include <cstdio>
@@ -467,6 +468,7 @@ void MergeScreen::startMerge() {
     options.useFirstClipResolution = useFirstClipResolution_;
     options.customWidth = customWidth_;
     options.customHeight = customHeight_;
+    options.customGopSize = customGopSize_;
     options.enableHardwareAccel = enableHardwareAccel_;
 
     std::string output = makeOutputPath();
@@ -1106,6 +1108,18 @@ void MergeScreen::renderClipList(float listW, float listH) {
                     ImGui::InputInt("##h", &customHeight_, 0, 0);
                     if (customHeight_ < 128) customHeight_ = 128;
                     if (customHeight_ > 4320) customHeight_ = 4320;
+
+                    // First clip 同时复用首片段的分辨率与 GOP；只有 Custom 才在
+                    // 宽高后追加 GOP 输入，保持整个参数区仍为原来的两行高度。
+                    ImGui::SameLine(0, 10.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ToImVec4(sk.colors.textMuted));
+                    ImGui::TextUnformatted("GOP");
+                    ImGui::PopStyleColor();
+
+                    ImGui::SameLine(0, 6.0f);
+                    ImGui::SetNextItemWidth(56.0f);
+                    ImGui::InputInt("##gop_size", &customGopSize_, 0, 0);
+                    customGopSize_ = std::clamp(customGopSize_, 1, 1000);
 
                     ImGui::PopStyleVar(3);
                     ImGui::PopStyleColor(2);

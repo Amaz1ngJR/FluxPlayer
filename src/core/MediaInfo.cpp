@@ -47,6 +47,80 @@ const AVIndexEntry* streamIndexEntryAt(AVStream* stream, int index) {
 #endif
 }
 
+/**
+ * 从实际压缩包的关键帧标记估算 GOP。
+ *
+ * 部分 MP4 的索引条目很多，但除第一条外都没有 AVINDEX_KEYFRAME 标记；实际
+ * av_read_frame() 返回的视频包仍带有正确的 AV_PKT_FLAG_KEY。该函数仅用于
+ * extractFromFile() 创建的独立探测上下文，可以 seek 和读取数据，不会移动播放器
+ * 正在使用的 demux 上下文，也不会给网络流增加额外读取延迟。
+ */
+int estimateGopFromPackets(AVFormatContext* formatCtx, int streamIndex, double fps) {
+    if (!formatCtx || streamIndex < 0 ||
+        streamIndex >= static_cast<int>(formatCtx->nb_streams) || fps <= 0.0) {
+        return 0;
+    }
+
+    AVStream* stream = formatCtx->streams[streamIndex];
+    if (!stream) return 0;
+
+    // 独立文件探测上下文允许回到流起点。即使少数格式不支持 seek，仍可从
+    // avformat_find_stream_info() 留下的位置继续采样，GOP 间隔计算不依赖绝对起点。
+    if (av_seek_frame(formatCtx, streamIndex, 0, AVSEEK_FLAG_BACKWARD) >= 0) {
+        avformat_flush(formatCtx);
+    }
+
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) return 0;
+
+    // 4 个间隔足以平滑轻微的可变 GOP；包数上限确保损坏文件或完全没有关键帧
+    // 标记时快速退出，不因一项媒体信息阻塞本地文件的打开流程。
+    constexpr int kMaxIntervals = 4;
+    constexpr int kMaxVideoPackets = 5000;
+    constexpr int kMaxTotalPackets = 25000;
+    int videoPacketCount = 0;
+    int totalPacketCount = 0;
+    int intervalCount = 0;
+    int64_t totalFrameInterval = 0;
+    int64_t lastKeyframeTimestamp = AV_NOPTS_VALUE;
+
+    while (intervalCount < kMaxIntervals &&
+           videoPacketCount < kMaxVideoPackets &&
+           totalPacketCount < kMaxTotalPackets &&
+           av_read_frame(formatCtx, packet) >= 0) {
+        ++totalPacketCount;
+        if (packet->stream_index == streamIndex) {
+            ++videoPacketCount;
+            if (packet->flags & AV_PKT_FLAG_KEY) {
+                // 优先使用 PTS；缺失时退回 DTS。关键帧时间戳差乘 time_base 得到秒，
+                // 再乘平均帧率换算成 GOP 帧数，与索引估算路径保持相同定义。
+                const int64_t timestamp = packet->pts != AV_NOPTS_VALUE
+                    ? packet->pts : packet->dts;
+                if (timestamp != AV_NOPTS_VALUE &&
+                    lastKeyframeTimestamp != AV_NOPTS_VALUE &&
+                    timestamp > lastKeyframeTimestamp) {
+                    const double timeDiff =
+                        (timestamp - lastKeyframeTimestamp) * av_q2d(stream->time_base);
+                    const int frameInterval = static_cast<int>(timeDiff * fps + 0.5);
+                    if (frameInterval > 0 && frameInterval < 1000) {
+                        totalFrameInterval += frameInterval;
+                        ++intervalCount;
+                    }
+                }
+                if (timestamp != AV_NOPTS_VALUE) {
+                    lastKeyframeTimestamp = timestamp;
+                }
+            }
+        }
+        av_packet_unref(packet);
+    }
+
+    av_packet_free(&packet);
+    return intervalCount > 0
+        ? static_cast<int>(totalFrameInterval / intervalCount)
+        : 0;
+}
+
 } // namespace
 
 MediaInfo::MediaInfo()
@@ -140,6 +214,30 @@ bool MediaInfo::extractFromFile(const std::string& filePath) {
     }
 
     bool result = extractFromContext(formatCtx);
+
+    // parseStreamInfo() 优先使用元数据和容器索引，速度最快。只有这两种方式都
+    // 得不到 GOP 时才扫描实际视频包。videoStreams_ 按“第几个视频流”编号，
+    // AVFormatContext 则按所有音视频/字幕流统一编号，因此这里单独维护 videoOrdinal。
+    if (result) {
+        int videoOrdinal = 0;
+        for (unsigned int streamIndex = 0; streamIndex < formatCtx->nb_streams; ++streamIndex) {
+            AVStream* stream = formatCtx->streams[streamIndex];
+            if (!stream || stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
+
+            auto infoIt = videoStreams_.find(videoOrdinal);
+            if (infoIt != videoStreams_.end() && infoIt->second.gopSize == 0) {
+                const int estimatedGop = estimateGopFromPackets(
+                    formatCtx, static_cast<int>(streamIndex), infoIt->second.fps);
+                if (estimatedGop > 0) {
+                    infoIt->second.gopSize = estimatedGop;
+                    LOG_INFO("MediaInfo: GOP estimated from packet keyframes: stream=" +
+                             std::to_string(streamIndex) +
+                             ", gop=" + std::to_string(estimatedGop));
+                }
+            }
+            ++videoOrdinal;
+        }
+    }
 
     avformat_close_input(&formatCtx);
     return result;

@@ -137,6 +137,7 @@ private:
     bool useFirstClipResolution_ = true;    ///< Unified 模式：使用首个 clip 分辨率
     int customWidth_ = 1920;                ///< Unified 模式：自定义宽度
     int customHeight_ = 1080;               ///< Unified 模式：自定义高度
+    int customGopSize_ = 250;                ///< Unified 模式：自定义 GOP（帧）
     bool enableHardwareAccel_ = true;       ///< 硬件加速开关
 
     // —— 预览状态 ——

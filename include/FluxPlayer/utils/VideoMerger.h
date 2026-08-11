@@ -51,7 +51,7 @@ struct MergeClip {
 };
 
 /**
- * @brief 合并选项：分辨率策略与硬件加速配置
+ * @brief 合并选项：分辨率、GOP 策略与硬件加速配置
  */
 struct MergeOptions {
     /// 分辨率策略
@@ -62,10 +62,11 @@ struct MergeOptions {
 
     ResolutionMode resolutionMode = ResolutionMode::Unified;
 
-    /// Unified 模式：目标分辨率来源
-    bool useFirstClipResolution = true;  ///< true=使用首个 clip 分辨率（默认）
+    /// Unified 模式：目标视频参数来源
+    bool useFirstClipResolution = true;  ///< true=同时使用首个 clip 的分辨率与 GOP（默认）
     int customWidth = 1920;              ///< false 时的自定义宽度
     int customHeight = 1080;             ///< false 时的自定义高度
+    int customGopSize = 250;              ///< false 时的自定义 GOP，单位为帧
 
     /// 硬件加速开关（默认开启，失败自动回退软件）
     bool enableHardwareAccel = true;

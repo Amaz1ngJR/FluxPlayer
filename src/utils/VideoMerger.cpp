@@ -67,6 +67,138 @@ constexpr int    kAacBitRate     = 128000;
 constexpr int    kAudioFrameSize = 1024;   ///< AAC 默认每帧采样数（编码器未给出时的回退值）
 /// 转码目标视频码率回退（编码器主要由 CRF 控制质量，bit_rate 仅作上限提示）
 constexpr int    kVideoBitRate   = 4000000;
+/// x264 默认关键帧间隔也是 250 帧；源文件无法可靠探测 GOP 时使用该值，避免退回旧的 12 帧短 GOP。
+constexpr int    kDefaultGopSize = 250;
+constexpr int    kMinGopSize     = 1;
+constexpr int    kMaxGopSize     = 1000;
+
+/// 对 UI、自定义调用方和探测结果做统一保护，防止异常 GOP 让硬件编码器初始化失败。
+int normalizeGopSize(int gopSize) {
+    if (gopSize <= 0) return kDefaultGopSize;
+    return std::clamp(gopSize, kMinGopSize, kMaxGopSize);
+}
+
+/**
+ * 跨 FFmpeg 版本读取流索引条目。
+ * macOS 使用的 FFmpeg 4.4 仍公开 AVStream 字段；Windows FFmpeg 7.x 必须通过
+ * avformat_index_get_*() 访问。版本差异集中在这里，后续探测逻辑保持一致。
+ */
+int streamIndexEntryCount(const AVStream* stream) {
+    if (!stream) return 0;
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
+    return avformat_index_get_entries_count(stream);
+#else
+    return stream->nb_index_entries;
+#endif
+}
+
+const AVIndexEntry* streamIndexEntryAt(AVStream* stream, int index) {
+    if (!stream || index < 0) return nullptr;
+#if LIBAVFORMAT_VERSION_MAJOR >= 59
+    return avformat_index_get_entry(stream, index);
+#else
+    if (index >= stream->nb_index_entries) return nullptr;
+    return &stream->index_entries[index];
+#endif
+}
+
+/**
+ * 优先从容器索引中的关键帧时间戳估算固定 GOP 帧数。
+ * 最多采样四个间隔，既能平滑轻微的可变 GOP，又不会把探测成本放大到整个文件。
+ */
+int estimateGopFromIndex(AVStream* stream, double fps) {
+    if (!stream || fps <= 0.0) return 0;
+
+    constexpr int kMaxIntervals = 4;
+    int intervalCount = 0;
+    int64_t totalFrameInterval = 0;
+    int64_t lastKeyframeTimestamp = AV_NOPTS_VALUE;
+    const int entryCount = streamIndexEntryCount(stream);
+
+    for (int i = 0; i < entryCount && intervalCount < kMaxIntervals; ++i) {
+        const AVIndexEntry* entry = streamIndexEntryAt(stream, i);
+        if (!entry || !(entry->flags & AVINDEX_KEYFRAME)) continue;
+
+        if (lastKeyframeTimestamp != AV_NOPTS_VALUE &&
+            entry->timestamp > lastKeyframeTimestamp) {
+            const double seconds =
+                (entry->timestamp - lastKeyframeTimestamp) * av_q2d(stream->time_base);
+            const int frames = static_cast<int>(seconds * fps + 0.5);
+            if (frames >= kMinGopSize && frames <= kMaxGopSize) {
+                totalFrameInterval += frames;
+                ++intervalCount;
+            }
+        }
+        lastKeyframeTimestamp = entry->timestamp;
+    }
+
+    return intervalCount > 0
+        ? static_cast<int>(totalFrameInterval / intervalCount)
+        : 0;
+}
+
+/**
+ * 索引没有足够关键帧标记时，从实际压缩包的 AV_PKT_FLAG_KEY 回退估算 GOP。
+ * probeClip() 使用的是独立探测上下文，读取后马上关闭，因此 seek/扫描不会移动播放或
+ * 转码线程的 demux 位置。包数上限用于避免损坏文件或无关键帧文件长期阻塞合并准备。
+ */
+int estimateGopFromPackets(AVFormatContext* formatCtx, int streamIndex, double fps) {
+    if (!formatCtx || streamIndex < 0 ||
+        streamIndex >= static_cast<int>(formatCtx->nb_streams) || fps <= 0.0) {
+        return 0;
+    }
+
+    AVStream* stream = formatCtx->streams[streamIndex];
+    if (!stream) return 0;
+
+    if (av_seek_frame(formatCtx, streamIndex, 0, AVSEEK_FLAG_BACKWARD) >= 0) {
+        avformat_flush(formatCtx);
+    }
+
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) return 0;
+
+    constexpr int kMaxIntervals = 4;
+    constexpr int kMaxVideoPackets = 5000;
+    constexpr int kMaxTotalPackets = 25000;
+    int videoPacketCount = 0;
+    int totalPacketCount = 0;
+    int intervalCount = 0;
+    int64_t totalFrameInterval = 0;
+    int64_t lastKeyframeTimestamp = AV_NOPTS_VALUE;
+
+    while (intervalCount < kMaxIntervals &&
+           videoPacketCount < kMaxVideoPackets &&
+           totalPacketCount < kMaxTotalPackets &&
+           av_read_frame(formatCtx, packet) >= 0) {
+        ++totalPacketCount;
+        if (packet->stream_index == streamIndex) {
+            ++videoPacketCount;
+            if (packet->flags & AV_PKT_FLAG_KEY) {
+                const int64_t timestamp = packet->pts != AV_NOPTS_VALUE
+                    ? packet->pts : packet->dts;
+                if (timestamp != AV_NOPTS_VALUE &&
+                    lastKeyframeTimestamp != AV_NOPTS_VALUE &&
+                    timestamp > lastKeyframeTimestamp) {
+                    const double seconds =
+                        (timestamp - lastKeyframeTimestamp) * av_q2d(stream->time_base);
+                    const int frames = static_cast<int>(seconds * fps + 0.5);
+                    if (frames >= kMinGopSize && frames <= kMaxGopSize) {
+                        totalFrameInterval += frames;
+                        ++intervalCount;
+                    }
+                }
+                if (timestamp != AV_NOPTS_VALUE) lastKeyframeTimestamp = timestamp;
+            }
+        }
+        av_packet_unref(packet);
+    }
+
+    av_packet_free(&packet);
+    return intervalCount > 0
+        ? static_cast<int>(totalFrameInterval / intervalCount)
+        : 0;
+}
 
 /// 单个片段的探测信息（含截取范围与校验后时长）
 struct ClipInfo {
@@ -79,6 +211,7 @@ struct ClipInfo {
     int       height = 0;
     int       pixFmt = -1;
     AVRational frameRate{25, 1};
+    int       gopSize = 0;          ///< 关键帧平均间隔（帧）；0 表示容器中无法可靠探测
     // 音频
     int       aIdx       = -1;
     AVCodecID aCodec     = AV_CODEC_ID_NONE;
@@ -129,6 +262,7 @@ ClipInfo probeClip(const MergeClip& clip) {
         AVRational fr = st->avg_frame_rate.num > 0 ? st->avg_frame_rate
                        : (st->r_frame_rate.num > 0 ? st->r_frame_rate : AVRational{25, 1});
         info.frameRate = fr;
+        info.gopSize = estimateGopFromIndex(st, av_q2d(fr));
     }
     if (info.aIdx >= 0) {
         AVStream* st = fmt->streams[info.aIdx];
@@ -140,6 +274,18 @@ ClipInfo probeClip(const MergeClip& clip) {
 
     if (fmt->duration > 0) {
         info.sourceDuration = (double)fmt->duration / AV_TIME_BASE;
+    }
+
+    // 某些 MP4 索引只标记首个关键帧，索引法无法形成间隔；此时扫描少量实际视频包。
+    if (info.vIdx >= 0 && info.gopSize <= 0) {
+        info.gopSize = estimateGopFromPackets(fmt, info.vIdx, av_q2d(info.frameRate));
+    }
+    if (info.vIdx >= 0) {
+        LOG_INFO("VideoMerger: source parameters: " +
+                 std::to_string(info.width) + "x" + std::to_string(info.height) +
+                 ", fps=" + std::to_string(av_q2d(info.frameRate)) +
+                 ", gop=" + std::to_string(normalizeGopSize(info.gopSize)) +
+                 (info.gopSize > 0 ? " (detected)" : " (fallback)"));
     }
     avformat_close_input(&fmt);
 
@@ -189,6 +335,19 @@ bool canStreamCopy(const std::vector<ClipInfo>& infos) {
         }
     }
     return true;
+}
+
+/// Unified 模式只有在无需改变分辨率且各片段 GOP 已一致时才允许流拷贝。
+/// 自定义 GOP/分辨率必须重新编码，否则界面设置只会被原压缩码流静默忽略。
+bool optionsRequireTranscode(const std::vector<ClipInfo>& infos, const MergeOptions& options) {
+    if (options.resolutionMode != MergeOptions::ResolutionMode::Unified) return false;
+    if (!options.useFirstClipResolution) return true;
+    if (infos.empty()) return false;
+
+    const int firstGop = normalizeGopSize(infos.front().gopSize);
+    return std::any_of(infos.begin() + 1, infos.end(), [firstGop](const ClipInfo& info) {
+        return normalizeGopSize(info.gopSize) != firstGop;
+    });
 }
 
 } // anonymous namespace
@@ -424,16 +583,20 @@ struct TranscodeCtx {
     bool keepAudio = false;
     int targetSampleRate = 44100;
     int targetChannels   = 2;
+    AVRational targetFrameRate{25, 1}; ///< 当前片段源帧率；仅作编码器提示，输出 PTS 仍来自真实时间戳
+    int targetGopSize = kDefaultGopSize; ///< 当前编码阶段使用的关键帧间隔（帧）
 
     // ── 硬件加速相关 ──
     std::unique_ptr<HWAccelDevice> hwDevice;  ///< 硬件设备上下文（解码+编码+缩放共享）
     AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE; ///< 硬件像素格式（D3D11: d3d11，VideoToolbox: videotoolbox）
     bool useHardware = false;                 ///< 本次是否走硬件路径
 
-    // KeepOriginal 模式：分辨率分段管理
+    // KeepOriginal 模式：分辨率、帧率提示和 GOP 的编码阶段管理
     struct ResolutionPhase {
         int width = 0;
         int height = 0;
+        AVRational frameRate{25, 1};
+        int gopSize = kDefaultGopSize;
         AVBufferRef* framesCtx = nullptr;  ///< 该分辨率的 hw_frames_ctx（macOS pool=0，需手搓帧）
     };
     std::vector<ResolutionPhase> resPhases;  ///< 各分辨率阶段（KeepOriginal 模式填充）
@@ -519,7 +682,7 @@ bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameR
     tc.vEnc->time_base = AVRational{1, 90000};
     tc.vEnc->framerate = frameRate;
     tc.vEnc->bit_rate = kVideoBitRate;
-    tc.vEnc->gop_size = 12;
+    tc.vEnc->gop_size = normalizeGopSize(tc.targetGopSize);
 
     // 硬件编码器和下面的硬件帧池必须引用同一个设备上下文。这样解码输出、GPU
     // 缩放输出和编码输入都属于同一块显存，D3D11/VideoToolbox 才能保持零拷贝。
@@ -605,6 +768,8 @@ bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameR
 
     LOG_INFO(std::string("VideoMerger: hardware video encoder opened: ") + encName +
              " " + std::to_string(w) + "x" + std::to_string(h) +
+             ", fps=" + std::to_string(av_q2d(frameRate)) +
+             ", gop=" + std::to_string(tc.vEnc->gop_size) +
              " (extradata=" + std::to_string(tc.vEnc->extradata_size) + " bytes)");
     return true;
 }
@@ -885,19 +1050,21 @@ AVFrame* scaleFrameHardware(TranscodeCtx& tc, AVFrame* srcFrame, int dstW, int d
 }
 
 // ─────────────────────────────────────────────
-// KeepOriginal 模式：分辨率分段管理
+// KeepOriginal 模式：编码参数分段管理
 // ─────────────────────────────────────────────
 
-/// 检测并切换编码器分辨率（KeepOriginal 模式）
+/// 检测并切换编码器分辨率、源帧率提示和 GOP（KeepOriginal 模式）
 /// 返回 true 表示发生了切换（编码器已重建），false 表示无需切换
-bool switchEncoderResolutionIfNeeded(TranscodeCtx& tc, int newW, int newH,
-                                      AVRational frameRate, AVPacket* pkt, std::string& err) {
-    // 首次编码：记录初始分辨率
+bool switchEncoderParametersIfNeeded(TranscodeCtx& tc, int newW, int newH,
+                                     AVPacket* pkt, std::string& err) {
+    // 首次编码：编码器已经按首个片段建好，这里只登记供后续片段比较的参数快照。
     if (tc.currentPhaseIdx < 0) {
         tc.currentPhaseIdx = 0;
         TranscodeCtx::ResolutionPhase phase;
         phase.width = newW;
         phase.height = newH;
+        phase.frameRate = tc.targetFrameRate;
+        phase.gopSize = normalizeGopSize(tc.targetGopSize);
 #if defined(__APPLE__)
         // macOS 需要预建 frames_ctx（pool=0）
         if (tc.useHardware && tc.hwDevice) {
@@ -921,15 +1088,23 @@ bool switchEncoderResolutionIfNeeded(TranscodeCtx& tc, int newW, int newH,
         return false;
     }
 
-    // 检查当前分辨率是否匹配
+    // GOP 和 framerate 都是编码器初始化参数，不能在 avcodec_open2() 后直接改写。
+    // 任一参数发生变化时先 flush，再按当前源片段的参数重建编码器。
     const auto& curPhase = tc.resPhases[tc.currentPhaseIdx];
-    if (curPhase.width == newW && curPhase.height == newH) {
+    const int newGopSize = normalizeGopSize(tc.targetGopSize);
+    const bool sameFrameRate = av_cmp_q(curPhase.frameRate, tc.targetFrameRate) == 0;
+    if (curPhase.width == newW && curPhase.height == newH &&
+        curPhase.gopSize == newGopSize && sameFrameRate) {
         return false;  // 无需切换
     }
 
-    LOG_INFO("VideoMerger: resolution switch detected: " +
+    LOG_INFO("VideoMerger: encoder parameter switch: " +
              std::to_string(curPhase.width) + "x" + std::to_string(curPhase.height) + " -> " +
-             std::to_string(newW) + "x" + std::to_string(newH));
+             std::to_string(newW) + "x" + std::to_string(newH) +
+             ", fps=" + std::to_string(av_q2d(curPhase.frameRate)) + " -> " +
+             std::to_string(av_q2d(tc.targetFrameRate)) +
+             ", gop=" + std::to_string(curPhase.gopSize) + " -> " +
+             std::to_string(newGopSize));
 
     // flush 当前编码器
     encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, nullptr, pkt);
@@ -940,9 +1115,9 @@ bool switchEncoderResolutionIfNeeded(TranscodeCtx& tc, int newW, int newH,
     // 重建编码器（阶段二不设 GLOBAL_HEADER，让 SPS/PPS in-band）
     bool success = false;
     if (tc.useHardware) {
-        success = setupHardwareVideoEncoder(tc, newW, newH, frameRate, false, err);
+        success = setupHardwareVideoEncoder(tc, newW, newH, tc.targetFrameRate, false, err);
     } else {
-        success = setupVideoEncoder(tc, newW, newH, frameRate, err);
+        success = setupVideoEncoder(tc, newW, newH, tc.targetFrameRate, err);
     }
 
     if (!success) {
@@ -954,6 +1129,8 @@ bool switchEncoderResolutionIfNeeded(TranscodeCtx& tc, int newW, int newH,
     TranscodeCtx::ResolutionPhase phase;
     phase.width = newW;
     phase.height = newH;
+    phase.frameRate = tc.targetFrameRate;
+    phase.gopSize = newGopSize;
 #if defined(__APPLE__)
     if (tc.useHardware && tc.hwDevice) {
         AVBufferRef* framesCtx = av_hwframe_ctx_alloc(tc.hwDevice->avDeviceContext());
@@ -976,6 +1153,8 @@ bool switchEncoderResolutionIfNeeded(TranscodeCtx& tc, int newW, int newH,
 
     LOG_INFO("VideoMerger: encoder rebuilt at " +
              std::to_string(newW) + "x" + std::to_string(newH) +
+             ", fps=" + std::to_string(av_q2d(tc.targetFrameRate)) +
+             ", gop=" + std::to_string(newGopSize) +
              " (phase " + std::to_string(tc.currentPhaseIdx) +
              ", extradata=" + std::to_string(tc.vEnc->extradata_size) + " bytes)");
     return true;
@@ -1055,18 +1234,16 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
     int srcW = srcFrame->width;
     int srcH = srcFrame->height;
 
-    // KeepOriginal 模式：检测分辨率切换
+    // KeepOriginal 模式：检测分辨率、源帧率提示或 GOP 是否需要切换。
     if (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal) {
         if (tc.useHardware) {
             // 硬件路径：检测并重建编码器
-            AVRational frameRate = tc.vEnc ? tc.vEnc->framerate : AVRational{25, 1};
-            if (switchEncoderResolutionIfNeeded(tc, srcW, srcH, frameRate, pkt, err)) {
+            if (switchEncoderParametersIfNeeded(tc, srcW, srcH, pkt, err)) {
                 // 编码器已重建，继续使用新编码器
             }
         } else {
-            // 软件路径：KeepOriginal 同样支持分辨率切换
-            AVRational frameRate = tc.vEnc ? tc.vEnc->framerate : AVRational{25, 1};
-            switchEncoderResolutionIfNeeded(tc, srcW, srcH, frameRate, pkt, err);
+            // 软件路径：KeepOriginal 同样按当前片段参数切换编码器。
+            switchEncoderParametersIfNeeded(tc, srcW, srcH, pkt, err);
         }
         // KeepOriginal 不缩放，直接返回源帧（或克隆）
         if (srcFrame->hw_frames_ctx) {
@@ -1156,7 +1333,7 @@ bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std
     tc.vEnc->time_base = AVRational{1, 90000};
     tc.vEnc->framerate = frameRate;
     tc.vEnc->bit_rate = kVideoBitRate;
-    tc.vEnc->gop_size = 12;
+    tc.vEnc->gop_size = normalizeGopSize(tc.targetGopSize);
     av_opt_set(tc.vEnc->priv_data, "crf", "23", 0);
     av_opt_set(tc.vEnc->priv_data, "preset", "medium", 0);
     if (tc.out->oformat->flags & AVFMT_GLOBALHEADER)
@@ -1168,7 +1345,9 @@ bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std
     st->time_base = tc.vEnc->time_base;
     tc.vStreamIdx = st->index;
     LOG_INFO(std::string("VideoMerger: software video encoder opened: ") + codec->name +
-             " " + std::to_string(w) + "x" + std::to_string(h));
+             " " + std::to_string(w) + "x" + std::to_string(h) +
+             ", fps=" + std::to_string(av_q2d(frameRate)) +
+             ", gop=" + std::to_string(tc.vEnc->gop_size));
     return true;
 }
 
@@ -1588,6 +1767,23 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
         }
     }
     AVRational frameRate = infos.front().frameRate;
+    if (frameRate.num <= 0 || frameRate.den <= 0) frameRate = AVRational{25, 1};
+    tc.targetFrameRate = frameRate;
+
+    // KeepOriginal 转码时从每个源片段动态更新；Unified 则在整个输出中固定为
+    // 首片段探测值或用户指定值。探测失败统一回退 250 帧，不再生成 12 帧短 GOP。
+    if (options.resolutionMode == MergeOptions::ResolutionMode::Unified &&
+        !options.useFirstClipResolution) {
+        tc.targetGopSize = normalizeGopSize(options.customGopSize);
+    } else {
+        tc.targetGopSize = normalizeGopSize(infos.front().gopSize);
+    }
+    LOG_INFO("VideoMerger: output video policy: resolution=" +
+             std::to_string(targetW) + "x" + std::to_string(targetH) +
+             ", fps=source timestamps" +
+             ", gop=" + std::to_string(tc.targetGopSize) +
+             (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal
+                  ? " (per source clip)" : " (unified)"));
 
     // 初始化硬件设备（如果启用）
     if (options.enableHardwareAccel) {
@@ -1711,6 +1907,14 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
     double timelineBaseSec = 0.0;
     for (const auto& info : infos) {
         if (cancelFlag.load()) { cleanup(); return false; }
+
+        if (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal) {
+            // KeepOriginal 的含义不仅是尺寸不缩放：转码不可避免时，也应在进入每个
+            // 片段前恢复它自己的 GOP 和帧率提示。真实 FPS 仍由下方逐帧 PTS 保留。
+            tc.targetGopSize = normalizeGopSize(info.gopSize);
+            tc.targetFrameRate = (info.frameRate.num > 0 && info.frameRate.den > 0)
+                ? info.frameRate : AVRational{25, 1};
+        }
         double consumed = 0.0;
         if (!transcodeClip(info, tc, targetW, targetH, options, cancelFlag, processed, timelineBaseSec, consumed, err)) {
             cleanup(); return false;
@@ -1759,8 +1963,8 @@ void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath
     }
     totalDuration_.store(total);
 
-    // —— 智能决策 ——（任一片段有截取 → canStreamCopy 内部已拒绝，走精确转码）
-    bool streamCopy = canStreamCopy(infos);
+    // —— 智能决策 ——（任一片段有截取，或 Unified 要改变分辨率/GOP，均走精确转码）
+    bool streamCopy = canStreamCopy(infos) && !optionsRequireTranscode(infos, options);
     bool keepAudio = true;
     for (const auto& info : infos) {
         if (info.aIdx < 0) { keepAudio = false; break; }  // 任一片段无音频 → 转码时丢音轨
