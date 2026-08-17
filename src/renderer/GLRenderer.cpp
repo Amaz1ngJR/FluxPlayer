@@ -10,6 +10,7 @@
 
 #include "FluxPlayer/renderer/GLRenderer.h"
 #include "FluxPlayer/utils/Logger.h"
+#include <algorithm>
 #include <glad/glad.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -350,6 +351,7 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     m_shader->setInt("isNV12", useNV12Shader ? 1 : 0);
     m_shader->setInt("colorSpace", colorSpace);
     m_shader->setInt("fullRange", fullRange);
+    m_shader->setFloat("brightness", m_brightness);
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);  // 绘制 6 个顶点（2 个三角形）
     glBindVertexArray(0);
@@ -363,6 +365,11 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     m_lastFrameWasHardware = false;
 }
 
+void GLRenderer::setBrightness(float brightness) {
+    // 对外接口执行边界收敛，防止异常 UI 值导致片段着色器溢出或全黑。
+    m_brightness = std::clamp(brightness, 0.25f, 2.0f);
+}
+
 void GLRenderer::drawHardwareBinding(const HardwareTextureBinding& binding,
                                      int colorSpace,
                                      int fullRange) {
@@ -370,6 +377,7 @@ void GLRenderer::drawHardwareBinding(const HardwareTextureBinding& binding,
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(binding.textureTarget, binding.textureRGBA);
         m_rgbaShader->use();
+        m_rgbaShader->setFloat("brightness", m_brightness);
         glBindVertexArray(m_VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
@@ -386,6 +394,7 @@ void GLRenderer::drawHardwareBinding(const HardwareTextureBinding& binding,
     m_hardwareYuvShader->use();
     m_hardwareYuvShader->setInt("colorSpace", colorSpace);
     m_hardwareYuvShader->setInt("fullRange", fullRange);
+    m_hardwareYuvShader->setFloat("brightness", m_brightness);
     m_hardwareYuvShader->setVec2(
         "textureSizeY",
         static_cast<float>(binding.width),
@@ -427,6 +436,7 @@ void GLRenderer::renderCachedFrame() {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
         m_rgbaShader->use();
+        m_rgbaShader->setFloat("brightness", m_brightness);
         glBindVertexArray(m_VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         glBindVertexArray(0);
@@ -445,6 +455,7 @@ void GLRenderer::renderCachedFrame() {
     m_shader->setInt("isNV12", m_lastIsNV12Shader ? 1 : 0);
     m_shader->setInt("colorSpace", m_lastColorSpace);
     m_shader->setInt("fullRange", m_lastFullRange);
+    m_shader->setFloat("brightness", m_brightness);
     m_shader->setFloat("alpha", 1.0f);  // 正常渲染：完全不透明
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -495,6 +506,7 @@ void GLRenderer::renderCachedFrameWithTransform(float scale, float offsetX, floa
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
         m_rgbaShader->use();
+        m_rgbaShader->setFloat("brightness", m_brightness);
         m_rgbaShader->setFloat("alpha", alpha);  // 设置透明度
         glBindVertexArray(m_VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -518,6 +530,7 @@ void GLRenderer::renderCachedFrameWithTransform(float scale, float offsetX, floa
     m_shader->setInt("isNV12", m_lastIsNV12Shader ? 1 : 0);
     m_shader->setInt("colorSpace", m_lastColorSpace);
     m_shader->setInt("fullRange", m_lastFullRange);
+    m_shader->setFloat("brightness", m_brightness);
     m_shader->setFloat("alpha", alpha);  // 设置透明度
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -573,6 +586,7 @@ void GLRenderer::renderStaticImage(const uint8_t* rgbaData, int width, int heigh
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_textureRGBA);
     m_rgbaShader->use();
+    m_rgbaShader->setFloat("brightness", m_brightness);
     glBindVertexArray(m_VAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     glBindVertexArray(0);

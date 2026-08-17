@@ -5,6 +5,8 @@
 #include <vector>
 #include <functional>
 #include <memory>
+#include <atomic>
+#include <mutex>
 
 namespace FluxPlayer {
 
@@ -127,7 +129,7 @@ private:
      */
     void renderSpeedButton(float btnH);
     void renderQualityButton(float btnH);   ///< 画质切换按钮（仅网页视频时显示）
-    void renderDownloadButton(float btnH);  ///< 下载按钮及下载中 UI（仅网页视频时显示）
+    void renderDownloadButton(float btnH);  ///< 所有网络来源的下载/实时保存入口
 
     /// 绘制下载进度条 + 暂停/取消图标按钮（Download 按钮右侧）
     void renderDownloadProgress(float btnH, float btnMinX, float btnMinY,
@@ -198,6 +200,7 @@ private:
     bool showSpeedMenu_;        // 速度菜单显示状态
     float speedMenuPosX_;       // 速度菜单X坐标
     float speedMenuPosY_;       // 速度菜单Y坐标
+    bool showBrightnessSlider_ = false; ///< 点击亮度按钮后显示垂直滑条
 
     // ==================== 画质选择 ====================
     bool showQualityMenu_ = false;
@@ -205,15 +208,26 @@ private:
     float qualityMenuPosY_ = 0.0f;
     std::vector<QualityItem> qualities_;   ///< 当前可用画质列表
     std::string currentQualityLabel_;      ///< 当前画质标签（空则不显示按钮）
-    std::string currentPageUrl_;           ///< 当前播放的网页 URL（用于切换画质和下载）
+    std::string currentPageUrl_;           ///< 网页 URL，仅供画质切换
+    std::string currentSourceUrl_;         ///< 用户打开的原始网络来源，供通用下载使用
 
     // ==================== 下载 ====================
+    /**
+     * 下载回调运行在 Downloader 工作线程。原子成员发布简单状态，字符串及模式字段
+     * 统一由 downloadMutex_ 保护；渲染线程每帧只获取一次快照，持锁期间不调用 ImGui。
+     */
     std::atomic<bool>  isDownloading_{false};
-    std::atomic<float> downloadProgress_{0.0f};  ///< 原子变量，下载线程写，主线程读
-    mutable std::mutex downloadMutex_;            ///< 保护 speed/eta/fileSize string
+    std::atomic<float> downloadProgress_{0.0f};
+    mutable std::mutex downloadMutex_;
+    int downloadMode_ = 0;                 ///< 0=探测中，1=VOD，2=Live（隔离 Downloader 类型）
+    int downloadState_ = 0;                ///< 对应 DownloadState，用于 UI 文案
     std::string downloadSpeed_;
     std::string downloadEta_;
-    std::string downloadFileSize_;                ///< 文件总大小（如 "123.45MiB"）
+    std::string downloadFileSize_;
+    std::string downloadSavedTime_;
+    std::string downloadDecoder_ = "BYPASS";
+    std::string downloadEncoder_ = "BYPASS";
+    std::string downloadZeroCopy_ = "N/A";
     std::unique_ptr<Downloader> downloader_;
 
     // 鼠标活动追踪（自动显示/隐藏）

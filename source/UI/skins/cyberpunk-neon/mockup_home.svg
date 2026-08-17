@@ -150,17 +150,9 @@
 
   <!-- Settings gear: below URL input row, centered, 38×38 -->
   <rect x="406" y="540" width="38" height="38" rx="3" fill="#00E8FF" fill-opacity="0.06" stroke="#00E8FF" stroke-width="1.5"/>
-  <g transform="translate(425, 559)" fill="#00E8FF" fill-opacity="0.85">
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(45)"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(90)"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(135)"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(180)"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(225)"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(270)"/>
-    <rect x="-2.5" y="-11.5" width="5" height="6" rx="0.5" transform="rotate(315)"/>
-    <circle r="6.5"/><circle r="3.2" fill="#050A1A"/>
-  </g>
+  <path d="M421 545H429L430.2 549.2L433 550.8L437.1 549.5L441 556.5L438 559V562L441 564.5L437.1 571.5L433 570.2L430.2 571.8L429 576H421L419.8 571.8L417 570.2L412.9 571.5L409 564.5L412 562V559L409 556.5L412.9 549.5L417 550.8L419.8 549.2Z" fill="#00E8FF" fill-opacity="0.85"/>
+  <circle cx="425" cy="560.5" r="8" fill="#050A1A"/>
+  <circle cx="425" cy="560.5" r="3.4" fill="#00E8FF" fill-opacity="0.85"/>
 
   <!-- ── Hardware Info Section: below settings button ── -->
   <!-- Section divider -->

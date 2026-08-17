@@ -14,6 +14,8 @@ uniform vec2 textureSizeUV;
 uniform int colorSpace;
 // 量化范围：0 = TV/limited，1 = PC/full
 uniform int fullRange;
+// 显示亮度倍率；仅影响最终 RGB，不触发硬件帧回读。
+uniform float brightness = 1.0;
 
 void main()
 {
@@ -42,5 +44,5 @@ void main()
         b = y + 1.772 * uv.x;
     }
 
-    FragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+    FragColor = vec4(clamp(vec3(r, g, b) * brightness, 0.0, 1.0), 1.0);
 }

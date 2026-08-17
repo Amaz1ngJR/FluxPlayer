@@ -20,6 +20,7 @@
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <filesystem>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -30,6 +31,8 @@ extern "C" {
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace FluxPlayer {
@@ -144,7 +147,7 @@ static std::string formatEta(double secs) {
     return buf;
 }
 
-void Downloader::start(const std::string& pageUrl,
+void Downloader::start(const std::string& sourceUrl,
                        const std::string& outputDir,
                        const std::string& formatId,
                        ProgressCallback onProgress,
@@ -154,7 +157,7 @@ void Downloader::start(const std::string& pageUrl,
     paused_.store(false);
     running_.store(true);
     thread_ = std::thread(&Downloader::downloadLoop, this,
-                          pageUrl, outputDir, formatId,
+                          sourceUrl, outputDir, formatId,
                           std::move(onProgress), std::move(onFinish));
 }
 
@@ -175,11 +178,24 @@ void Downloader::cancel() {
 }
 
 // ── 辅助：提取流 URL，按目标高度选择最佳画质 ──
-static bool extractStream(const std::string& pageUrl,
+static bool extractStream(const std::string& sourceUrl,
                            const std::string& heightStr,
                            ExtractedStream& out) {
+    // 已确认的媒体直链不依赖 yt-dlp。duration/filesize 在打开 FFmpeg 输入后补齐；
+    // 标题只用于生成文件名，因此移除 query/fragment，避免把鉴权 token 写入磁盘。
+    if (!StreamExtractor::needsExtraction(sourceUrl)) {
+        out = ExtractedStream{};
+        out.videoUrl = sourceUrl;
+        out.platform = "Direct";
+        std::string clean = sourceUrl.substr(0, sourceUrl.find_first_of("?#"));
+        size_t slash = clean.find_last_of("/\\");
+        out.title = slash == std::string::npos ? clean : clean.substr(slash + 1);
+        if (out.title.empty()) out.title = "stream";
+        return true;
+    }
+
     std::string error;
-    if (!StreamExtractor::extract(pageUrl, "", out, error)) {
+    if (!StreamExtractor::extract(sourceUrl, "", out, error)) {
         LOG_ERROR("Downloader: 提取流失败: " + error);
         return false;
     }
@@ -199,7 +215,7 @@ static bool extractStream(const std::string& pageUrl,
     if (bestFmtId.empty() || bestFmtId == out.selectedFormatId) return true;
 
     ExtractedStream refined;
-    if (StreamExtractor::extract(pageUrl, bestFmtId, refined, error)) {
+    if (StreamExtractor::extract(sourceUrl, bestFmtId, refined, error)) {
         out = refined;
     } else {
         LOG_WARN("Downloader: 指定画质提取失败，使用默认画质: " + error);
@@ -231,14 +247,17 @@ static bool removePath(const std::string& utf8) {
 #endif
 }
 
-// MOVEFILE_REPLACE_EXISTING 让 Windows 行为对齐 POSIX rename（覆盖目标）
-static bool renamePath(const std::string& fromUtf8, const std::string& toUtf8) {
+// 最终文件禁止覆盖。Windows 不传 MOVEFILE_REPLACE_EXISTING；POSIX 使用 link+unlink，
+// 让目标已存在时原子失败，避免“探测文件名”和最终提交之间的竞态覆盖用户文件。
+static bool renamePathNoReplace(const std::string& fromUtf8, const std::string& toUtf8) {
 #ifdef _WIN32
-    return MoveFileExW(utf8ToWide(fromUtf8).c_str(),
-                       utf8ToWide(toUtf8).c_str(),
-                       MOVEFILE_REPLACE_EXISTING) != 0;
+    return MoveFileExW(utf8ToWide(fromUtf8).c_str(), utf8ToWide(toUtf8).c_str(), 0) != 0;
 #else
-    return std::rename(fromUtf8.c_str(), toUtf8.c_str()) == 0;
+    if (::link(fromUtf8.c_str(), toUtf8.c_str()) != 0) return false;
+    if (::unlink(fromUtf8.c_str()) == 0) return true;
+    // 极少数 unlink 失败场景回滚新硬链接，保证调用方仍可通过 .part 找到数据。
+    ::unlink(toUtf8.c_str());
+    return false;
 #endif
 }
 
@@ -446,9 +465,10 @@ struct WriteContext {
 };
 
 // 写入循环：逐 packet 读取并写入，定期回调进度
-using ProgressCb = std::function<void(float, const std::string&, const std::string&, const std::string&)>;
+using ProgressCb = Downloader::ProgressCallback;
 
 static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
+                          DownloadMode mode,
                           DlInterruptCtx& intCtx,
                           std::atomic<bool>& running, std::atomic<bool>& cancelled,
                           std::atomic<bool>& paused, ProgressCb& onProgress) {
@@ -481,14 +501,18 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
 
     // ── 状态机内部动作：从 lastDts 处重开两路（成功返回 true）──
     auto reopenAll = [&]() -> bool {
-        wc.videoCtx = reopenAndSeek(info.videoUrl, info.headers, lastVideoDtsUs, intCtx);
+        // Live 恢复必须从服务端当前点继续；向滑动窗口 seek 旧 DTS 既可能失败，也可能
+        // 造成重复内容。只有有自然完成点的 VOD 才执行关键帧回退和重复包过滤。
+        const int64_t videoTarget = mode == DownloadMode::VodDownload ? lastVideoDtsUs : 0;
+        const int64_t audioTarget = mode == DownloadMode::VodDownload ? lastAudioDtsUs : 0;
+        wc.videoCtx = reopenAndSeek(info.videoUrl, info.headers, videoTarget, intCtx);
         if (!wc.videoCtx) return false;
         if (!singleStream && !info.audioUrl.empty()) {
-            wc.audioCtx = reopenAndSeek(info.audioUrl, info.headers, lastAudioDtsUs, intCtx);
+            wc.audioCtx = reopenAndSeek(info.audioUrl, info.headers, audioTarget, intCtx);
             if (!wc.audioCtx) { avformat_close_input(&wc.videoCtx); return false; }
         }
-        skipVideoUntilUs = lastVideoDtsUs;
-        skipAudioUntilUs = lastAudioDtsUs;
+        skipVideoUntilUs = videoTarget;
+        skipAudioUntilUs = audioTarget;
         return true;
     };
 
@@ -501,7 +525,13 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
             if (wc.videoCtx || wc.audioCtx) {
                 closeInputs();
                 LOG_INFO("Downloader: 已暂停，释放网络连接");
-                if (onProgress) onProgress(-1.0f, "已暂停", "--:--", "");
+                if (onProgress) {
+                    DownloadProgress progress;
+                    progress.mode = mode;
+                    progress.state = DownloadState::Paused;
+                    progress.speed = "已暂停";
+                    onProgress(progress);
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(kPausePollMs));
             continue;
@@ -515,7 +545,13 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
 
         // ── 态 3：连接未打开（刚暂停恢复 / 退避到期），重开 ──
         if (!wc.videoCtx) {
-            if (onProgress) onProgress(-1.0f, "重连中…", "--:--", "");
+            if (onProgress) {
+                DownloadProgress progress;
+                progress.mode = mode;
+                progress.state = DownloadState::Reconnecting;
+                progress.speed = "重连中…";
+                onProgress(progress);
+            }
             if (!reopenAll()) {
                 retryCount++;
                 int backoff = computeBackoffSecs(retryCount);
@@ -604,8 +640,17 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
                 firstProgress = false;
             }
 
-            onProgress(progress, formatBytes(static_cast<int64_t>(speed)) + "/s",
-                       formatEta(eta), formatBytes(bytesWritten));
+            DownloadProgress progressInfo;
+            progressInfo.mode = mode;
+            progressInfo.state = mode == DownloadMode::VodDownload ? DownloadState::Downloading : DownloadState::LiveSaving;
+            progressInfo.pipeline = DownloadPipeline::PacketRemux;
+            progressInfo.progress = progress;
+            progressInfo.speed = formatBytes(static_cast<int64_t>(speed)) + "/s";
+            progressInfo.eta = mode == DownloadMode::VodDownload ? formatEta(eta) : "";
+            progressInfo.fileSize = formatBytes(bytesWritten);
+            progressInfo.savedTime = mode == DownloadMode::LiveSave ? formatEta(elapsed) : "";
+            // 当前实现始终 packet remux，不产生像素帧；BYPASS/N/A 比误报硬件零拷贝更准确。
+            onProgress(progressInfo);
             lastProgressTime = now;
         }
     }
@@ -616,14 +661,14 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
     av_packet_free(&audioPkt);
 }
 
-void Downloader::downloadLoop(const std::string& pageUrl,
+void Downloader::downloadLoop(const std::string& sourceUrl,
                                const std::string& outputDir,
                                const std::string& formatId,
                                ProgressCallback onProgress,
                                FinishCallback   onFinish) {
     // ── 第一步：提取流 URL ──
     ExtractedStream info;
-    if (!extractStream(pageUrl, formatId, info)) {
+    if (!extractStream(sourceUrl, formatId, info)) {
         running_.store(false);
         if (onFinish) onFinish(false, "", "提取流失败");
         return;
@@ -641,8 +686,13 @@ void Downloader::downloadLoop(const std::string& pageUrl,
     // 规范化目录尾：去掉 outputDir 尾部的 / 或 \ 后再拼，避免 "dist//xxx" 在某些 Windows API 上失败
     std::string dir = outputDir;
     while (!dir.empty() && (dir.back() == '/' || dir.back() == '\\')) dir.pop_back();
-    const std::string finalPath = dir + "/" + sanitizeFilename(info.title)
-                                + (info.isDash ? ".mkv" : ".mp4");
+    const bool mayBeLive = info.isLive || info.duration <= 0.0;
+    const std::string extension = (info.isDash || mayBeLive) ? ".mkv" : ".mp4";
+    std::string finalPath = dir + "/" + sanitizeFilename(info.title) + extension;
+    // 不覆盖用户已有文件。先选定 final/part 配对名称，后续 rename 保持同一目标。
+    for (int suffix = 1; std::filesystem::exists(finalPath) || std::filesystem::exists(finalPath + kPartSuffix); ++suffix) {
+        finalPath = dir + "/" + sanitizeFilename(info.title) + " (" + std::to_string(suffix) + ")" + extension;
+    }
     const std::string partPath  = finalPath + kPartSuffix;
     // 防御：清理上次运行崩溃后残留的同名 .part（avio_open 在文件存在时会覆盖，
     // 但显式清理意图更明确，且能让"启动时清理"的语义可见）
@@ -668,6 +718,24 @@ void Downloader::downloadLoop(const std::string& pageUrl,
             if (onFinish) onFinish(false, "", "无法打开音频流");
             return;
         }
+    }
+
+    // FFmpeg 的容器 duration 比 URL/yt-dlp 缺省值更接近实际输入；仅在未明确直播时补齐。
+    if (!info.isLive && info.duration <= 0 && wc.videoCtx->duration != AV_NOPTS_VALUE && wc.videoCtx->duration > 0)
+        info.duration = static_cast<double>(wc.videoCtx->duration) / AV_TIME_BASE;
+
+    const DownloadMode mode = info.isLive ? DownloadMode::LiveSave
+        : (info.duration > 0 ? DownloadMode::VodDownload : DownloadMode::LiveSave);
+
+    // 直播停止后需要继续执行 trailer/rename，因此写循环只把 cancel 当作 I/O 中断信号。
+    // VOD 则在循环退出后由 mode 分支删除 .part。
+
+    if (onProgress) {
+        DownloadProgress initial;
+        initial.mode = mode;
+        initial.state = mode == DownloadMode::LiveSave ? DownloadState::LiveSaving : DownloadState::Downloading;
+        initial.pipeline = DownloadPipeline::PacketRemux;
+        onProgress(initial);
     }
 
     // ── 第三步：创建输出文件（.part）──
@@ -716,7 +784,7 @@ void Downloader::downloadLoop(const std::string& pageUrl,
            + " duration=" + std::to_string(info.duration));
 
     // ── 第四步：写入循环（含暂停关连接 / 网络失败退避重连 / seek 续流）──
-    runWriteLoop(wc, info, intCtx, running_, cancelled_, paused_, onProgress);
+    runWriteLoop(wc, info, mode, intCtx, running_, cancelled_, paused_, onProgress);
 
     av_write_trailer(wc.outCtx);
     if (wc.videoCtx) avformat_close_input(&wc.videoCtx);
@@ -725,23 +793,23 @@ void Downloader::downloadLoop(const std::string& pageUrl,
     avformat_free_context(wc.outCtx);
     running_.store(false);
 
-    if (cancelled_.load()) {
-        // PartFileGuard 析构时自动删除 .part，无需手动 remove
+    if (cancelled_.load() && mode == DownloadMode::VodDownload) {
+        // VOD 的 Cancel 明确表示放弃任务，PartFileGuard 负责删除临时文件。
         if (onFinish) onFinish(false, "", "已取消");
         return;
     }
 
-    // ── 第五步：成功，把 .part 重命名为最终文件 ──
-    // renamePath 在 Windows 用 MoveFileExW + MOVEFILE_REPLACE_EXISTING（自动覆盖），
-    // POSIX rename 本身就覆盖；不需要先删 finalPath
-    if (!renamePath(partPath, finalPath)) {
+    // Live 的 Stop 仍会设置 cancelled_ 来打断阻塞 I/O，但语义是封口并保留文件；
+    // 因此与正常 EOF 共用原子 rename，避免 UI 已提示保存而文件仍停留在 .part。
+    if (!renamePathNoReplace(partPath, finalPath)) {
         LOG_ERROR("Downloader: rename 失败 " + partPath + " -> " + finalPath);
         if (onFinish) onFinish(false, "", "重命名输出文件失败");
         return;
     }
     fileGuard.keep = true;  // rename 成功，guard 不再删除 .part（已不存在）
-    LOG_INFO("Downloader: 下载完成 -> " + finalPath);
-    if (onFinish) onFinish(true, finalPath, "");
+    const bool stoppedLive = cancelled_.load() && mode == DownloadMode::LiveSave;
+    LOG_INFO(std::string("Downloader: ") + (stoppedLive ? "直播保存已停止 -> " : "下载完成 -> ") + finalPath);
+    if (onFinish) onFinish(true, finalPath, stoppedLive ? "保存已停止，文件已保存" : "");
 }
 
 } // namespace FluxPlayer

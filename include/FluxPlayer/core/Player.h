@@ -198,8 +198,19 @@ public:
      */
     PlayerState getState() const;
 
-    /// 获取最近一次打开的网页 URL（用于画质切换和下载）
+    /// 获取最近一次打开的网页 URL（仅用于画质切换）
     const std::string& getLastPageUrl() const { return lastPageUrl_; }
+
+    /**
+     * @brief 获取当前媒体的原始输入来源。
+     *
+     * 返回用户传给 open() 的 URL，而不是 yt-dlp 临时地址或 DASH pipe；下载器据此
+     * 可在签名过期后重新提取。媒体关闭后返回空字符串。
+     */
+    const std::string& getCurrentSourceUrl() const { return currentSourceUrl_; }
+
+    /// 当前来源是否为网络协议 URL；本地文件和图片不显示 Download。
+    bool isCurrentSourceNetwork() const { return currentSourceIsNetwork_; }
 
     /// 获取最近一次提取的流信息（含画质列表、上传者等）
     const ExtractedStream& getLastExtractedInfo() const { return lastExtractedInfo_; }
@@ -253,6 +264,15 @@ public:
      * 获取当前音量
      */
     float getVolume() const { return volume_; }
+
+    /**
+     * @brief 设置显示亮度倍率。
+     * @param brightness 0.25~2.0，1.0 为原始亮度
+     *
+     * 只更新渲染器 shader uniform，不修改视频帧或解码器，因此不会破坏硬件零拷贝。
+     */
+    void setBrightness(float brightness);
+    float getBrightness() const { return brightness_.load(); }
 
     /**
      * 设置静音
@@ -500,6 +520,8 @@ private:
 
     // 媒体信息
     std::string filePath_;
+    std::string currentSourceUrl_;          ///< 当前用户输入的原始来源，不保存提取后的临时 URL
+    bool currentSourceIsNetwork_ = false;   ///< 与 currentSourceUrl_ 同步，由 open/cleanup 维护
     std::string liveReopenPath_;     ///< 实时流重连用：实际打开 demuxer 的 URL（可能来自 yt-dlp 提取）
     std::string liveReopenHeaders_;  ///< 实时流重连用：HTTP 头
     double liveReopenDuration_{0.0}; ///< 实时流重连用：已知时长，0 表示无
@@ -540,9 +562,10 @@ private:
      */
     bool shouldDropFrameForSpeed(const AVFrame* avFrame, double rate);
 
-    // 音量控制
+    // 音量与显示亮度控制（原子值可由 UI 线程安全读取）
     std::atomic<float> volume_;
     std::atomic<bool> muted_;
+    std::atomic<float> brightness_{1.0f};
 
     // 循环播放控制
     std::atomic<bool> loopPlayback_;

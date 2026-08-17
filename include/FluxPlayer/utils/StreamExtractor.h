@@ -27,6 +27,8 @@ struct ExtractedStream {
     std::string audioUrl;              ///< 音频流 URL（非 DASH 时为空）
     std::string headers;               ///< HTTP headers，格式 "Key: Value\r\n..."
     bool isDash = false;               ///< 是否为 DASH 分离流
+    bool isLive = false;               ///< yt-dlp 明确标记为正在直播
+    std::string originalUrl;           ///< 用户输入的原始来源，不含提取后的临时 URL
     double duration = 0.0;             ///< 时长（秒），0 表示未知（直播）
     int64_t filesize = 0;              ///< 文件总大小（字节），0 表示未知
                                        ///< 优先 requested_formats 各分段累加，fallback 到顶层 filesize_approx

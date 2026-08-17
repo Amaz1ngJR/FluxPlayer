@@ -146,4 +146,11 @@ void DrawStopIcon(ImDrawList* dl, ImVec2 center, float size, const SkinColor& co
 void DrawGearIcon(ImDrawList* dl, ImVec2 center, float radius,
                   ImU32 color, ImU32 holeColor);
 
+/**
+ * @brief 绘制亮度图标（太阳圆盘 + 8 条放射线）
+ *
+ * 当前播放器仅预留入口，不修改视频像素；独立 helper 可避免再次把放射图形误用为设置图标。
+ */
+void DrawBrightnessIcon(ImDrawList* dl, ImVec2 center, float radius, ImU32 color);
+
 } // namespace FluxPlayer

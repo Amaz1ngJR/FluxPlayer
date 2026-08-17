@@ -407,6 +407,20 @@ bool StreamExtractor::extract(const std::string& pageUrl,
                                const std::string& formatId,
                                ExtractedStream& out,
                                std::string& error) {
+    // 已确认的直链不依赖 yt-dlp。Downloader 会在 FFmpeg 输入打开后补齐 duration、
+    // bitrate 等探测信息；这里仅构造统一的 ExtractedStream，避免直链下载被安装检查拦截。
+    if (!needsExtraction(pageUrl)) {
+        out = ExtractedStream{};
+        out.originalUrl = pageUrl;
+        out.videoUrl = pageUrl;
+        out.platform = "Direct";
+        std::string clean = pageUrl.substr(0, pageUrl.find_first_of("?#"));
+        const size_t slash = clean.find_last_of("/\\");
+        out.title = slash == std::string::npos ? clean : clean.substr(slash + 1);
+        if (out.title.empty()) out.title = "stream";
+        return true;
+    }
+
     if (!isAvailable()) {
 #ifdef _WIN32
         error = "yt-dlp 未安装，请将 yt-dlp.exe 放入 third_party/yt-dlp/ 或添加到系统 PATH";
@@ -470,6 +484,13 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     // 使用 nlohmann/json 解析
     try {
         auto j = json::parse(jsonStr);
+        out.originalUrl = pageUrl;
+
+        // 直播标志优先于 duration：滑动窗口也可能报告有限时长，不能据此误判 VOD。
+        if (j.contains("is_live") && j["is_live"].is_boolean())
+            out.isLive = j["is_live"].get<bool>();
+        if (!out.isLive && j.contains("live_status") && j["live_status"].is_string())
+            out.isLive = j["live_status"].get<std::string>() == "is_live";
 
         // 解析基本字段
         if (j.contains("title") && j["title"].is_string())

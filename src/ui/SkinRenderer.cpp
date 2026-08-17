@@ -348,34 +348,35 @@ void DrawStopIcon(ImDrawList* dl, ImVec2 center, float size, const SkinColor& co
 void DrawGearIcon(ImDrawList* dl, ImVec2 center, float radius,
                   ImU32 color, ImU32 holeColor) {
     const int numTeeth = 8;
-    const float toothWidth = radius * 0.3f;
-    const float toothLength = radius * 0.4f;
     const float pi = 3.14159265f;
+    ImVec2 points[numTeeth * 4];
 
-    // 绘制齿轮齿（8个矩形）
-    for (int i = 0; i < numTeeth; i++) {
-        float angle = (i * 2.0f * pi / numTeeth);
-        float cos_a = std::cos(angle);
-        float sin_a = std::sin(angle);
-        float innerR = radius * 0.7f;
-        float outerR = radius + toothLength;
-
-        ImVec2 p1(center.x + cos_a * innerR - sin_a * toothWidth * 0.5f,
-                 center.y + sin_a * innerR + cos_a * toothWidth * 0.5f);
-        ImVec2 p2(center.x + cos_a * innerR + sin_a * toothWidth * 0.5f,
-                 center.y + sin_a * innerR - cos_a * toothWidth * 0.5f);
-        ImVec2 p3(center.x + cos_a * outerR + sin_a * toothWidth * 0.5f,
-                 center.y + sin_a * outerR - cos_a * toothWidth * 0.5f);
-        ImVec2 p4(center.x + cos_a * outerR - sin_a * toothWidth * 0.5f,
-                 center.y + sin_a * outerR + cos_a * toothWidth * 0.5f);
-
-        dl->AddQuadFilled(p1, p2, p3, p4, color);
+    // 每个齿使用“齿根-齿肩-齿顶-齿肩”四段轮廓，形成连续实体齿轮；相比独立
+    // 矩形齿更接近真实齿轮，也不会在小尺寸下看成太阳光线。
+    for (int i = 0; i < numTeeth * 4; ++i) {
+        const int phase = i % 4;
+        const float r = (phase == 1 || phase == 2) ? radius * 1.35f : radius * 0.92f;
+        const float angle = (static_cast<float>(i) / (numTeeth * 4)) * 2.0f * pi;
+        points[i] = ImVec2(center.x + std::cos(angle) * r,
+                           center.y + std::sin(angle) * r);
     }
+    dl->AddConvexPolyFilled(points, numTeeth * 4, color);
+    dl->AddCircleFilled(center, radius * 0.82f, color, 24);
+    dl->AddCircleFilled(center, radius * 0.34f, holeColor, 16);
+}
 
-    // 绘制中心圆
-    dl->AddCircleFilled(center, radius * 0.5f, color);
-    // 绘制中心孔
-    dl->AddCircleFilled(center, radius * 0.25f, holeColor);
+void DrawBrightnessIcon(ImDrawList* dl, ImVec2 center, float radius, ImU32 color) {
+    constexpr int kRayCount = 8;
+    constexpr float kPi = 3.14159265f;
+    dl->AddCircle(center, radius * 0.48f, color, 20, 1.5f);
+    for (int i = 0; i < kRayCount; ++i) {
+        const float angle = static_cast<float>(i) * 2.0f * kPi / kRayCount;
+        const ImVec2 inner(center.x + std::cos(angle) * radius * 0.72f,
+                           center.y + std::sin(angle) * radius * 0.72f);
+        const ImVec2 outer(center.x + std::cos(angle) * radius * 1.12f,
+                           center.y + std::sin(angle) * radius * 1.12f);
+        dl->AddLine(inner, outer, color, 1.5f);
+    }
 }
 
 // 引用一次 currentTime 避免编译器对未使用的 unnamed-namespace 函数告警

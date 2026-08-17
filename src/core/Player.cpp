@@ -220,6 +220,11 @@ bool Player::open(const std::string& filePath) {
         return false;
     }
 
+    // 原始来源必须在任何提取/重定向之前保存：下载入口依赖它重新建立独立任务。
+    // 只有通过状态校验后才发布，避免一次失败的重复 open 覆盖正在播放媒体的来源。
+    currentSourceUrl_ = filePath;
+    currentSourceIsNetwork_ = isNetworkUrl(filePath);
+
     // 图片文件走独立路径（无 Demuxer/Worker��单帧直接注入渲染队列）
     if (isImageFile(filePath)) {
         return openImageFile(filePath);
@@ -1121,6 +1126,13 @@ PlayerStats Player::getStats() const {
     return stats;
 }
 
+void Player::setBrightness(float brightness) {
+    const float clamped = std::clamp(brightness, 0.25f, 2.0f);
+    brightness_.store(clamped, std::memory_order_relaxed);
+    // Controller 与 OpenGL 渲染都在主线程；这里不跨线程调用 GL，只更新 renderer 缓存。
+    if (renderer_) renderer_->setBrightness(clamped);
+}
+
 void Player::setVolume(float volume) {
     volume_.store(std::max(0.0f, std::min(1.0f, volume)));
     Config::getInstance().getMutable().volume = volume_.load();
@@ -1292,6 +1304,8 @@ void Player::cleanup() {
     if (clockController_) clockController_->resetSeekState();
 
     filePath_.clear();
+    currentSourceUrl_.clear();
+    currentSourceIsNetwork_ = false;
     liveReopenPath_.clear();
     liveReopenHeaders_.clear();
     liveReopenDuration_ = 0.0;
@@ -1505,6 +1519,7 @@ bool Player::initWindowAndRenderer() {
         LOG_ERROR("Failed to initialize renderer");
         return false;
     }
+    renderer_->setBrightness(brightness_.load(std::memory_order_relaxed));
 
     if (videoDecoder_ && videoDecoder_->isHWAccelActive()) {
         const AVHWDeviceType deviceType = videoDecoder_->getHWDeviceType();

@@ -19,6 +19,9 @@ uniform int colorSpace;
 // 量化范围：0 = TV/limited range（Y:16-235），1 = PC/full range（Y:0-255）
 uniform int fullRange;
 
+// 显示亮度倍率；作用于 RGB 输出，不改变 YUV 色彩空间换算和硬件帧存储。
+uniform float brightness = 1.0;
+
 // 透明度（用于截图缩放动画等特效）
 uniform float alpha = 1.0;
 
@@ -71,5 +74,6 @@ void main()
         b = y + 1.772 * u;
     }
 
-    FragColor = vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), alpha);
+    vec3 rgb = clamp(vec3(r, g, b) * brightness, 0.0, 1.0);
+    FragColor = vec4(rgb, alpha);
 }

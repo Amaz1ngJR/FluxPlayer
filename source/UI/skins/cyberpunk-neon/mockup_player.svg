@@ -79,62 +79,84 @@
   </g>
 
   <!-- Subtitle surface above the visible dock. -->
-  <rect x="413" y="786" width="614" height="28" rx="3" fill="#030511" fill-opacity=".55"/>
-  <text x="720" y="805" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#EAF8FF">Current subtitle remains clear above player controls.</text>
+  <rect x="413" y="762" width="614" height="28" rx="3" fill="#030511" fill-opacity=".55"/>
+  <text x="720" y="781" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#EAF8FF">Current subtitle remains clear above player controls.</text>
 
-  <!-- Bottom dock: y=836, height=64; first line seek, second line controls. -->
-  <rect y="836" width="1440" height="64" fill="#070D22" fill-opacity=".92"/>
-  <path d="M0 837H1440" stroke="url(#rail)" stroke-width="2"/>
-  <rect x="8" y="843" width="1316" height="16" rx="2" fill="#0A1230" stroke="#5A8CBE" stroke-opacity=".22"/>
-  <rect x="8" y="843" width="654" height="16" rx="2" fill="url(#played)"/>
-  <circle cx="662" cy="851" r="12" fill="#00E8FF" fill-opacity=".08"/>
-  <circle cx="662" cy="851" r="8" fill="#00E8FF" fill-opacity=".22"/>
-  <circle cx="662" cy="851" r="5" fill="#00E8FF"/>
-  <text x="1333" y="855" font-family="Consolas, monospace" font-size="12" fill="#EAF8FF">00:41:52 / 01:32:18</text>
+  <!-- Bottom dock: y=812, height=88; controls center in the area below the seek row. -->
+  <rect y="812" width="1440" height="88" fill="#070D22" fill-opacity=".92"/>
+  <path d="M0 813H1440" stroke="url(#rail)" stroke-width="2"/>
+  <rect x="8" y="819" width="1316" height="16" rx="2" fill="#0A1230" stroke="#5A8CBE" stroke-opacity=".22"/>
+  <rect x="8" y="819" width="654" height="16" rx="2" fill="url(#played)"/>
+  <circle cx="662" cy="827" r="12" fill="#00E8FF" fill-opacity=".08"/>
+  <circle cx="662" cy="827" r="8" fill="#00E8FF" fill-opacity=".22"/>
+  <circle cx="662" cy="827" r="5" fill="#00E8FF"/>
+  <text x="1333" y="831" font-family="Consolas, monospace" font-size="12" fill="#EAF8FF">00:41:52 / 01:32:18</text>
 
-  <!-- Active download group at the left of row two. -->
-  <g font-family="Consolas, monospace" font-size="11">
-    <rect x="8" y="870" width="72" height="22" rx="3" stroke="#A855FF" stroke-opacity=".62"/>
-    <text x="44" y="885" text-anchor="middle" fill="#A855FF">Download</text>
-    <rect x="88" y="870" width="120" height="22" rx="3" fill="#0A1230"/>
-    <text x="148" y="885" text-anchor="middle" fill="#EAF8FF">0%</text>
-    <rect x="212" y="870" width="24" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <path d="M220 876V886M228 876V886" stroke="#00E8FF" stroke-width="2"/>
-    <rect x="240" y="870" width="24" height="22" rx="3" stroke="#FF3B7A" stroke-opacity=".55"/>
-    <path d="M247 877L257 887M257 877L247 887" stroke="#FF3B7A"/>
-    <text x="270" y="879" fill="#00E8FF" fill-opacity=".72">3MiB/s  10MiB</text>
-    <text x="270" y="890" fill="#00E8FF" fill-opacity=".56">ETA 38:18</text>
+  <!-- Active VOD download group; all unrelated player UI remains unchanged. -->
+  <g font-family="Consolas, monospace" font-size="12">
+    <rect x="8" y="855" width="72" height="38" rx="3" stroke="#A855FF" stroke-opacity=".62"/>
+    <text x="44" y="879" text-anchor="middle" fill="#A855FF">Download</text>
+    <rect x="88" y="855" width="120" height="38" rx="3" fill="#0A1230"/>
+    <rect x="88" y="855" width="77" height="38" rx="3" fill="url(#played)" fill-opacity=".26"/>
+    <text x="148" y="879" text-anchor="middle" fill="#EAF8FF">64% · VOD</text>
+    <rect x="212" y="855" width="24" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <path d="M220 866V882M228 866V882" stroke="#00E8FF" stroke-width="2"/>
+    <rect x="240" y="855" width="24" height="38" rx="3" stroke="#FF3B7A" stroke-opacity=".55"/>
+    <path d="M247 866L257 882M257 866L247 882" stroke="#FF3B7A"/>
+    <text x="270" y="869" fill="#00E8FF" fill-opacity=".82">18.7MiB/s  1.82GiB</text>
+    <text x="270" y="888" fill="#00E8FF" fill-opacity=".62">ETA 00:56 · FAST PULL</text>
+    <rect x="427" y="855" width="38" height="17" rx="2" fill="#00E8FF" fill-opacity=".12" stroke="#00E8FF" stroke-opacity=".48"/>
+    <text x="446" y="867" text-anchor="middle" font-size="9" fill="#00E8FF">HW D</text>
+    <rect x="469" y="855" width="38" height="17" rx="2" fill="#A855FF" fill-opacity=".12" stroke="#A855FF" stroke-opacity=".48"/>
+    <text x="488" y="867" text-anchor="middle" font-size="9" fill="#D8A8FF">HW E</text>
+    <rect x="427" y="876" width="80" height="17" rx="2" fill="#00E8FF" fill-opacity=".12" stroke="#00E8FF" stroke-opacity=".48"/>
+    <circle cx="436" cy="884.5" r="3" fill="#00E8FF"/>
+    <text x="469" y="888" text-anchor="middle" font-size="9" fill="#00E8FF">ZERO-COPY</text>
   </g>
 
   <!-- Center playback controls. -->
-  <g font-family="Consolas, monospace" font-size="11">
-    <rect x="580" y="870" width="80" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <path d="M616 876V886M624 876V886" stroke="#00E8FF" stroke-width="3"/>
-    <rect x="668" y="870" width="60" height="22" rx="3" stroke="#A855FF" stroke-opacity=".62"/>
-    <rect x="695" y="878" width="7" height="7" fill="#A855FF"/>
-    <rect x="736" y="870" width="70" height="22" rx="3" fill="#FF3B7A" fill-opacity=".18" stroke="#FF3B7A"/>
-    <text x="771" y="885" text-anchor="middle" fill="#FF3B7A">* REC V</text>
-    <rect x="814" y="870" width="60" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <text x="844" y="885" text-anchor="middle" fill="#00E8FF">REC A</text>
+  <g font-family="Consolas, monospace" font-size="12">
+    <rect x="580" y="855" width="80" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <path d="M616 866V882M624 866V882" stroke="#00E8FF" stroke-width="3"/>
+    <rect x="668" y="855" width="60" height="38" rx="3" stroke="#A855FF" stroke-opacity=".62"/>
+    <rect x="693" y="867" width="11" height="11" fill="#A855FF"/>
+    <rect x="736" y="855" width="70" height="38" rx="3" fill="#FF3B7A" fill-opacity=".18" stroke="#FF3B7A"/>
+    <text x="771" y="879" text-anchor="middle" fill="#FF3B7A">* REC V</text>
+    <rect x="814" y="855" width="60" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <text x="844" y="879" text-anchor="middle" fill="#00E8FF">REC A</text>
   </g>
 
   <!-- Right toolbar. -->
-  <g font-family="Consolas, monospace" font-size="11">
-    <rect x="1120" y="870" width="60" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <text x="1150" y="885" text-anchor="middle" fill="#00E8FF">1080P</text>
-    <rect x="1184" y="870" width="60" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <text x="1214" y="885" text-anchor="middle" fill="#00E8FF">Speed</text>
-    <rect x="1248" y="870" width="26" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <g stroke="#00E8FF" stroke-opacity=".86" fill="none">
-      <circle cx="1261" cy="881" r="4"/>
-      <path d="M1261 874V876M1261 886V888M1254 881H1256M1266 881H1268M1256 876L1257.5 877.5M1264.5 884.5L1266 886M1266 876L1264.5 877.5M1257.5 884.5L1256 886"/>
+  <g font-family="Consolas, monospace" font-size="12">
+    <rect x="1090" y="855" width="60" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <text x="1120" y="879" text-anchor="middle" fill="#00E8FF">1080P</text>
+    <rect x="1154" y="855" width="60" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <text x="1184" y="879" text-anchor="middle" fill="#00E8FF">Speed</text>
+    <!-- 亮度入口预留：保留原放射形图标，后续接入视频亮度调节。 -->
+    <rect x="1218" y="855" width="26" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".42"/>
+    <g stroke="#00E8FF" stroke-opacity=".72" fill="none" stroke-linecap="round">
+      <circle cx="1231" cy="874" r="4.2"/>
+      <path d="M1231 863V866M1231 882V885M1220 874H1223M1239 874H1242M1223.3 866.3L1225.4 868.4M1236.6 879.6L1238.7 881.7M1238.7 866.3L1236.6 868.4M1225.4 879.6L1223.3 881.7"/>
     </g>
-    <rect x="1278" y="870" width="26" height="22" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
-    <path d="M1285 879H1289L1293 876V886L1289 883H1285Z" fill="#00E8FF" fill-opacity=".86"/>
-    <path d="M1295 878Q1299 881 1295 884" stroke="#A8C7E8" stroke-opacity=".7"/>
-    <rect x="1308" y="870" width="120" height="22" rx="3" fill="#0A1230" stroke="#5A8CBE" stroke-opacity=".22"/>
-    <path d="M1318 881H1418" stroke="#136C8F"/>
-    <path d="M1318 881H1380" stroke="#00E8FF"/>
-    <circle cx="1380" cy="881" r="3" fill="#00E8FF"/>
+    <!-- 点击亮度按钮后向上展开的垂直滑条。 -->
+    <rect x="1206" y="685" width="50" height="162" rx="4" fill="#0A1230" fill-opacity=".96" stroke="#00E8FF" stroke-opacity=".68"/>
+    <path d="M1231 700V812" stroke="#136C8F" stroke-width="3" stroke-linecap="round"/>
+    <path d="M1231 750V812" stroke="#00E8FF" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="1231" cy="750" r="6" fill="#00E8FF"/>
+    <text x="1231" y="835" text-anchor="middle" font-family="Consolas, monospace" font-size="10" fill="#EAF8FF">100%</text>
+
+    <!-- 设置入口：外轮廓采用清晰的 8 齿齿轮，而不是放射状太阳图标。 -->
+    <rect x="1248" y="855" width="26" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <path d="M1257.8 861.5H1264.2L1265.1 865L1267.2 866.2L1270.6 865.2L1273.8 870.8L1271.3 873.3V875.7L1273.8 878.2L1270.6 883.8L1267.2 882.8L1265.1 884L1264.2 887.5H1257.8L1256.9 884L1254.8 882.8L1251.4 883.8L1248.2 878.2L1250.7 875.7V873.3L1248.2 870.8L1251.4 865.2L1254.8 866.2L1256.9 865Z" fill="#00E8FF" fill-opacity=".86"/>
+    <circle cx="1261" cy="874.5" r="6.2" fill="#070D22"/>
+    <circle cx="1261" cy="874.5" r="3.1" fill="#00E8FF" fill-opacity=".86"/>
+    <circle cx="1261" cy="874.5" r="1.45" fill="#030511"/>
+    <rect x="1278" y="855" width="26" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
+    <path d="M1284 871H1289L1294 867V881L1289 877H1284Z" fill="#00E8FF" fill-opacity=".86"/>
+    <path d="M1296 869Q1301 874 1296 879" stroke="#A8C7E8" stroke-opacity=".7"/>
+    <rect x="1308" y="855" width="120" height="38" rx="3" fill="#0A1230" stroke="#5A8CBE" stroke-opacity=".22"/>
+    <path d="M1314 874H1422" stroke="#136C8F" stroke-width="2"/>
+    <path d="M1314 874H1388" stroke="#00E8FF" stroke-width="2.5"/>
+    <circle cx="1388" cy="874" r="5" fill="#00E8FF"/>
   </g>
 </svg>

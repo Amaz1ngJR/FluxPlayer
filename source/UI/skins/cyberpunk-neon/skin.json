@@ -61,11 +61,11 @@
       "rowGap": 4
     },
     "size": {
-      "bottomDockHeight": 64,
+      "bottomDockHeight": 88,
       "progressHotHeight": 16,
       "progressVisualHeight": 16,
-      "mainPlayButton": [80, 22],
-      "iconButton": [24, 22],
+      "mainPlayButton": [80, 38],
+      "iconButton": [24, 38],
       "chipButton": [76, 20],
       "homeSourceCard": [520, 460],
       "openingPanel": [560, 200]
@@ -143,7 +143,7 @@
       "recordIdleButtonW": 60,
       "recordActiveButtonW": 70,
       "toolButtonW": 60,
-      "volumeSliderW": 120,
+      "volumeSliderW": 150,
       "volumeButtonExtraW": 4,
       "toolbarGap": 4,
       "toolbarRightMargin": 12,
@@ -211,7 +211,7 @@
       "offsetY": 4
     },
     "subtitle": {
-      "bottomMarginWithUi": 80,
+      "bottomMarginWithUi": 104,
       "bottomMarginNoUi": 24,
       "widthRatio": 0.85,
       "backgroundAlpha": 0.55

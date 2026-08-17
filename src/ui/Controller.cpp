@@ -264,9 +264,9 @@ void Controller::render() {
     // 字幕独立于 UI 面板的可见性：即使 UI 自动隐藏，字幕仍需持续显示
     renderSubtitles();
 
-    // 同步网页 URL（用于画质切换和下载按钮显示）
-    // 与 main 分支一致：仅在 URL 切换瞬间一次性拉取 info；qualities 为空就保持空，
-    // 由 download / quality 按钮各自的 empty 检查决定是否绘制。
+    // 同步原始来源和网页提取信息。画质仍只使用 page URL；下载则覆盖所有网络源。
+    std::string newSource = player_.isCurrentSourceNetwork() ? player_.getCurrentSourceUrl() : std::string{};
+    currentSourceUrl_ = std::move(newSource);
     std::string newUrl = player_.getLastPageUrl();
     if (newUrl != currentPageUrl_) {
         currentPageUrl_ = newUrl;
@@ -440,11 +440,16 @@ void Controller::renderBottomOverlay() {
     ImGui::Text("%s", timeText.c_str());
 
     // ── 第二行：下载（左） + 控制按钮（居中） + 设置/音量（右） ──
-    // 三个渲染函数共享同一行：保存行首 Y，下载 UI 可能推进光标，渲染后恢复
+    // 第一行渲染结束后，ImGui 光标已经位于“进度条 + 行间距”下方。第二行应在从该
+    // 位置到底部 padding 的剩余区域内居中，而不是相对整个 dock 居中。
     const float btnH = sk.metrics.size.mainPlayBtnH;
-    float row2Y = ImGui::GetCursorPosY();
+    const float controlsTop = ImGui::GetCursorPosY();
+    const float controlsBottom = overlayH - playerUi.dockPaddingY;
+    const float centeredRowY = controlsTop + std::max(0.0f,
+        (controlsBottom - controlsTop - btnH) * 0.5f);
+    ImGui::SetCursorPosY(centeredRowY);
     renderDownloadButton(btnH);
-    ImGui::SetCursorPosY(row2Y);
+    ImGui::SetCursorPosY(centeredRowY);
     renderPlaybackButtons(btnH);
     renderVolumeAndSettings(btnH);
 
@@ -769,16 +774,17 @@ void Controller::renderVolumeAndSettings(float btnH) {
     const float volSliderW = playerUi.volumeSliderW;
     const float volBtnW = btnH + playerUi.volumeButtonExtraW;
     const float settingsBtnW = volBtnW;
+    const float brightnessBtnW = volBtnW;
     const float speedBtnW = playerUi.toolButtonW;
     const float sliderX = ds.x - volSliderW - playerUi.toolbarRightMargin;
     const float volIconX = sliderX - volBtnW - playerUi.toolbarGap;
-    // 设置按钮紧贴音量图标左侧
     const float settingsIconX = volIconX - settingsBtnW - playerUi.toolbarGap;
+    // 亮度预留入口位于设置左侧；它占用真实布局宽度，因此 Speed/Quality 会同步左移。
+    const float brightnessIconX = settingsIconX - brightnessBtnW - playerUi.toolbarGap;
 
     const float qualityBtnW  = currentQualityLabel_.empty() ? 0.0f : playerUi.toolButtonW;
 
-    // 速度按钮紧贴设置图标左侧，画质按钮在速度按钮左侧
-    float speedBtnX = settingsIconX - speedBtnW - playerUi.toolbarGap;
+    float speedBtnX = brightnessIconX - speedBtnW - playerUi.toolbarGap;
     if (qualityBtnW > 0.0f) {
         float qx = speedBtnX - qualityBtnW - playerUi.toolbarGap;
         ImGui::SameLine(qx);
@@ -787,7 +793,74 @@ void Controller::renderVolumeAndSettings(float btnH) {
     ImGui::SameLine(speedBtnX);
     renderSpeedButton(btnH);
 
-    // 设置图标按钮（在音量图标左侧）
+    // 亮度按钮位于设置左侧，点击后向上展开垂直滑条。
+    ImGui::SameLine(brightnessIconX);
+    if (ImGui::Button("##brightnessbtn", ImVec2(brightnessBtnW, btnH)))
+        showBrightnessSlider_ = !showBrightnessSlider_;
+    const ImVec2 brightnessMin = ImGui::GetItemRectMin();
+    const ImVec2 brightnessMax = ImGui::GetItemRectMax();
+    const bool brightnessHovered = ImGui::IsItemHovered();
+    DrawBrightnessIcon(ImGui::GetWindowDrawList(),
+        ImVec2((brightnessMin.x + brightnessMax.x) * 0.5f,
+               (brightnessMin.y + brightnessMax.y) * 0.5f),
+        (brightnessMax.y - brightnessMin.y) * 0.22f,
+        ScaleAlpha(sk.colors.accentPrimary, brightnessHovered ? 1.0f : 0.72f));
+    if (brightnessHovered) ImGui::SetTooltip("Brightness");
+
+    if (showBrightnessSlider_) {
+        constexpr float kSliderW = 50.0f;
+        constexpr float kSliderH = 162.0f;
+        constexpr float kPopupGap = 8.0f;
+        float brightness = player_.getBrightness();
+        ImGui::SetNextWindowPos(ImVec2(
+            (brightnessMin.x + brightnessMax.x - kSliderW) * 0.5f,
+            brightnessMin.y - kSliderH - kPopupGap), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(kSliderW, kSliderH), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, sk.metrics.radius.popup);
+        ImVec4 popupBg = ToImVec4(sk.colors.bgPanelRaised);
+        popupBg.w = sk.metrics.opacity.popup;
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, popupBg);
+        ImGui::PushStyleColor(ImGuiCol_Border, ToImVec4(sk.colors.linePrimary));
+        ImGui::Begin("##BrightnessVertical", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoSavedSettings);
+        // 自绘轨道严格复刻 SVG：轨道 y=15..127，100% 圆点位于 y=65，数值位于底部。
+        // InvisibleButton 负责命中测试，拖动时把顶部映射到 200%、底部映射到 25%。
+        const ImVec2 popupPos = ImGui::GetWindowPos();
+        const float centerX = popupPos.x + kSliderW * 0.5f;
+        const float trackTop = popupPos.y + 15.0f;
+        const float trackBottom = popupPos.y + 127.0f;
+        ImGui::SetCursorScreenPos(ImVec2(popupPos.x, trackTop - 8.0f));
+        ImGui::InvisibleButton("##brightnessTrack", ImVec2(kSliderW, trackBottom - trackTop + 16.0f));
+        if (ImGui::IsItemActive()) {
+            const float t = std::clamp((trackBottom - ImGui::GetIO().MousePos.y) /
+                                       (trackBottom - trackTop), 0.0f, 1.0f);
+            brightness = 0.25f + t * 1.75f;
+            player_.setBrightness(brightness);
+        }
+        const float normalized = std::clamp((brightness - 0.25f) / 1.75f, 0.0f, 1.0f);
+        const float knobY = trackBottom - normalized * (trackBottom - trackTop);
+        ImDrawList* brightnessDl = ImGui::GetWindowDrawList();
+        brightnessDl->AddLine(ImVec2(centerX, trackTop), ImVec2(centerX, trackBottom),
+                              ToImU32(sk.colors.accentPrimaryDim), 3.0f);
+        brightnessDl->AddLine(ImVec2(centerX, knobY), ImVec2(centerX, trackBottom),
+                              ToImU32(sk.colors.accentPrimary), 3.0f);
+        brightnessDl->AddCircleFilled(ImVec2(centerX, knobY), 6.0f,
+                                      ToImU32(sk.colors.accentPrimary), 16);
+        const int brightnessPercent = static_cast<int>(std::lround(brightness * 100.0f));
+        const std::string valueText = std::to_string(brightnessPercent) + "%";
+        const ImVec2 valueSize = ImGui::CalcTextSize(valueText.c_str());
+        brightnessDl->AddText(ImVec2(popupPos.x + (kSliderW - valueSize.x) * 0.5f,
+                                     popupPos.y + 140.0f),
+                              ToImU32(sk.colors.textPrimary), valueText.c_str());
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(2);
+    }
+
+    // 设置图标按钮（在亮度和音量图标之间）
     ImGui::SameLine(settingsIconX);
     bool settingsClicked = ImGui::Button("##settingsbtn", ImVec2(settingsBtnW, btnH));
     settingsHovered_ = ImGui::IsItemHovered();
@@ -824,8 +897,12 @@ void Controller::renderVolumeAndSettings(float btnH) {
     ImVec2 volBtnMin = ImGui::GetItemRectMin();
     ImVec2 volBtnMax = ImGui::GetItemRectMax();
 
-    // 常驻长条滑块与 mockup_player.svg 对齐，不再等待 hover 展开。
+    // SliderFloat 的默认高度取决于字体与 FramePadding，通常小于本行按钮高度。
+    // 显式按按钮中心修正 screen Y，确保音量轨、滑块圆点和喇叭图标共用同一水平轴。
+    const float sliderFrameH = ImGui::GetFrameHeight();
+    const float sliderY = volBtnMin.y + (btnH - sliderFrameH) * 0.5f;
     ImGui::SameLine(sliderX);
+    ImGui::SetCursorScreenPos(ImVec2(sliderX, sliderY));
     const ImVec4 transparent(0.0f, 0.0f, 0.0f, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_FrameBg,          transparent);
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,   transparent);
@@ -852,8 +929,9 @@ void Controller::renderVolumeAndSettings(float btnH) {
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float cy = (sliderMin.y + sliderMax.y) * 0.5f;
-        const float trackLeft = sliderMin.x + 10.0f;
-        const float trackRight = sliderMax.x - 10.0f;
+        const float trackInset = 6.0f;
+        const float trackLeft = sliderMin.x + trackInset;
+        const float trackRight = sliderMax.x - trackInset;
         const float headX = trackLeft + (trackRight - trackLeft) *
             std::clamp(volume, 0.0f, 1.0f);
         dl->AddRectFilled(sliderMin, sliderMax, ToImU32(sk.colors.bgPanelRaised),
@@ -862,10 +940,10 @@ void Controller::renderVolumeAndSettings(float btnH) {
                     ScaleAlpha(sk.colors.lineSubtle, sliderHovered ? 1.8f : 1.0f),
                     sk.metrics.radius.button);
         dl->AddLine(ImVec2(trackLeft, cy), ImVec2(trackRight, cy),
-                    ToImU32(sk.colors.accentPrimaryDim), 1.0f);
+                    ToImU32(sk.colors.accentPrimaryDim), 2.0f);
         dl->AddLine(ImVec2(trackLeft, cy), ImVec2(headX, cy),
-                    ToImU32(sk.colors.accentPrimary), 1.5f);
-        dl->AddCircleFilled(ImVec2(headX, cy), 3.0f, ToImU32(sk.colors.accentPrimary), 10);
+                    ToImU32(sk.colors.accentPrimary), 2.5f);
+        dl->AddCircleFilled(ImVec2(headX, cy), 5.0f, ToImU32(sk.colors.accentPrimary), 12);
     }
 
     // 在音量按钮上手绘喇叭图标（使用保存的按钮 rect）
@@ -1432,7 +1510,7 @@ void Controller::renderQualityButton(float btnH) {
 }
 
 void Controller::renderDownloadButton(float btnH) {
-    if (currentPageUrl_.empty()) return;
+    if (currentSourceUrl_.empty()) return;
     const auto snap = SkinManager::instance().current();
     const auto& sk = *snap;
     const auto& playerUi = sk.surfaces.player;
@@ -1455,7 +1533,18 @@ void Controller::renderDownloadButton(float btnH) {
         if (dir) {
             isDownloading_ = true;
             downloadProgress_ = 0.0f;
-            { std::lock_guard<std::mutex> lk(downloadMutex_); downloadSpeed_.clear(); downloadEta_.clear(); downloadFileSize_.clear(); }
+            {
+                std::lock_guard<std::mutex> lk(downloadMutex_);
+                downloadMode_ = 0;
+                downloadState_ = 0;
+                downloadSpeed_.clear();
+                downloadEta_.clear();
+                downloadFileSize_.clear();
+                downloadSavedTime_.clear();
+                downloadDecoder_ = "BYPASS";
+                downloadEncoder_ = "BYPASS";
+                downloadZeroCopy_ = "N/A";
+            }
             downloader_ = std::make_unique<Downloader>();
             // 从当前画质标签提取高度（如 "1080P" → "1080"），传给 Downloader 按高度筛选
             // format_id 是会话级的，下载时 yt-dlp 重新提取会生成新 ID，不能直接复用
@@ -1465,15 +1554,19 @@ void Controller::renderDownloadButton(float btnH) {
                     if (std::isdigit(c)) dlHeight += c;
                 }
             }
-            downloader_->start(currentPageUrl_, dir, dlHeight,
-                [this](float p, const std::string& spd, const std::string& eta, const std::string& fsize) {
-                    // p < 0 表示进度未变化（暂停/重连等过渡态），保留上次进度条不动
-                    if (p >= 0.0f) downloadProgress_ = p;
+            downloader_->start(currentSourceUrl_, dir, dlHeight,
+                [this](const DownloadProgress& progress) {
+                    downloadProgress_.store(progress.progress, std::memory_order_relaxed);
                     std::lock_guard<std::mutex> lk(downloadMutex_);
-                    // 只在有值时更新，避免 "already downloaded" 等无速度行覆盖上次有效值
-                    if (!spd.empty())   downloadSpeed_ = spd;
-                    if (!eta.empty())   downloadEta_ = eta;
-                    if (!fsize.empty()) downloadFileSize_ = fsize;
+                    downloadMode_ = static_cast<int>(progress.mode);
+                    downloadState_ = static_cast<int>(progress.state);
+                    downloadSpeed_ = progress.speed;
+                    downloadEta_ = progress.eta;
+                    downloadFileSize_ = progress.fileSize;
+                    downloadSavedTime_ = progress.savedTime;
+                    downloadDecoder_ = progress.decoder;
+                    downloadEncoder_ = progress.encoder;
+                    downloadZeroCopy_ = progress.zeroCopy;
                 },
                 [this](bool ok, const std::string& path, const std::string& err) {
                     isDownloading_ = false;
@@ -1500,6 +1593,8 @@ void Controller::renderDownloadProgress(float btnH,
     const float iconBtnW = sk.metrics.size.iconBtnW;
     const float iconBtnH = sk.metrics.size.iconBtnH;
     float progress = downloadProgress_.load();
+    int mode = 0;
+    { std::lock_guard<std::mutex> lk(downloadMutex_); mode = downloadMode_; }
     // ForegroundDrawList 不受窗口裁剪，避免文字超出 overlay 边界触发滚动
     ImDrawList* dl = ImGui::GetForegroundDrawList();
 
@@ -1516,11 +1611,19 @@ void Controller::renderDownloadProgress(float btnH,
             ImVec2(barX, barY), ImVec2(barX + barW * progress, barY + barH),
             start, end, end, start);
     }
-    // 百分比文字内嵌在进度条中央
-    char pct[8]; snprintf(pct, sizeof(pct), "%d%%", int(progress * 100));
-    ImVec2 ts = ImGui::CalcTextSize(pct);
+    std::string progressLabel;
+    if (mode == 2) {
+        progressLabel = "LIVE SAVE";
+    } else if (mode == 0) {
+        progressLabel = "PROBING";
+    } else {
+        char pct[16];
+        snprintf(pct, sizeof(pct), "%d%% · VOD", int(progress * 100));
+        progressLabel = pct;
+    }
+    ImVec2 ts = ImGui::CalcTextSize(progressLabel.c_str());
     dl->AddText(ImVec2(barX + (barW - ts.x) * 0.5f, barY + (barH - ts.y) * 0.5f),
-                ToImU32(sk.colors.textPrimary), pct);
+                ToImU32(sk.colors.textPrimary), progressLabel.c_str());
 
     // 暂停/继续图标按钮（进度条右侧）
     bool isPaused = downloader_ && downloader_->isPaused();
@@ -1562,6 +1665,9 @@ void Controller::renderDownloadProgress(float btnH,
         if (downloader_) downloader_->cancel();
         isDownloading_ = false;
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(mode == 2 ? "Stop and save" : "Cancel and delete partial file");
+    }
     { // 手绘 X
         ImVec2 xb = ImGui::GetItemRectMin(), xe = ImGui::GetItemRectMax();
         float xc = (xb.x+xe.x)*0.5f, yc = (xb.y+xe.y)*0.5f, xr = 4.0f;
@@ -1580,14 +1686,35 @@ void Controller::renderDownloadProgress(float btnH,
 void Controller::renderDownloadInfo(float btnH, float btnMinY, float infoStartX) {
     const auto snap = SkinManager::instance().current();
     const auto& sk = *snap;
-    std::string spd, eta, fsize;
-    { std::lock_guard<std::mutex> lk(downloadMutex_); spd = downloadSpeed_; eta = downloadEta_; fsize = downloadFileSize_; }
+    std::string spd, eta, fsize, saved, decoder, encoder, zeroCopy;
+    int mode = 0;
+    {
+        // 工作线程可能同时发布一组相关字段；一次性复制快照可避免 UI 混用两个时刻的数据。
+        std::lock_guard<std::mutex> lk(downloadMutex_);
+        mode = downloadMode_;
+        spd = downloadSpeed_;
+        eta = downloadEta_;
+        fsize = downloadFileSize_;
+        saved = downloadSavedTime_;
+        decoder = downloadDecoder_;
+        encoder = downloadEncoder_;
+        zeroCopy = downloadZeroCopy_;
+    }
 
-    // 第一行：速度 + 文件大小，第二行：ETA
     std::string line1, line2;
     if (!spd.empty()) line1 += spd;
     if (!fsize.empty()) { if (!line1.empty()) line1 += "  "; line1 += fsize; }
-    if (!eta.empty()) line2 = "ETA " + eta;
+    if (mode == 2) {
+        line2 = "LIVE SAVE";
+        if (!saved.empty()) line2 += "  " + saved;
+    } else if (!eta.empty()) {
+        line2 = "ETA " + eta + "  FAST PULL";
+    }
+    // Remux 不经过像素帧，必须展示 BYPASS/N/A，不能把 packet copy 误报为硬件零拷贝。
+    if (!decoder.empty() || !encoder.empty() || !zeroCopy.empty()) {
+        if (!line2.empty()) line2 += "  ";
+        line2 += "D:" + decoder + " E:" + encoder + " ZC:" + zeroCopy;
+    }
 
     if (line1.empty() && line2.empty()) return;
 

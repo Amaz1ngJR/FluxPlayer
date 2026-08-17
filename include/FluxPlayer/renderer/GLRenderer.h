@@ -78,6 +78,16 @@ public:
         return m_hardwareInterop ? m_hardwareInterop->zeroCopyMode() : "Disabled";
     }
 
+    /**
+     * @brief 设置显示亮度。
+     * @param brightness 亮度倍率，0.25~2.0，1.0 表示保持原始画面
+     *
+     * 仅更新 CPU 侧 uniform 缓存，实际应用发生在拥有 OpenGL 上下文的渲染调用中；
+     * 不修改解码帧，因此软件上传和硬件零拷贝路径均不会增加 CPU 像素拷贝。
+     */
+    void setBrightness(float brightness);
+    float brightness() const { return m_brightness; }
+
     /** @brief 销毁渲染器，释放所有 OpenGL 资源（VAO/VBO/纹理） */
     void destroy();
 
@@ -234,6 +244,9 @@ private:
 
     /// 上一次画面来自硬件互操作纹理，缓存重绘时必须重新取得跨 API 访问权
     bool m_lastFrameWasHardware = false;
+
+    /// 显示亮度倍率；只作为 shader uniform 使用，不改变硬件帧零拷贝属性。
+    float m_brightness = 1.0f;
 
     /// NV12 UV 解交错缓冲区（预分配，避免每帧动态分配）
     std::vector<uint8_t> m_nv12UBuffer;  ///< 解交错后的 U 平面
