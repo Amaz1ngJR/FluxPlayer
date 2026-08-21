@@ -47,6 +47,14 @@ public:
               const std::string& httpHeaders,
               double knownDuration = 0.0);
 
+    /**
+     * @brief 打开输入但不调用 avformat_find_stream_info。
+     *
+     * 仅用于 DashMerger 生成的自描述 Matroska pipe：Tracks 已含完整 codecpar，跳过探测可
+     * 避免等待远端媒体包。若头信息不完整会显式失败，不影响通用 open() 的兼容路径。
+     */
+    bool openSelfDescribingPipe(const std::string& filename, double knownDuration = 0.0);
+
     /** @brief 关闭文件并释放所有资源 */
     void close();
 
@@ -163,6 +171,18 @@ public:
 
 private:
     /**
+     * @brief 为指定路由打开输入并探测流。
+     * @param filename 输入 URL/路径
+     * @param httpHeaders 附加 HTTP headers
+     * @param knownDuration 已知时长
+     * @param useConfiguredProxy 是否注入配置代理
+     */
+    bool openInternal(const std::string& filename,
+                      const std::string& httpHeaders,
+                      double knownDuration,
+                      bool useConfiguredProxy);
+
+    /**
      * @brief 为网络流 URL 配置 FFmpeg 打开选项
      *
      * 按协议类型（HTTP/HLS、RTSP、RTMP）分别设置重连、超时、缓冲区等参数。
@@ -170,7 +190,8 @@ private:
      * @param filename URL 或文件路径
      * @return AVDictionary 指针（由调用方负责 av_dict_free）
      */
-    AVDictionary* configureNetworkOptions(const std::string& filename) const;
+    AVDictionary* configureNetworkOptions(const std::string& filename,
+                                          bool useConfiguredProxy = true) const;
 
     /**
      * @brief 遍历 m_formatCtx->streams，填充视频/音频/字幕流索引

@@ -119,6 +119,8 @@ private:
     AVCodecParameters* m_savedCodecParams;
     /// 连续 sendPacket 失败计数，超过阈值触发软件降级
     int m_hwFailCount;
+    /// 连续缺失 PTS 计数，用于日志节流；收到有效时间戳后清零
+    int m_missingPtsCount;
 
     /** @brief 按平台优先级尝试初始化硬件解码设备 */
     bool initHWAccel(AVCodecContext* codecCtx);

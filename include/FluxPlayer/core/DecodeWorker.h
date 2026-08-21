@@ -49,7 +49,7 @@ private:
     bool normalizeVideoPTS(Frame& rawFrame);
     bool normalizeAudioPTS(Frame& rawFrame);
     bool enqueueVideoFrame(Frame& rawFrame, int serial);
-    bool enqueueAudioFrame(Frame& rawFrame, int serial);
+    bool enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued);
     Frame* waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial);
 
     Player* player_;

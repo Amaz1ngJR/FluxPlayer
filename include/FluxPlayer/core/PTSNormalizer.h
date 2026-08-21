@@ -7,9 +7,9 @@
  * 然后写入基准"之间可能被另一线程插入），因此用一个 mutex 保护整组状态。
  *
  * 归一化规则
- * - 无效 PTS：已校准则用"上一帧归一化 PTS + 帧间隔"估算，未校准则丢弃
- * - 首帧记录原始 PTS，音视频均到达后取两者较小值作为统一基准
- * - 已校准：减基准归一化；检测回绕（大负数）与异常跳变（倒退/前跳）
+ * - 首帧分别记录；两路均到达后取较晚首帧作为“统一可播放基准”，丢弃更早单路数据
+ * - 无效 PTS 按稳定帧间隔延续
+ * - 原始 PTS 域发生前跳/倒退时更新持久 correction，将其平滑映射到连续时间轴
  */
 
 #pragma once
@@ -30,8 +30,8 @@ public:
      * @brief 归一化结果
      */
     struct Result {
-        bool drop = false;       ///< true 表示该帧应丢弃（无效且未校准 / 回绕等）
-        bool estimated = false;  ///< true 表示 pts 为帧间隔估算值（不应驱动主时钟）
+        bool drop = false;       ///< true 表示该帧尚不可放行（缺失启动基准等）
+        bool estimated = false;  ///< true 表示 PTS 经估算/连续化修正，不是原始时间戳
         double pts = 0.0;        ///< 归一化后的 PTS（秒），drop 时无意义
     };
 
@@ -56,6 +56,14 @@ public:
      */
     Result normalizeAudio(double rawPTS, double frameInterval);
 
+    /**
+     * @brief 直播音频欠载时推进内部连续时间轴。
+     *
+     * 音频设备输出静音期间 Player 仍按真实 buffer 时长推进 AClock；Normalizer 必须同步
+     * 推进 lastValidAudioPTS，否则音频恢复时会被判成数秒前跳，再次触发追赶/卡顿。
+     */
+    void advanceAudioTimeline(double durationSeconds);
+
 private:
     /** @brief PTS 是否有效（排除 AV_NOPTS_VALUE 及异常大值） */
     static bool isValidPTS(double pts);
@@ -65,10 +73,14 @@ private:
     bool firstAudioReceived_ = false;  ///< 是否已记录首个音频帧 PTS
     double firstVideoPTS_ = 0.0;       ///< 首个视频帧原始 PTS
     double firstAudioPTS_ = 0.0;       ///< 首个音频帧原始 PTS
-    double basePTS_ = 0.0;             ///< 统一基准（音视频首帧 PTS 较小值）
-    bool baseCalibrated_ = false;      ///< 统一基准是否已确定
-    double lastValidVideoPTS_ = 0.0;   ///< 最后一个有效归一化视频 PTS
-    double lastValidAudioPTS_ = 0.0;   ///< 最后一个有效归一化音频 PTS
+    double basePTS_ = 0.0;            ///< 两路都可播放时的统一基准（取较晚首帧）
+    bool baseCalibrated_ = false;     ///< 统一基准是否已确定
+    bool hasLastVideoPTS_ = false;
+    bool hasLastAudioPTS_ = false;
+    double lastValidVideoPTS_ = 0.0;
+    double lastValidAudioPTS_ = 0.0;
+    double videoCorrection_ = 0.0;    ///< 视频原始 PTS 域到连续时间轴的持久修正
+    double audioCorrection_ = 0.0;    ///< 音频原始 PTS 域到连续时间轴的持久修正
 };
 
 } // namespace FluxPlayer

@@ -11,7 +11,8 @@ Frame::Frame()
     : m_frame(nullptr)
     , m_pts(0.0)
     , m_duration(0.0)
-    , m_type(FrameType::VIDEO) {
+    , m_type(FrameType::VIDEO)
+    , m_ptsEstimated(false) {
     m_frame = av_frame_alloc();
     if (!m_frame) {
         LOG_ERROR("Failed to allocate AVFrame");
@@ -28,8 +29,10 @@ Frame::Frame(Frame&& other) noexcept
     : m_frame(other.m_frame)
     , m_pts(other.m_pts)
     , m_duration(other.m_duration)
-    , m_type(other.m_type) {
+    , m_type(other.m_type)
+    , m_ptsEstimated(other.m_ptsEstimated) {
     other.m_frame = nullptr;
+    other.m_ptsEstimated = false;
 }
 
 Frame& Frame::operator=(Frame&& other) noexcept {
@@ -41,7 +44,9 @@ Frame& Frame::operator=(Frame&& other) noexcept {
         m_pts = other.m_pts;
         m_duration = other.m_duration;
         m_type = other.m_type;
+        m_ptsEstimated = other.m_ptsEstimated;
         other.m_frame = nullptr;
+        other.m_ptsEstimated = false;
     }
     return *this;
 }
@@ -128,6 +133,7 @@ bool Frame::allocate(int sampleRate, int channels, int nbSamples) {
 void Frame::reference(AVFrame* src) {
     if (m_frame && src) {
         av_frame_ref(m_frame, src);
+        m_ptsEstimated = false;
     }
 }
 
@@ -149,6 +155,9 @@ void Frame::unreference() {
     if (m_frame) {
         av_frame_unref(m_frame);
     }
+    m_pts = 0.0;
+    m_duration = 0.0;
+    m_ptsEstimated = false;
 }
 
 } // namespace FluxPlayer

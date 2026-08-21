@@ -631,7 +631,7 @@ https://www.youtube.com/watch?v=...
 |------|------|------|
 | RTSP | ✅ 已支持 | 实时流，TCP 传输，5 秒连接超时，1MB 接收缓冲，256KB 探测 / 500ms 分析快速起播 |
 | RTMP | ✅ 已支持 | 直播模式（rtmp_live=live），禁用 seek |
-| HTTP / HTTPS | ✅ 已支持 | 直链点播，断流自动重连，512KB 探测 / 2s 分析 |
+| HTTP / HTTPS | ✅ 已支持 | 有限 duration 的直链按 VOD，支持 Range seek、断流重连及 seek 音频门控；512KB 探测 / 2s 分析 |
 | HLS (m3u8) | ✅ 已支持 | HTTP Live Streaming，支持画质选择、断流重连 |
 | DASH (mpd) | ✅ 已支持 | 通过 DashMerger 合并视频/音频分离流，支持 seek |
 | RTP | ⚠️ 基础支持 | 可识别协议头，无专用优化参数 |
@@ -923,10 +923,11 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 - 支持 RTSP / RTMP / HTTP / HLS 协议
 - 实时流识别：URL 协议头检测 + HLS 格式名 + duration==0 多重判断，修复 RTMP 被解析为 FLV 格式名漏判
 - 按协议设置专用选项：HLS 断流重连、RTSP 1MB 缓冲 + 256KB 探测 / 500ms 分析、RTMP 直播模式
-- 实时流 PTS 基准校准（音视频首帧 PTS 对齐）
-- PTS 回绕检测：视频回绕时跳帧等待，音频回绕时统一重校准基准
-- PTS 异常检测：归一化后倒退 > 0.5s 或前跳 > 30s 用估算值代替；入队前强制单调递增防进度条抖动
-- 无效 PTS（AV_NOPTS_VALUE）帧基于 best_effort_timestamp 兜底取值，仍无效则按帧间隔估算
+- 实时流 PTS 基准校准：等待音视频首帧后取较晚首帧为统一可播放起点，丢弃首个视频 IDR 之前的旧音频
+- PTS 连续化：音/视频单帧前跳或倒退超过动态阈值时建立持久 offset，平滑映射到连续时间轴
+- 无效视频 PTS 优先回退 packet DTS，仍无时间戳则按帧间隔估算；日志按 120 帧节流
+- 直播音频欠载时按设备 buffer 时长连续推进 AClock，并同步 PTSNormalizer 时间轴，避免恢复后画面集中快进
+- 估算/修正的视频 PTS 只维持显示顺序，不直接重置 VClock
 - 实时流起播追赶：丢弃首个关键帧之前的视频包；prebuffer 期间收到新 IDR 则重置队列从最新关键帧起播
 - 网络断流指数退避重试（100ms → 3000ms，最多 30 次）
 - 实时流视频队列 3 帧 + 预缓冲 2 帧低延迟起播，音频队列 8 帧；点播流队列加深应对抖动；背压机制防止欠载

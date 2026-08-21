@@ -209,8 +209,16 @@ public:
      */
     const std::string& getCurrentSourceUrl() const { return currentSourceUrl_; }
 
-    /// 当前来源是否为网络协议 URL；本地文件和图片不显示 Download。
+    /** @brief 当前来源是否为网络协议 URL；本地文件和图片不显示 Download。 */
     bool isCurrentSourceNetwork() const { return currentSourceIsNetwork_; }
+
+    /**
+     * @brief 当前精确 seek 的超时预算。
+     *
+     * HTTP VOD 的 Range 请求和 CDN 首包可能超过本地文件的 2 秒；统一由 Player 根据
+     * 原始来源返回预算，避免 DecodeWorker 各自硬编码后提前解除 seek 门控。
+     */
+    double seekTimeoutSeconds() const { return currentSourceIsNetwork_ ? 8.0 : 2.0; }
 
     /// 获取最近一次提取的流信息（含画质列表、上传者等）
     const ExtractedStream& getLastExtractedInfo() const { return lastExtractedInfo_; }
@@ -679,6 +687,48 @@ private:
 
     // 网络流预缓冲状态
     std::atomic<bool> prebuffering_{false};  // 是否正在预缓冲（等待队列填充到安全水位）
+    // 所有 DashMerger（含首次打开）都观察该代号。每次 seek 递增即可从 interrupt_callback
+    // 打断旧目标的 HTTP open/read，无需跨线程解引用 dashMerger_ 智能指针。
+    std::atomic<uint64_t> dashSeekGeneration_{0};
+    // 任意可 seek 媒体跳转期间的音频门控。先暂停设备并清空旧 frame，目标后的首个
+    // 音频帧入队后再恢复；该标志也让 UI 在此期间绕过旧 AClock，显示 seek 目标/视频位置。
+    std::atomic<bool> audioPausedForSeek_{false};
+
+    // 先在回调锁下发布门控，再执行平台暂停/清空。解码线程即使同时看到目标帧，也会
+    // 因 audioDeviceFlushReady_=false 不能恢复设备；避免日志中的 Resume 先于 Paused+Flushed。
+    mutable std::mutex audioCallbackMutex_;
+    std::atomic<bool> audioDeviceFlushReady_{true};
+    // seek 后第一批音频允许 AClock 向后重定位；目标音频真正入队时置 true，设备回调
+    // 首次消费新帧后 exchange(false)，仅跳过一次普通播放使用的“禁止时钟倒退”保护。
+    std::atomic<bool> allowAudioClockRebase_{false};
+
+    /**
+     * @brief 解除 seek 音频门控，并按 PlayerState 决定是否恢复设备。
+     * @return true 表示本次调用确实解除门控
+     */
+    bool releaseAudioSeekGate();
+
+    // seek A/V 对齐状态独立于 decodingToTarget。视频可能先结束精确丢帧，音频设备也可能
+    // 已恢复但 AClock 尚未被首个回调提交；UI 仅在两路均 ready 后重新采用 AClock。
+    std::atomic<bool> seekVideoAligned_{true};
+    std::atomic<bool> seekAudioAligned_{true};
+    std::atomic<bool> seekDemuxReady_{true}; ///< Demuxer 已完成重定位，新帧才可解除门控
+    std::atomic<double> seekUiTargetPTS_{0.0};
+
+    /**
+     * @brief 发布 seek 后视频已对齐到目标位置。
+     * @param pts 实际可播放视频 PTS
+     */
+    void markSeekVideoAligned(double pts);
+
+    /**
+     * @brief 发布 seek 后音频帧已实际入队并完成 AClock 基准校准。
+     * @param pts 实际入队音频 PTS
+     */
+    void markSeekAudioAligned(double pts);
+
+    /** @brief seek 失败或取消时结束 UI 对齐保持，回到正常主时钟。 */
+    void cancelSeekAlignment();
 
     // 统计信息
     std::atomic<int> droppedFrames_;

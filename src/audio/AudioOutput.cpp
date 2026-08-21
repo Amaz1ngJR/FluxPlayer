@@ -89,6 +89,12 @@ void AudioOutput::Impl::audioQueueCallback(void* userData, AudioQueueRef queue, 
     auto& impl = *owner->impl_;
     if (!impl.callback) return;
 
+    // Reset/stop 回调期间不读取 Player frame queue，也不把旧 buffer 再次提交给设备。
+    if (owner->suppressEnqueue_.load(std::memory_order_acquire)) {
+        buffer->mAudioDataByteSize = 0;
+        return;
+    }
+
     // 调用回调函数获取音频数据
     size_t bytesRead = impl.callback(static_cast<uint8_t*>(buffer->mAudioData), impl.bufferSize);
     if (bytesRead == 0) {
@@ -132,6 +138,7 @@ void AudioOutput::Impl::runAudioThread(AudioOutput* owner) {
 
     // 填充单个缓冲区并提交
     auto fillBuffer = [&](int idx) {
+        if (owner->isPaused_.load(std::memory_order_acquire)) return;
         size_t bytesRead = callback(buffers[idx].data(), bufferSize);
         if (bytesRead == 0) {
             std::memset(buffers[idx].data(), 0, bufferSize);
@@ -162,6 +169,12 @@ void AudioOutput::Impl::runAudioThread(AudioOutput* owner) {
             return shouldExit.load() || (waveHeaders[nextBuffer].dwFlags & WHDR_DONE);
         });
         if (shouldExit.load()) break;
+        if (owner->isPaused_.load(std::memory_order_acquire)) {
+            cv.wait_for(lock, std::chrono::milliseconds(20), [&] {
+                return shouldExit.load() || !owner->isPaused_.load(std::memory_order_acquire);
+            });
+            continue;
+        }
         if (waveHeaders[nextBuffer].dwFlags & WHDR_DONE) {
             fillBuffer(nextBuffer);
             nextBuffer = (nextBuffer + 1) % kNumBuffers;
@@ -412,6 +425,8 @@ void AudioOutput::start() {
 
     isPlaying_.store(true);
     isPaused_.store(false);
+    needsPrime_.store(false, std::memory_order_release);
+    suppressEnqueue_.store(false, std::memory_order_release);
     LOG_INFO("AudioOutput: Started");
 }
 
@@ -441,29 +456,72 @@ void AudioOutput::pause() {
     LOG_INFO("AudioOutput: Paused");
 }
 
+void AudioOutput::pauseAndFlush() {
+    if (!isPlaying_.load()) return;
+    // 先发布暂停，平台回调/工作线程从这一刻起不再填充或提交旧 PCM。
+    isPaused_.store(true, std::memory_order_release);
+    needsPrime_.store(true, std::memory_order_release);
+#ifdef __APPLE__
+    if (!impl_->audioQueue) return;
+    suppressEnqueue_.store(true, std::memory_order_release);
+    OSStatus status = AudioQueuePause(impl_->audioQueue);
+    if (status == noErr) status = AudioQueueReset(impl_->audioQueue);
+    suppressEnqueue_.store(false, std::memory_order_release);
+    if (status != noErr) {
+        LOG_ERROR("AudioOutput: Failed to pause/reset for seek, status = " + std::to_string(status));
+        return;
+    }
+#elif defined(_WIN32)
+    if (!impl_->hWaveOut) return;
+    MMRESULT result = waveOutPause(impl_->hWaveOut);
+    if (result == MMSYSERR_NOERROR) result = waveOutReset(impl_->hWaveOut);
+    if (result != MMSYSERR_NOERROR) {
+        LOG_ERROR("AudioOutput: Failed to pause/reset for seek, error = " + std::to_string(result));
+        return;
+    }
+#elif defined(__linux__)
+    if (!impl_->pcmHandle) return;
+    snd_pcm_drop(impl_->pcmHandle);
+    if (snd_pcm_prepare(impl_->pcmHandle) < 0) {
+        LOG_ERROR("AudioOutput: Failed to prepare PCM after seek flush");
+        return;
+    }
+#endif
+    LOG_INFO("AudioOutput: Paused and flushed for seek");
+}
+
 void AudioOutput::resume() {
     if (!isPlaying_.load() || !isPaused_.load()) return;
 
 #ifdef __APPLE__
     if (!impl_->audioQueue) return;
+    // AudioQueueReset 移除了所有已排队 buffer；恢复前必须用新的 seek 后 PCM 重新填充，
+    // 否则 Start 虽成功但队列无可播放 buffer，设备会持续 underrun。
+    if (needsPrime_.exchange(false, std::memory_order_acq_rel)) {
+        for (int i = 0; i < Impl::kNumBuffers; ++i)
+            Impl::audioQueueCallback(this, impl_->audioQueue, impl_->buffers[i]);
+    }
     OSStatus status = AudioQueueStart(impl_->audioQueue, nullptr);
     if (status != noErr) { LOG_ERROR("AudioOutput: Failed to resume, status = " + std::to_string(status)); return; }
 
 #elif defined(_WIN32)
     if (!impl_->hWaveOut) return;
+    // waveOutReset 将所有 header 标成 DONE；先解除暂停并唤醒工作线程，让其用 seek 后
+    // PCM 重新提交 buffer，再 restart 设备。
+    isPaused_.store(false, std::memory_order_release);
+    impl_->cv.notify_all();
     MMRESULT result = waveOutRestart(impl_->hWaveOut);
     if (result != MMSYSERR_NOERROR) { LOG_ERROR("AudioOutput: Failed to resume, error = " + std::to_string(result)); return; }
 
 #elif defined(__linux__)
     if (!impl_->pcmHandle) return;
-    // 如果之前用了 drop，需要 prepare
-    if (snd_pcm_pause(impl_->pcmHandle, 0) < 0) {
-        int err = snd_pcm_prepare(impl_->pcmHandle);
-        if (err < 0) { LOG_ERROR("AudioOutput: Failed to resume: " + std::string(snd_strerror(err))); return; }
-    }
+    // pauseAndFlush 已 drop+prepare，恢复仅需解除软件暂停并唤醒工作线程。
+    isPaused_.store(false, std::memory_order_release);
+    impl_->cv.notify_all();
 #endif
 
-    isPaused_.store(false);
+    needsPrime_.store(false, std::memory_order_release);
+    isPaused_.store(false, std::memory_order_release);
     LOG_INFO("AudioOutput: Resumed");
 }
 

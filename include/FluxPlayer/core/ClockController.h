@@ -42,10 +42,10 @@ public:
 
     /**
      * 检查 seek 是否超时（decode 线程每轮检查）
-     * @param timeoutSec 超时阈值（秒），默认 2.0
+     * @param timeoutSec 超时阈值（秒）；调用方按本地/网络来源选择
      * @return true 表示已超时，decode 线程应放弃丢帧并恢复正常渲染
      */
-    bool isSeekTimedOut(double timeoutSec = 2.0) const;
+    bool isSeekTimedOut(double timeoutSec) const;
 
     /**
      * 查询当前是否在精确跳转模式

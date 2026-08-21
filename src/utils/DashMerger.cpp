@@ -70,14 +70,29 @@ static int pipeWritePacket(void* opaque, AVIO_WRITE_BUF_TYPE buf, int buf_size) 
 }
 #endif
 
+constexpr int kInitialOpenTimeoutSecs = 15; // 首次播放允许较宽松的网络建立时间
+constexpr int kSeekOpenTimeoutSecs    = 4;  // 候选失败快速切换代理/直连，避免单路等待过久
+constexpr int kSeekRangeTimeoutSecs   = 6;  // 正常 Range seek 通常 2~4s，6s 后走备用路由
+
 struct InterruptCtx {
     std::chrono::steady_clock::time_point deadline;
     std::atomic<bool>* running;
+    const std::atomic<uint64_t>* cancelGeneration = nullptr;
+    uint64_t expectedGeneration = 0;
+    const std::atomic<bool>* cancelOnGeneration = nullptr;
+    const std::atomic<bool>* externalStop = nullptr;
 };
 
 static int dashInterruptCb(void* opaque) {
     auto* ctx = static_cast<InterruptCtx*>(opaque);
     if (!ctx->running->load()) return 1;
+    if (ctx->externalStop && ctx->externalStop->load(std::memory_order_acquire)) return 1;
+    // 候选准备阶段允许后续 seek 抢占；提交为当前流后关闭 generation 取消，避免下一次
+    // seek 在旧流仍被消费期间先截断它，出现 partial file/Packet corrupt。
+    if (ctx->cancelOnGeneration && ctx->cancelOnGeneration->load(std::memory_order_acquire) &&
+        ctx->cancelGeneration &&
+        ctx->cancelGeneration->load(std::memory_order_acquire) != ctx->expectedGeneration)
+        return 1;
     return std::chrono::steady_clock::now() > ctx->deadline ? 1 : 0;
 }
 
@@ -88,7 +103,11 @@ DashMerger::~DashMerger() {
 bool DashMerger::start(const std::string& videoUrl,
                        const std::string& audioUrl,
                        const std::string& headers,
-                       double startSeconds) {
+                       double startSeconds,
+                       const std::atomic<uint64_t>* cancelGeneration,
+                       uint64_t expectedGeneration,
+                       const std::atomic<bool>* externalStop,
+                       bool useConfiguredProxy) {
     if (running_.load()) {
         LOG_WARN("DashMerger: 已在运行");
         return false;
@@ -130,24 +149,39 @@ bool DashMerger::start(const std::string& videoUrl,
 
     running_.store(true);
     ready_.store(false);
+    cancelOnGeneration_.store(cancelGeneration != nullptr, std::memory_order_release);
 
     thread_ = std::thread(&DashMerger::mergeLoop, this,
-                          videoUrl, audioUrl, headers, startSeconds);
+                          videoUrl, audioUrl, headers, startSeconds,
+                          cancelGeneration, expectedGeneration, externalStop,
+                          useConfiguredProxy);
     LOG_INFO("DashMerger: 启动, startSeconds=" + std::to_string(startSeconds));
     return true;
 }
 
-std::string DashMerger::getPipeUrl() const {
+std::string DashMerger::getPipeUrl() {
 #ifdef _WIN32
     return pipeName_;
 #else
     if (readFd_ < 0) return "";
-    return "pipe:" + std::to_string(readFd_);
+    // FFmpeg 的 pipe protocol 默认会在 avformat_close_input 时关闭传入 fd。把所有权
+    // 转给候选 Demuxer 后立即清空成员，候选失败析构时 DashMerger::stop 不会再把已关闭
+    // 且可能被系统复用的 fd 暴露给下一次尝试。
+    const int fd = readFd_;
+    readFd_ = -1;
+    return "pipe:" + std::to_string(fd);
 #endif
 }
 
 void DashMerger::stop() {
-    running_.store(false);
+    const bool hadResources = running_.exchange(false) || thread_.joinable()
+#ifdef _WIN32
+        || pipeHandle_ || stopEvent_
+#else
+        || readFd_ >= 0 || writeFd_ >= 0
+#endif
+        ;
+    if (!hadResources) return;
 #ifdef _WIN32
     // 触发事件，中断 ConnectNamedPipe 等待
     if (stopEvent_) SetEvent(stopEvent_);
@@ -190,7 +224,11 @@ void DashMerger::stop() {
 void DashMerger::mergeLoop(const std::string& videoUrl,
                             const std::string& audioUrl,
                             const std::string& headers,
-                            double startSeconds) {
+                            double startSeconds,
+                            const std::atomic<uint64_t>* cancelGeneration,
+                            uint64_t expectedGeneration,
+                            const std::atomic<bool>* externalStop,
+                            bool useConfiguredProxy) {
     LOG_INFO("DashMerger: 调用 avformat_network_init...");
     avformat_network_init();
     LOG_INFO("DashMerger: avformat_network_init 完成");
@@ -198,9 +236,13 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     AVFormatContext* videoCtx = nullptr;
     AVFormatContext* audioCtx = nullptr;
     AVFormatContext* outCtx   = nullptr;
+    AVPacket* videoPkt = nullptr;
+    AVPacket* audioPkt = nullptr;
     PipeWriteCtx* wctx = nullptr;
 
     auto cleanup = [&]() {
+        av_packet_free(&videoPkt);
+        av_packet_free(&audioPkt);
         if (videoCtx) avformat_close_input(&videoCtx);
         if (audioCtx) avformat_close_input(&audioCtx);
         if (outCtx) {
@@ -241,22 +283,36 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     // 每路用独立 InterruptCtx（共享会数据竞争）；ctx 放本函数栈上，生命周期覆盖整个
     // mergeLoop —— read 阶段的 interrupt 回调仍引用它。
     const auto& cfg = Config::getInstance().get();
-    const bool useProxy = cfg.proxyEnabled && !cfg.httpProxy.empty();
+    const bool useProxy = useConfiguredProxy && cfg.proxyEnabled && !cfg.httpProxy.empty();
     const std::string proxyUrl = useProxy ? cfg.httpProxy : std::string();
     if (useProxy) LOG_INFO("DashMerger: 使用代理 " + proxyUrl);
 
-    InterruptCtx videoIntCtx{std::chrono::steady_clock::now() + std::chrono::seconds(15), &running_};
-    InterruptCtx audioIntCtx{std::chrono::steady_clock::now() + std::chrono::seconds(15), &running_};
+    const int openTimeoutSecs = startSeconds > 0.0 ? kSeekOpenTimeoutSecs : kInitialOpenTimeoutSecs;
+    InterruptCtx videoIntCtx{std::chrono::steady_clock::now() + std::chrono::seconds(openTimeoutSecs),
+                              &running_, cancelGeneration, expectedGeneration,
+                              &cancelOnGeneration_, externalStop};
+    InterruptCtx audioIntCtx{std::chrono::steady_clock::now() + std::chrono::seconds(openTimeoutSecs),
+                              &running_, cancelGeneration, expectedGeneration,
+                              &cancelOnGeneration_, externalStop};
 
-    // 单路打开：分配上下文 → 设探测调优 → open → find_stream_info。成功返回 true。
-    // bilibili DASH 分片是 fragmented MP4，编解码参数在 init 段已明确，无需默认 5s 探测期：
-    // analyzeduration 压到 1s 显著提速；probesize 取 2MB（4K I 帧可 >1MB，过小会探测失败）。
+    // 单路打开保留 FFmpeg 默认 HTTP 行为。尤其不要在 FFmpeg 4.4 + CONNECT 代理上强制
+    // keep-alive/multiple_requests；实测会触发 premature EOF 与 TLS pull error。
     auto openInput = [&](AVFormatContext** ctxOut, const std::string& url,
                          InterruptCtx* ic, const char* tag) -> bool {
         AVDictionary* opts = nullptr;
         if (!headers.empty()) av_dict_set(&opts, "headers", headers.c_str(), 0);
         if (useProxy)         av_dict_set(&opts, "http_proxy", proxyUrl.c_str(), 0);
-        av_dict_set(&opts, "probesize", "2097152", 0);       // 2 MB
+        // 短暂 TLS/代理断开由 FFmpeg 在当前候选内立即重连；重试延迟上限 1s，避免
+        // 把一次瞬时 pull error 放大成完整的 DashMerger 重建。
+        av_dict_set(&opts, "reconnect", "1", 0);
+        // 点播 fMP4 本身可 seek，不要启用 reconnect_streamed；代理返回 partial EOF 时该选项
+        // 会在错误 offset 上继续重连，放大为 root atom/packet corrupt。
+        av_dict_set(&opts, "reconnect_on_network_error", "1", 0);
+        av_dict_set(&opts, "reconnect_delay_max", "1", 0);
+        av_dict_set(&opts, "rw_timeout", startSeconds > 0.0 ? "4000000" : "12000000", 0);
+        // 不强制 multiple_requests：FFmpeg 4.4 经 HTTP CONNECT 代理复用 TLS 时，部分
+        // 代理会返回 premature EOF。保持协议默认连接策略，以稳定性优先。
+        av_dict_set(&opts, "probesize", "2097152", 0);       // 2 MB，兼容大关键帧
         av_dict_set(&opts, "analyzeduration", "1000000", 0); // 1 秒
 
         AVFormatContext* ctx = avformat_alloc_context();
@@ -267,40 +323,130 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         }
         ctx->interrupt_callback = {dashInterruptCb, ic};
 
+        const auto openStart = std::chrono::steady_clock::now();
         int ret = avformat_open_input(&ctx, url.c_str(), nullptr, &opts);
         av_dict_free(&opts);
         if (ret < 0) {
             char errbuf[128];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            LOG_ERROR(std::string("DashMerger: 打开") + tag + "流失败: " + errbuf);
+            const bool superseded = cancelGeneration &&
+                cancelGeneration->load(std::memory_order_acquire) != expectedGeneration;
+            if (superseded) {
+                LOG_INFO(std::string("DashMerger: ") + tag + "流打开被新 seek 抢占");
+            } else {
+                LOG_ERROR(std::string("DashMerger: 打开") + tag + "流失败: " + errbuf);
+            }
             if (ctx) avformat_close_input(&ctx);
             return false;
         }
-        avformat_find_stream_info(ctx, nullptr);
+        const auto openMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - openStart).count();
+        const auto probeStart = std::chrono::steady_clock::now();
+        ret = avformat_find_stream_info(ctx, nullptr);
+        const auto probeMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - probeStart).count();
+        if (ret < 0) {
+            char errbuf[128];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            const bool superseded = cancelGeneration &&
+                cancelGeneration->load(std::memory_order_acquire) != expectedGeneration;
+            if (superseded) {
+                LOG_INFO(std::string("DashMerger: ") + tag + "流探测被新 seek 抢占");
+            } else {
+                LOG_ERROR(std::string("DashMerger: ") + tag + "流探测失败: " + errbuf);
+            }
+            avformat_close_input(&ctx);
+            return false;
+        }
         *ctxOut = ctx;
-        LOG_INFO(std::string("DashMerger: ") + tag + "流打开成功");
+        LOG_INFO(std::string("DashMerger: ") + tag + "流打开成功 (open=" +
+                 std::to_string(openMs) + "ms, probe=" + std::to_string(probeMs) +
+                 "ms)");
         return true;
     };
 
     LOG_INFO("DashMerger: 并行打开视频/音频流...");
+    const auto openBothStart = std::chrono::steady_clock::now();
     std::atomic<bool> videoOk{false}, audioOk{false};
     std::thread videoOpener([&]() { videoOk.store(openInput(&videoCtx, videoUrl, &videoIntCtx, "视频")); });
     std::thread audioOpener([&]() { audioOk.store(openInput(&audioCtx, audioUrl, &audioIntCtx, "音频")); });
     videoOpener.join();
     audioOpener.join();
+    LOG_INFO("DashMerger: 两路打开阶段耗时 " + std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - openBothStart).count()) + "ms");
 
     if (!videoOk.load() || !audioOk.load()) {
-        LOG_ERROR("DashMerger: 远程流打开失败（视频=" + std::to_string(videoOk.load()) +
-                  " 音频=" + std::to_string(audioOk.load()) + "）");
+        const bool superseded = cancelGeneration &&
+            cancelGeneration->load(std::memory_order_acquire) != expectedGeneration;
+        if (superseded) {
+            LOG_INFO("DashMerger: 远程流打开被更新的 seek 取消");
+        } else {
+            LOG_ERROR("DashMerger: 远程流打开失败（视频=" + std::to_string(videoOk.load()) +
+                      " 音频=" + std::to_string(audioOk.load()) + "）");
+        }
         cleanup(); running_.store(false); return;
     }
 
-    // seek
-    if (startSeconds > 0.0) {
-        int64_t seekTs = static_cast<int64_t>(startSeconds * AV_TIME_BASE);
-        av_seek_frame(videoCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD);
-        av_seek_frame(audioCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD);
+    // 单轨 DASH URL 在 open_input 后应已暴露目标流；seek 快路径依赖该不变量，失败则
+    // 回退为本轮重启失败，由上层重试而不是在未知流上继续写管道。
+    const int videoStreamIn = av_find_best_stream(videoCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    const int audioStreamIn = av_find_best_stream(audioCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (videoStreamIn < 0 || audioStreamIn < 0) {
+        LOG_ERROR("DashMerger: 打开后找不到视频或音频流");
+        cleanup(); running_.store(false); return;
     }
+
+    // 两路上下文彼此独立，可并行执行 HTTP Range seek。原实现串行 seek 视频再 seek
+    // 音频，日志中两路 open 在 10:03:29 完成、直到 10:03:33 才开始合并，额外约 4 秒
+    // 正是两个远端 seek 延迟叠加。并行后墙钟耗时收敛为较慢一路，并且 generation
+    // 变化可通过各自 interrupt_callback 同时抢占。
+    if (startSeconds > 0.0) {
+        const int64_t seekTs = static_cast<int64_t>(startSeconds * AV_TIME_BASE);
+        const auto seekStart = std::chrono::steady_clock::now();
+        const auto seekDeadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(kSeekRangeTimeoutSecs);
+        videoIntCtx.deadline = seekDeadline;
+        audioIntCtx.deadline = seekDeadline;
+        std::atomic<int> videoSeekRet{AVERROR_UNKNOWN};
+        std::atomic<int> audioSeekRet{AVERROR_UNKNOWN};
+        std::thread videoSeeker([&]() {
+            videoSeekRet.store(av_seek_frame(videoCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD));
+        });
+        std::thread audioSeeker([&]() {
+            audioSeekRet.store(av_seek_frame(audioCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD));
+        });
+        videoSeeker.join();
+        audioSeeker.join();
+        LOG_INFO("DashMerger: 两路 Range seek 阶段耗时 " + std::to_string(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - seekStart).count()) + "ms");
+
+        if (videoSeekRet.load() < 0 || audioSeekRet.load() < 0) {
+            char videoErr[AV_ERROR_MAX_STRING_SIZE] = {};
+            char audioErr[AV_ERROR_MAX_STRING_SIZE] = {};
+            av_strerror(videoSeekRet.load(), videoErr, sizeof(videoErr));
+            av_strerror(audioSeekRet.load(), audioErr, sizeof(audioErr));
+            LOG_WARN("DashMerger: seek 中断/失败（video=" + std::string(videoErr) +
+                     ", audio=" + std::string(audioErr) + "）");
+            cleanup();
+            running_.store(false);
+            return;
+        }
+    }
+
+    // 首包由既有合并循环读取。不要在 av_seek_frame 后额外并发预读 fMP4：FFmpeg 4.4
+    // 经代理的 fragmented MP4 会出现 partial file/Packet corrupt，且收益仅约 0.5 秒。
+    videoPkt = av_packet_alloc();
+    audioPkt = av_packet_alloc();
+    if (!videoPkt || !audioPkt) {
+        LOG_ERROR("DashMerger: packet 分配失败");
+        cleanup(); running_.store(false); return;
+    }
+    bool videoReady = false;
+    bool audioReady = false;
+    bool videoEof = false;
+    bool audioEof = false;
 
     // 创建输出上下文
     if (avformat_alloc_output_context2(&outCtx, nullptr, "matroska", nullptr) < 0) {
@@ -324,17 +470,11 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         cleanup(); running_.store(false); return;
     }
     outCtx->pb = avioCtx;
+    // Matroska 通过显式 avio_flush 尽快发布 header；保持 muxer 默认 Cluster 策略，
+    // 避免激进逐包 flush 在 pipe 关闭/seek 抢占时放大并发写入风险。
     outCtx->flags |= AVFMT_FLAG_CUSTOM_IO;
 
     // 添加流
-    int videoStreamIn = av_find_best_stream(videoCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    int audioStreamIn = av_find_best_stream(audioCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-
-    if (videoStreamIn < 0 || audioStreamIn < 0) {
-        LOG_ERROR("DashMerger: 找不到视频或音频流");
-        cleanup(); running_.store(false); return;
-    }
-
     AVStream* outVideo = avformat_new_stream(outCtx, nullptr);
     AVStream* outAudio = avformat_new_stream(outCtx, nullptr);
     avcodec_parameters_copy(outVideo->codecpar, videoCtx->streams[videoStreamIn]->codecpar);
@@ -387,7 +527,8 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     LOG_INFO("DashMerger: 客户端已连接命名管道");
 #endif
 
-    if (avformat_write_header(outCtx, nullptr) < 0) {
+    const int headerRet = avformat_write_header(outCtx, nullptr);
+    if (headerRet < 0) {
         LOG_ERROR("DashMerger: avformat_write_header 失败");
         cleanup(); running_.store(false); return;
     }
@@ -402,11 +543,6 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
 #ifndef _WIN32
     ready_.store(true);
 #endif
-
-    AVPacket* videoPkt = av_packet_alloc();
-    AVPacket* audioPkt = av_packet_alloc();
-    bool videoEof = false, audioEof = false;
-    bool videoReady = false, audioReady = false;
 
     while (running_.load() && !(videoEof && audioEof)) {
         // 每次迭代刷新两路 deadline，避免长时间播放后 interrupt_callback 误判超时
@@ -460,7 +596,7 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
 
     av_packet_free(&videoPkt);
     av_packet_free(&audioPkt);
-    av_write_trailer(outCtx);
+    if (outCtx) av_write_trailer(outCtx);
     LOG_INFO("DashMerger: 合并完成");
     cleanup();
 }

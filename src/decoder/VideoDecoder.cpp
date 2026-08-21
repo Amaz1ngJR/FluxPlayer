@@ -74,7 +74,8 @@ VideoDecoder::VideoDecoder()
     , m_pixelFormat(AV_PIX_FMT_NONE)
     , m_lastSwsFormat(AV_PIX_FMT_NONE)
     , m_savedCodecParams(nullptr)
-    , m_hwFailCount(0) {
+    , m_hwFailCount(0)
+    , m_missingPtsCount(0) {
     m_timeBase = {0, 1};
     LOG_DEBUG("VideoDecoder constructor called");
 }
@@ -287,13 +288,27 @@ bool VideoDecoder::receiveFrame(Frame& frame) {
     // best_effort_timestamp 内部按 pts → dts → 推断的优先级取值，能减少 NOPTS 概率
     AVFrame* avFrame = frame.getAVFrame();
     if (avFrame->best_effort_timestamp != AV_NOPTS_VALUE) {
-        double pts = avFrame->best_effort_timestamp * av_q2d(m_timeBase);
+        const double pts = avFrame->best_effort_timestamp * av_q2d(m_timeBase);
         frame.setPTS(pts);
         LOG_DEBUG("Frame received, PTS: " + std::to_string(pts) + "s");
+    } else if (avFrame->pkt_dts != AV_NOPTS_VALUE) {
+        // 部分 RTSP/RTMP 解码器不回填 best_effort_timestamp，但保留输入 packet DTS。
+        const double dts = avFrame->pkt_dts * av_q2d(m_timeBase);
+        frame.setPTS(dts);
+        frame.setPTSEstimated(true);
+        const int missingCount = ++m_missingPtsCount;
+        if (missingCount == 1 || missingCount % 120 == 0) {
+            LOG_WARN("Video frame missing PTS, using packet DTS (count=" +
+                     std::to_string(missingCount) + ")");
+        }
     } else {
-        // 显式设置为无效PTS，确保下游代码能正确检测
-        frame.setPTS(-9223372036854775808.0);  // AV_NOPTS_VALUE as double
-        LOG_WARN("Frame has no valid PTS");
+        frame.setPTS(-9223372036854775808.0);
+        frame.setPTSEstimated(true);
+        const int missingCount = ++m_missingPtsCount;
+        if (missingCount == 1 || missingCount % 120 == 0) {
+            LOG_WARN("Video frame has no timestamp (count=" +
+                     std::to_string(missingCount) + ")");
+        }
     }
 
     frame.setType(FrameType::VIDEO);
@@ -309,6 +324,7 @@ void VideoDecoder::flush() {
         LOG_DEBUG("Flushing video decoder buffers");
         avcodec_flush_buffers(m_codecCtx);
     }
+    m_missingPtsCount = 0;
 }
 
 AVHWDeviceType VideoDecoder::getHWDeviceType() const {

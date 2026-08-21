@@ -61,6 +61,14 @@ public:
     /** @brief 暂停音频播放 */
     void pause();
 
+    /**
+     * @brief seek 专用暂停：暂停设备并丢弃设备内部已排队的旧 PCM。
+     *
+     * 普通 pause 必须保留缓冲以便无缝恢复；seek 则必须清除，否则后退 seek 后仍会先播放
+     * seek 前约 75ms 的硬件缓冲，并让软件时钟/听感短暂回到旧位置。
+     */
+    void pauseAndFlush();
+
     /** @brief 恢复音频播放 */
     void resume();
 
@@ -88,6 +96,8 @@ private:
     std::atomic<float> volume_{1.0f};   ///< 音量 (0.0 - 1.0)
     std::atomic<bool> isPlaying_{false};///< 是否正在播放
     std::atomic<bool> isPaused_{false}; ///< 是否暂停
+    std::atomic<bool> needsPrime_{false}; ///< seek flush 后恢复前需重新填充平台音频缓冲
+    std::atomic<bool> suppressEnqueue_{false}; ///< AudioQueueReset 回调期间禁止旧 buffer 重新入队
 };
 
 } // namespace FluxPlayer

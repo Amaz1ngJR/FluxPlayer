@@ -57,47 +57,48 @@ Demuxer::~Demuxer() {
  */
 bool Demuxer::open(const std::string& filename) {
     LOG_INFO("Opening media file: " + filename);
+    if (openInternal(filename, "", 0.0, /*useConfiguredProxy=*/true)) return true;
 
-    // 步骤1：为网络流准备协议专用选项（本地文件返回 nullptr）
-    AVDictionary* options = configureNetworkOptions(filename);
-
-    // 步骤2：打开输入文件或流（avformat_open_input 内部自动识别容器格式）
-    int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
-    if (options) {
-        av_dict_free(&options);
+    const auto& cfg = Config::getInstance().get();
+    if (FluxPlayer::isHttpUrl(filename) && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
+        LOG_WARN("HTTP open via proxy failed, retrying direct once");
+        close();
+        return openInternal(filename, "", 0.0, /*useConfiguredProxy=*/false);
     }
+    return false;
+}
+
+bool Demuxer::openInternal(const std::string& filename,
+                           const std::string& httpHeaders,
+                           double knownDuration,
+                           bool useConfiguredProxy) {
+    AVDictionary* options = configureNetworkOptions(filename, useConfiguredProxy);
+    if (!httpHeaders.empty()) av_dict_set(&options, "headers", httpHeaders.c_str(), 0);
+
+    int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
+    av_dict_free(&options);
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to open file: " + filename + " - " + std::string(errBuf));
-        return false;
-    }
-    LOG_DEBUG("Input opened successfully");
-
-    // 步骤3：探测流信息（读取文件头若干包，解析每条流的编解码器参数）
-    // probesize/analyzeduration 已通过 avformat_open_input 的 options 写入 format context，
-    // find_stream_info 会自动使用，无需再传（且其第二参数是 per-stream 数组，传单个会越界）
-    // DASH pipe 且容器头已自描述时跳过 find_stream_info（见 streamInfoReadyForPipe），
-    // 消除探测段从管道读包/试解码的网络等待。否则正常探测保证健壮。
-    if (streamInfoReadyForPipe(filename, m_formatCtx)) {
-        LOG_DEBUG("Pipe: container header self-describing, skipping find_stream_info");
-    } else {
-        ret = avformat_find_stream_info(m_formatCtx, nullptr);
-        if (ret < 0) {
-            LOG_ERROR("Failed to find stream information");
-            close();
-            return false;
-        }
-    }
-    LOG_DEBUG("Stream information found, total streams: " + std::to_string(m_formatCtx->nb_streams));
-
-    // 步骤4：挑选首条视频/音频/字幕流；无音视频流则视为打开失败
-    if (!findStreams()) {
+        LOG_WARN("Failed to open " + filename + " - " + std::string(errBuf));
         close();
         return false;
     }
 
-    // 步骤5：打印媒体概要信息
+    if (!streamInfoReadyForPipe(filename, m_formatCtx)) {
+        ret = avformat_find_stream_info(m_formatCtx, nullptr);
+        if (ret < 0) {
+            LOG_WARN("Failed to find stream information: " + filename);
+            close();
+            return false;
+        }
+    }
+    if (knownDuration > 0.0)
+        m_formatCtx->duration = static_cast<int64_t>(knownDuration * AV_TIME_BASE);
+    if (!findStreams()) {
+        close();
+        return false;
+    }
     logMediaInfo(filename);
     return true;
 }
@@ -106,12 +107,14 @@ bool Demuxer::open(const std::string& filename) {
  * 为网络流配置 FFmpeg 打开选项
  * 本地文件返回 nullptr，网络流按协议差异化设置重连、超时、缓冲等参数
  */
-AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) const {
-    const bool isPipe = (filename.find("pipe:") == 0);
-    const bool isNetwork = (FluxPlayer::isNetworkUrl(filename) ||
-                            FluxPlayer::isNetworkUrl(filename) ||
-                            FluxPlayer::isNetworkUrl(filename) ||
-                            FluxPlayer::isNetworkUrl(filename));
+AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename,
+                                                bool useConfiguredProxy) const {
+    const bool isPipe = (filename.rfind("pipe:", 0) == 0);
+    const bool isHttp = FluxPlayer::isHttpUrl(filename);
+    const bool isRtsp = FluxPlayer::isRtspUrl(filename);
+    const bool isRtmp = FluxPlayer::isRtmpUrl(filename);
+    const bool isRtp  = FluxPlayer::isRtpUrl(filename);
+    const bool isNetwork = FluxPlayer::isNetworkUrl(filename);
     if (!isNetwork && !isPipe) {
         return nullptr;
     }
@@ -139,11 +142,14 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
 
     // === HTTP/HLS 专用选项 ===
     // HLS 通过 HTTP 分片传输，断流重连至关重要
-    if (FluxPlayer::isNetworkUrl(filename) || FluxPlayer::isNetworkUrl(filename)) {
-        av_dict_set(&options, "reconnect", "1", 0);                  // 连接断开后重连
-        av_dict_set(&options, "reconnect_streamed", "1", 0);         // 流传输中也重连
-        av_dict_set(&options, "reconnect_on_network_error", "1", 0); // 网络错误时重连
-        av_dict_set(&options, "reconnect_delay_max", "5", 0);        // 最大重连延迟 5 秒
+    if (isHttp) {
+        // open 阶段由 Demuxer 自己执行“代理一次、直连一次”，不能让 FFmpeg 在故障代理上
+        // 进行 0/1/3 秒指数重连；播放阶段 readPacket 的短断线仍由 reconnect 处理。
+        av_dict_set(&options, "reconnect", "1", 0);
+        av_dict_set(&options, "reconnect_streamed", "1", 0);
+        av_dict_set(&options, "reconnect_delay_max", "0", 0);
+        // 限制故障代理/网络单次 I/O 等待；超时后由 open() 立即切换直连，而不是卡住数十秒。
+        av_dict_set(&options, "rw_timeout", "5000000", 0);
         // HTTP/HLS 流头部清晰，可缩小探测降低初始内存
         av_dict_set(&options, "probesize", "524288", 0);         // 512 KB（默认 5 MB）
         av_dict_set(&options, "analyzeduration", "2000000", 0);  // 2 秒（默认 5 秒）
@@ -151,7 +157,7 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
     }
 
     // === RTSP 专用选项 ===
-    if (FluxPlayer::isNetworkUrl(filename)) {
+    if (isRtsp) {
         av_dict_set(&options, "rtsp_transport", "tcp", 0);     // TCP 更稳定
         av_dict_set(&options, "stimeout", "5000000", 0);       // 连接超时 5 秒
         av_dict_set(&options, "buffer_size", "1048576", 0);    // 1MB 接收缓冲区，减少丢包
@@ -164,18 +170,22 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename) cons
 
     // === 代理设置 ===
     const auto& cfg = Config::getInstance().get();
-    if (cfg.proxyEnabled && !cfg.httpProxy.empty()) {
-        if (FluxPlayer::isNetworkUrl(filename) || FluxPlayer::isNetworkUrl(filename)) {
+    if (useConfiguredProxy && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
+        // FFmpeg 的 http_proxy 仅适用于 HTTP/HTTPS（HLS/DASH 的底层请求也属于 HTTP）。
+        if (isHttp) {
             av_dict_set(&options, "http_proxy", cfg.httpProxy.c_str(), 0);
             LOG_DEBUG("Proxy enabled: " + cfg.httpProxy);
         }
     }
 
     // === RTMP 专用选项 ===
-    if (FluxPlayer::isNetworkUrl(filename)) {
+    if (isRtmp) {
         av_dict_set(&options, "rtmp_live", "live", 0);  // 直播模式，禁用 seek
         LOG_DEBUG("RTMP options: rtmp_live=live");
     }
+
+    // RTP/UDP 当前无需额外字典项，但显式记录分类结果，便于排查协议分流。
+    if (isRtp) LOG_DEBUG("RTP/UDP input detected");
 
     return options;
 }
@@ -352,25 +362,20 @@ bool Demuxer::isLiveStream() const {
     if (!m_formatCtx) {
         return false;
     }
-    // 实时流的特征：
-    // 1. duration 无效（AV_NOPTS_VALUE、< 0 或 == 0）
-    // 2. 或者是 RTSP/RTMP 等网络流格式
-    //    注意：RTMP 流被 FFmpeg 解析为 FLV 格式，formatName 是 "flv" 而非 "rtmp"
-    //    因此需要同时检查 URL 协议头
-    bool hasInvalidDuration = (m_formatCtx->duration == AV_NOPTS_VALUE ||
-                               m_formatCtx->duration <= 0);
-
+    // Live 判定必须区分“网络传输”与“实时内容”：HTTP MP4 虽是网络 URL，但拥有
+    // 有限 duration，应按 VOD 允许 seek。RTSP/RTMP/RTP 则由协议本身提供强证据。
+    const bool hasInvalidDuration = (m_formatCtx->duration == AV_NOPTS_VALUE ||
+                                     m_formatCtx->duration <= 0);
     const char* formatName = m_formatCtx->iformat ? m_formatCtx->iformat->name : "";
-    bool isStreamFormat = (std::string(formatName).find("rtsp") != std::string::npos ||
-                          std::string(formatName).find("rtmp") != std::string::npos ||
-                          std::string(formatName).find("rtp") != std::string::npos);
-    // HLS 不加入 isStreamFormat：HLS 点播有有效 duration，由 hasInvalidDuration 区分直播
+    const std::string format(formatName);
+    const bool realtimeFormat = format.find("rtsp") != std::string::npos ||
+                                format.find("rtp") != std::string::npos;
+    const char* rawUrl = m_formatCtx->url ? m_formatCtx->url : "";
+    const std::string url(rawUrl);
+    const bool realtimeProtocol = FluxPlayer::isRealtimeProtocolUrl(url);
 
-    // 通过 URL 协议头补充检测（RTMP 流实际被解析为 FLV 格式）
-    const char* url = m_formatCtx->url ? m_formatCtx->url : "";
-    bool isNetworkProtocol = FluxPlayer::isNetworkUrl(url);
-
-    return hasInvalidDuration || isStreamFormat || isNetworkProtocol;
+    // HTTP/HLS/DASH 仅在 duration 无效时按 Live；普通有限时长 MP4/MOV 永远是 VOD。
+    return realtimeProtocol || realtimeFormat || hasInvalidDuration;
 }
 
 int Demuxer::getWidth() const {
@@ -458,49 +463,47 @@ bool Demuxer::seek(int64_t timestamp) {
     return true;
 }
 
-bool Demuxer::open(const std::string& filename,
-                   const std::string& httpHeaders,
-                   double knownDuration) {
+bool Demuxer::openSelfDescribingPipe(const std::string& filename, double knownDuration) {
+    if (filename.rfind("pipe:", 0) != 0) {
+        LOG_ERROR("openSelfDescribingPipe requires pipe: URL");
+        return false;
+    }
     AVDictionary* options = configureNetworkOptions(filename);
-
-    // 注入 HTTP headers（防盗链、Cookie 等）
-    if (!httpHeaders.empty())
-        av_dict_set(&options, "headers", httpHeaders.c_str(), 0);
-
-    int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
-    if (options) av_dict_free(&options);
+    const int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
+    av_dict_free(&options);
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to open: " + filename + " - " + std::string(errBuf));
+        LOG_ERROR("Failed to open self-describing pipe: " + std::string(errBuf));
         return false;
     }
-
-    // DASH pipe 且容器头已自描述全部流信息时，跳过 find_stream_info —— 它会从管道再读包/
-    // 试解码（受 merger 下载速度限制，是 seek 探测段数秒延迟的根源）。否则正常探测保证健壮。
-    if (streamInfoReadyForPipe(filename, m_formatCtx)) {
-        LOG_DEBUG("Pipe: container header self-describing, skipping find_stream_info");
-    } else {
-        ret = avformat_find_stream_info(m_formatCtx, nullptr);
-        if (ret < 0) {
-            LOG_ERROR("Failed to find stream info");
-            close();
-            return false;
-        }
-    }
-
-    // pipe 流无法从容器头读取 duration，手动注入避免被误判为直播流
-    if (knownDuration > 0.0)
-        m_formatCtx->duration = static_cast<int64_t>(knownDuration * AV_TIME_BASE);
-
-    if (!findStreams()) {
-        LOG_ERROR("No audio/video stream found: " + filename);
+    if (!streamInfoReadyForPipe(filename, m_formatCtx)) {
+        LOG_ERROR("Self-describing pipe is missing complete codec parameters");
         close();
         return false;
     }
-
+    if (knownDuration > 0.0)
+        m_formatCtx->duration = static_cast<int64_t>(knownDuration * AV_TIME_BASE);
+    if (!findStreams()) {
+        close();
+        return false;
+    }
     logMediaInfo(filename);
     return true;
+}
+
+bool Demuxer::open(const std::string& filename,
+                   const std::string& httpHeaders,
+                   double knownDuration) {
+    if (openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/true)) return true;
+
+    const auto& cfg = Config::getInstance().get();
+    if (FluxPlayer::isHttpUrl(filename) && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
+        LOG_WARN("HTTP open via proxy failed, retrying direct once");
+        close();
+        return openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/false);
+    }
+    return false;
 }
 
 } // namespace FluxPlayer

@@ -5,10 +5,14 @@
 #include "FluxPlayer/core/AVSync.h"
 #include "FluxPlayer/core/QueueManager.h"
 #include "FluxPlayer/core/PacketQueue.h"
+#include "FluxPlayer/core/FrameQueue.h"
+#include "FluxPlayer/core/TimeUtils.h"
 #include "FluxPlayer/decoder/Demuxer.h"
 #include "FluxPlayer/subtitle/SubtitleDecoder.h"
 #include "FluxPlayer/subtitle/SubtitleManager.h"
+#include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/utils/DashMerger.h"
+#include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/Logger.h"
 
 extern "C" {
@@ -26,6 +30,7 @@ constexpr int     kMinPktFrames        = 25;                // 各流最少缓�
 constexpr double  kMinQueueDurationSec = 1.0;               // 各流最少缓存时长门槛
 constexpr int     kBackpressureWaitMs  = 10;                // 背压等待粒度
 constexpr int     kEofParkWaitMs       = 10;                // EOF 停泊轮询粒度（等待 seek / quit）
+constexpr int     kDashSeekDebounceMs  = 300;               // 连续拖动/点击停止后再建立远程连接
 }  // namespace
 
 DemuxWorker::DemuxWorker(Player* player) : player_(player) {}
@@ -52,6 +57,33 @@ void DemuxWorker::postSeek(double targetPTS) {
     std::lock_guard<std::mutex> lock(seekMutex_);
     seekRequest_.target = targetPTS;
     seekRequest_.pending = true;
+    lastSeekPostNs_.store(steadyNowNs(), std::memory_order_release);
+    seekGeneration_.fetch_add(1, std::memory_order_release);
+
+    // pending 与 serial/frame 边界必须在同一 seekMutex 临界区发布。run() 在取走 pending
+    // 时持同一锁，因此不可能在边界建立到一半时执行 Demuxer::seek；这同时堵住：
+    // 1) 旧 packet 获得新 serial；2) 新位置 packet 被随后 flush 误删。
+    if (player_ && player_->queueManager_) {
+        if (player_->queueManager_->videoPacketQueue()) player_->queueManager_->videoPacketQueue()->flush();
+        if (player_->queueManager_->audioPacketQueue()) player_->queueManager_->audioPacketQueue()->flush();
+        if (player_->queueManager_->videoFrameQueue()) player_->queueManager_->videoFrameQueue()->flush();
+        if (player_->queueManager_->audioFrameQueue()) player_->queueManager_->audioFrameQueue()->flush();
+    }
+
+    // DashMerger 的 interrupt_callback 观察 Player 持有的稳定 generation。
+    if (player_) player_->dashSeekGeneration_.fetch_add(1, std::memory_order_release);
+}
+
+void DemuxWorker::cancelPendingDashIo() {
+    if (player_) player_->dashSeekGeneration_.fetch_add(1, std::memory_order_release);
+}
+
+bool DemuxWorker::takePendingSeek(double& targetPTS) {
+    std::lock_guard<std::mutex> lock(seekMutex_);
+    if (!seekRequest_.pending.load()) return false;
+    targetPTS = seekRequest_.target.load();
+    seekRequest_.pending.store(false);
+    return true;
 }
 
 // 背压控制
@@ -95,24 +127,52 @@ void DemuxWorker::waitForPacketSpace() {
 
 bool DemuxWorker::processSeekRequest() {
     double seekTime;
-    {
-        std::lock_guard<std::mutex> lock(seekMutex_);
-        if (!seekRequest_.pending) {
-            return false;
-        }
-        seekTime = seekRequest_.target;
-        seekRequest_.pending = false;
-    }
+    if (!takePendingSeek(seekTime)) return false;
 
     LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
 
-    // DASH 流：pipe 输入不可 seek，必须重启上游连接通过 HTTP Range 跳转
-    if (player_->dashMerger_) {
-        restartDashMerger(seekTime);
+    if (player_->lastExtractedInfo_.isDash) {
+        // 用户连续点击/拖动会在数百毫秒内产生多个离散 seek。立即建连只会反复取消 TLS，
+        // 日志中 175→167→145→163→72→220 共浪费约 5 秒。等待短暂静默并持续吸收最新
+        // 目标，一次手势只建立最终一组视频/音频连接。
+        for (;;) {
+            const int64_t quietNs = steadyNowNs() - lastSeekPostNs_.load(std::memory_order_acquire);
+            const int64_t debounceNs = static_cast<int64_t>(kDashSeekDebounceMs) * 1'000'000;
+            if (quietNs >= debounceNs) break;
+            if (player_->shouldQuit_.load()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            double newerTarget;
+            if (takePendingSeek(newerTarget)) seekTime = newerTarget;
+        }
+        // 静默期结束前恰好到达的最后目标再取一次，避免 10ms 边界竞态。
+        double newestTarget;
+        if (takePendingSeek(newestTarget)) seekTime = newestTarget;
+        LOG_INFO("DASH seek debounce settled at " + std::to_string(seekTime) + " seconds");
+    }
+
+    // DASH 类型不能用 dashMerger_ 是否非空判断：一次网络失败会清空对象，但下一次 seek
+    // 仍必须走 DASH 重建路径；否则会对空 demuxer_ 调用 seek 并崩溃。
+    if (player_->lastExtractedInfo_.isDash) {
+        // seek 失败且没有更新目标时，播放器已回退到稳定状态；不能把它当成 supersede
+        // 无限循环，也不能继续进入依赖 demuxer_ 的读包路径。
+        while (!restartDashMerger(seekTime)) {
+            if (player_->shouldQuit_.load()) return true;
+            if (!takePendingSeek(seekTime)) return false;
+            LOG_INFO("DASH seek superseded, restarting latest target: " +
+                     std::to_string(seekTime) + " seconds");
+        }
         return true;
     }
 
     int64_t seekTimestamp = static_cast<int64_t>(seekTime * 1000000);
+    if (!player_->demuxer_) {
+        LOG_ERROR("Seek ignored: demuxer is unavailable");
+        player_->clockController_->finishSeekToTarget();
+        player_->cancelSeekAlignment();
+        if (player_->audioPausedForSeek_.load(std::memory_order_acquire))
+            player_->releaseAudioSeekGate();
+        return false;
+    }
     if (player_->demuxer_->seek(seekTimestamp)) {
         // packet 队列已由 seek()（UI 线程）flush 并 bump serial，且 demux 在 pending 期间丢弃
         // 旧包，此处队列已空，无需再 flush。仅清理 demux 线程独占、seek() 未触碰的状态：
@@ -121,6 +181,9 @@ bool DemuxWorker::processSeekRequest() {
         if (player_->subtitleManager_) player_->subtitleManager_->clear();
         player_->pendingAudioOffset_.store(0);
 
+        // Demuxer 已完成重定位。从此刻起，新 serial 帧才有资格完成 A/V 对齐并恢复设备。
+        player_->seekDemuxReady_.store(true, std::memory_order_release);
+
         // 通知同步器更新时钟，重置音频播放位置
         player_->clockController_->avSync()->seekTo(seekTime);
         player_->currentAudioFramePTS_.store(seekTime);
@@ -128,7 +191,16 @@ bool DemuxWorker::processSeekRequest() {
 
         // 启用精确跳转模式
         player_->clockController_->startSeekToTarget(seekTime);
-        LOG_INFO("Seek: target PTS = " + std::to_string(seekTime));
+        // 网络 VOD 的 Range seek 到这里才真正完成；从数据源已重定位的时刻重算 8s
+        // 精确解码窗口，不能把 CDN 等待时间算进 decode timeout。
+        player_->clockController_->resetSeekTimer();
+        LOG_INFO("Seek: target PTS = " + std::to_string(seekTime) +
+                 ", decode timeout=" + std::to_string(player_->seekTimeoutSeconds()) + "s");
+    } else {
+        player_->clockController_->finishSeekToTarget();
+        player_->cancelSeekAlignment();
+        if (player_->audioPausedForSeek_.load(std::memory_order_acquire))
+            player_->releaseAudioSeekGate();
     }
     // 即使 demuxer_->seek 失败，pending 请求也已消费：返回 true 让调用方解除 EOF 停泊，
     // 由后续读取/重试按实际位置自然恢复，避免卡在停泊态。
@@ -137,78 +209,124 @@ bool DemuxWorker::processSeekRequest() {
 
 // DASH 流 seek
 
-void DemuxWorker::restartDashMerger(double seekTime) {
-    LOG_INFO("restartDashMerger: seekTime=" + std::to_string(seekTime));
-
-    // packet 队列已由 seek()（UI 线程）flush 并 bump serial，且 demux 在 pending 期间丢弃旧包，
-    // 此处队列已空、decode 线程阻塞在空队列的 get() 上，无需再 flush。仅清理 demux 线程独占、
-    // seek() 未触碰的字幕与音频回调残留状态。
-    if (player_->subtitleDecoder_) player_->subtitleDecoder_->flush();
-    if (player_->subtitleManager_) player_->subtitleManager_->clear();
-    player_->pendingAudioOffset_.store(0);
-
-    // 停止旧 merger（其内部线程会被 join）
+void DemuxWorker::commitDashPipeline(std::unique_ptr<DashMerger> merger,
+                                           std::unique_ptr<Demuxer> demuxer) {
+    // 候选已经完全可读，先关旧 Demuxer 读端，再停止旧 merger 写端，最后原子式替换
+    // 两个 owner。整个函数仅在 demux 线程运行，不与播放控制线程竞争 unique_ptr。
+    player_->demuxer_.reset();
     if (player_->dashMerger_) {
         player_->dashMerger_->stop();
         player_->dashMerger_.reset();
     }
-    // 重置 demuxer，关闭旧 pipe 读端
-    player_->demuxer_.reset();
+    player_->dashMerger_ = std::move(merger);
+    player_->demuxer_ = std::move(demuxer);
+}
 
-    // 重启 merger + 打开 demuxer：bilibili 分片经代理拉取偶发瞬时失败（TLS pull error
-    // 等），单次失败不应让整个 seek 永久 ERROR。重试若干次，每次失败清理本轮残留后重来。
-    constexpr int kMaxRestartAttempts = 3;
-    bool opened = false;
-    for (int attempt = 1; attempt <= kMaxRestartAttempts && !opened; ++attempt) {
-        // 用 -ss 参数重启 merger，从指定时间开始下载
-        player_->dashMerger_ = std::make_unique<DashMerger>();
-        if (!player_->dashMerger_->start(player_->lastExtractedInfo_.videoUrl,
-                                         player_->lastExtractedInfo_.audioUrl,
-                                         player_->lastExtractedInfo_.headers,
-                                         seekTime)) {
-            LOG_WARN("restartDashMerger: DashMerger 启动失败 (尝试 " +
-                     std::to_string(attempt) + "/" + std::to_string(kMaxRestartAttempts) + ")");
-            player_->dashMerger_.reset();
+bool DemuxWorker::restartDashMerger(double seekTime) {
+    const auto restartStart = std::chrono::steady_clock::now();
+    const uint64_t generation = seekGeneration_.load(std::memory_order_acquire);
+    const uint64_t dashGeneration = player_->dashSeekGeneration_.load(std::memory_order_acquire);
+    LOG_INFO("restartDashMerger: seekTime=" + std::to_string(seekTime));
+
+    if (player_->subtitleDecoder_) player_->subtitleDecoder_->flush();
+    if (player_->subtitleManager_) player_->subtitleManager_->clear();
+    player_->pendingAudioOffset_.store(0);
+
+    // 准备候选流期间保留旧 demux/merger，旧画面和队列仍是有效回退点。仅暂停音频设备，
+    // 防止目标切换期间继续推进旧 AClock；候选失败后可以安全恢复旧音频。
+    if (player_->audioOutput_ && player_->audioOutput_->isPlaying() &&
+        !player_->audioPausedForSeek_.exchange(true)) {
+        player_->audioOutput_->pauseAndFlush();
+    }
+
+    const auto& cfg = Config::getInstance().get();
+    const bool proxyAvailable = cfg.proxyEnabled && !cfg.httpProxy.empty();
+    const int maxRestartAttempts = proxyAvailable ? 2 : 1;
+    constexpr int kRetryBackoffMs = 150;
+    const auto restartDeadline = restartStart + std::chrono::seconds(12);
+    for (int attempt = 1; attempt <= maxRestartAttempts; ++attempt) {
+        if (std::chrono::steady_clock::now() >= restartDeadline) {
+            LOG_WARN("restartDashMerger: 已达到 12s 总预算，停止重试");
+            break;
+        }
+        if (seekGeneration_.load(std::memory_order_acquire) != generation) return false;
+
+        auto candidateMerger = std::make_unique<DashMerger>();
+        // 已配置代理时先使用代理（保持与播放/鉴权路径一致）；若代理发生 TLS/pull 错误，
+        // 第二次候选改用直连，避免对同一故障路由机械重试。
+        const bool useProxyThisAttempt = proxyAvailable && attempt == 1;
+        LOG_INFO("restartDashMerger: 候选 " + std::to_string(attempt) + "/" +
+                 std::to_string(maxRestartAttempts) +
+                 (useProxyThisAttempt ? " 使用代理" : " 使用直连"));
+        if (!candidateMerger->start(player_->lastExtractedInfo_.videoUrl,
+                                    player_->lastExtractedInfo_.audioUrl,
+                                    player_->lastExtractedInfo_.headers,
+                                    seekTime,
+                                    &player_->dashSeekGeneration_,
+                                    dashGeneration,
+                                    &player_->shouldQuit_,
+                                    useProxyThisAttempt)) {
+            LOG_WARN("restartDashMerger: 候选启动失败 (尝试 " +
+                     std::to_string(attempt) + "/" + std::to_string(maxRestartAttempts) + ")");
+            if (attempt < maxRestartAttempts)
+                std::this_thread::sleep_for(std::chrono::milliseconds(kRetryBackoffMs));
             continue;
         }
 
-        // 重新打开 demuxer 读取新 pipe
-        player_->demuxer_ = std::make_unique<Demuxer>();
-        player_->dashMerger_->waitReady();
-        opened = player_->lastExtractedInfo_.headers.empty() && player_->lastExtractedInfo_.duration == 0.0
-            ? player_->demuxer_->open(player_->dashMerger_->getPipeUrl())
-            : player_->demuxer_->open(player_->dashMerger_->getPipeUrl(),
-                                      player_->lastExtractedInfo_.headers,
-                                      player_->lastExtractedInfo_.duration);
-        if (!opened) {
-            LOG_WARN("restartDashMerger: Demuxer 打开失败 (尝试 " +
-                     std::to_string(attempt) + "/" + std::to_string(kMaxRestartAttempts) +
-                     ")，清理后重试");
-            // 清理本轮残留：merger 线程可能已因网络错误退出，demuxer 持有半开 pipe
-            player_->demuxer_.reset();
-            if (player_->dashMerger_) { player_->dashMerger_->stop(); player_->dashMerger_.reset(); }
+        if (!candidateMerger->waitReady()) {
+            candidateMerger->stop();
+            if (seekGeneration_.load(std::memory_order_acquire) != generation) return false;
+            LOG_WARN("restartDashMerger: 候选准备失败 (尝试 " +
+                     std::to_string(attempt) + "/" + std::to_string(maxRestartAttempts) + ")");
+            if (attempt < maxRestartAttempts)
+                std::this_thread::sleep_for(std::chrono::milliseconds(kRetryBackoffMs));
+            continue;
         }
+        if (seekGeneration_.load(std::memory_order_acquire) != generation) {
+            candidateMerger->stop();
+            return false;
+        }
+
+        auto candidateDemuxer = std::make_unique<Demuxer>();
+        const std::string candidatePipeUrl = candidateMerger->getPipeUrl();
+        const bool opened = candidateDemuxer->openSelfDescribingPipe(
+            candidatePipeUrl, player_->lastExtractedInfo_.duration);
+        if (!opened) {
+            candidateDemuxer.reset();
+            candidateMerger->stop();
+            if (seekGeneration_.load(std::memory_order_acquire) != generation) return false;
+            LOG_WARN("restartDashMerger: 候选 Demuxer 打开失败 (尝试 " +
+                     std::to_string(attempt) + "/" + std::to_string(maxRestartAttempts) + ")");
+            continue;
+        }
+
+        // 直到候选 pipe 已成功解析才提交，下一次 generation 不再截断当前已提交流。
+        candidateMerger->commitPreparedStream();
+        commitDashPipeline(std::move(candidateMerger), std::move(candidateDemuxer));
+        player_->seekDemuxReady_.store(true, std::memory_order_release);
+
+        player_->clockController_->avSync()->seekTo(seekTime);
+        player_->currentAudioFramePTS_.store(seekTime);
+        player_->samplesPlayedInFrame_.store(0);
+        player_->clockController_->resetSeekTimer();
+
+        LOG_INFO("restartDashMerger: 完成，从 " + std::to_string(seekTime) +
+                 "s 开始播放，总耗时=" + std::to_string(
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - restartStart).count()) + "ms");
+        return true;
     }
 
-    if (!opened) {
-        LOG_ERROR("restartDashMerger: 重试 " + std::to_string(kMaxRestartAttempts) +
-                  " 次后仍失败，放弃 seek");
-        player_->triggerError("DASH 流 seek 失败");
-        player_->setState(PlayerState::ERRORED);
-        return;
-    }
-
-    // 校准 AV 同步时钟到目标位置（上游已从 seekTime 开始流，PTS 保持原值）
-    player_->clockController_->avSync()->seekTo(seekTime);
-    player_->currentAudioFramePTS_.store(seekTime);
-    player_->samplesPlayedInFrame_.store(0);
-
-    // 重置精确跳转计时窗口：上游重启耗时数秒，远超 2s 超时；从此刻起算，
-    // 让 decode 线程读到新数据后第一帧走「到达目标」分支，而非误判超时。
-    // decodingToTarget_ / decodeTargetPTS_ 维持 seek() 所置值不变。
-    player_->clockController_->resetSeekTimer();
-
-    LOG_INFO("restartDashMerger: 完成，从 " + std::to_string(seekTime) + "s 开始播放");
+    if (seekGeneration_.load(std::memory_order_acquire) != generation) return false;
+    player_->cancelSeekAlignment();
+    if (player_->audioPausedForSeek_.load(std::memory_order_acquire))
+        player_->releaseAudioSeekGate();
+    player_->clockController_->finishSeekToTarget();
+    const double fallbackPTS = player_->clockController_->avSync()->getVideoClock();
+    player_->lastRenderedPTS_.store(fallbackPTS);
+    player_->triggerError("DASH 流 seek 失败，请重试");
+    LOG_ERROR("restartDashMerger: 候选重试耗尽，继续保留旧播放管线");
+    return false;
 }
 
 // Demux 主循环
@@ -240,9 +358,14 @@ void DemuxWorker::run() {
             recordingService_->processPendingRequests();
         }
 
-        // 处理 seek 请求（仅 demux 线程触碰 demuxer / packet 队列 serial）
-        processSeekRequest();
+        // 处理 seek 请求（仅 demux 线程触碰 demuxer / packet 队列 serial）。失败时本轮
+        // demuxer_ 可能为空，直接停泊等待下一个 seek/stop，禁止继续解引用导致崩溃。
+        const bool seekProcessed = processSeekRequest();
         if (shouldQuit_.load()) break;
+        if (!demuxer_) {
+            if (!seekProcessed) std::this_thread::sleep_for(std::chrono::milliseconds(kEofParkWaitMs));
+            continue;
+        }
 
         // 背压：packet 队列过满时等待 decode 线程消费
         waitForPacketSpace();
@@ -268,6 +391,14 @@ void DemuxWorker::run() {
                     av_packet_unref(packet);
                     continue;
                 }
+            }
+
+            // 起播阶段以首个视频 IDR 为共同边界：IDR 之前的视频无法解码，对应的旧音频
+            // 也不应入队。日志中 audio=-10.634、video=-7.432 的 3.2s 差值正来自这段旧音频。
+            // 丢弃后，音视频各自以 IDR 附近首帧归零，避免起播后追赶或突然快进。
+            if (isLiveStream_ && !sawFirstKeyframe_.load() && packet->stream_index != videoIdx) {
+                av_packet_unref(packet);
+                continue;
             }
 
             player_->totalBytesRead_.fetch_add(packet->size);

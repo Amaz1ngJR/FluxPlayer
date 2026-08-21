@@ -10,6 +10,8 @@
 #include "FluxPlayer/decoder/Frame.h"
 #include "FluxPlayer/decoder/VideoDecoder.h"
 #include "FluxPlayer/decoder/AudioDecoder.h"
+#include "FluxPlayer/audio/AudioOutput.h"
+#include "FluxPlayer/core/PlayerState.h"
 #include "FluxPlayer/utils/Logger.h"
 
 #include <cmath>
@@ -72,8 +74,10 @@ void DecodeWorker::runVideo() {
         // seek 循环级超时保护：enqueueVideoFrame 的超时依赖视频帧产生；若解码器因参考帧
         // 缺失等长时间不产帧，超时永不触发。此处仅清除 decodingToTarget_，让后续帧按实际
         // PTS 自然重新校准 AV sync（见 enqueueVideoFrame）。
-        if (clockController_->isSeekTimedOut()) {
+        if (clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
             clockController_->finishSeekToTarget();
+            // 无视频帧可用于精确落点时解除视频等待；音频仍按自己的门控独立对齐。
+            player_->markSeekVideoAligned(player_->lastRenderedPTS_.load());
             LOG_WARN("Seek loop timeout, no frames produced, awaiting next frame for resync");
         }
 
@@ -142,8 +146,13 @@ void DecodeWorker::runAudio() {
 
     while (!shouldQuit_.load()) {
         // seek 超时保护（纯音频模式无视频线程时由本线程兜底清除 decodingToTarget_）
-        if (clockController_->isSeekTimedOut()) {
+        if (clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
             clockController_->finishSeekToTarget();
+            // 纯音频或目标附近无音频帧时不能永久固定 UI；回退到当前 AClock。
+            const double fallbackAudioPTS = clockController_->avSync()->getAudioClockBase();
+            player_->markSeekAudioAligned(fallbackAudioPTS);
+            if (player_->audioPausedForSeek_.load(std::memory_order_acquire))
+                player_->releaseAudioSeekGate();
             LOG_WARN("Seek loop timeout (audio), awaiting next frame for resync");
         }
 
@@ -177,9 +186,19 @@ void DecodeWorker::runAudio() {
             if (!normalizeAudioPTS(rawFrame)) {
                 continue;  // 无效帧已在 normalize 内丢弃
             }
-            if (!enqueueAudioFrame(rawFrame, serial)) {
+            bool audioEnqueued = false;
+            if (!enqueueAudioFrame(rawFrame, serial, &audioEnqueued)) {
                 rawFrame.unreference();
                 break;
+            }
+            // 只有目标帧完成格式转换并真正入队后才能恢复设备；目标前丢弃帧返回 true
+            // 但 enqueued=false，不能过早解除门控重现 underrun/AClock 回跳。
+            if (audioEnqueued && player_->seekDemuxReady_.load(std::memory_order_acquire) &&
+                player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
+                // 此处只说明目标音频已入队，可以恢复设备；A/V 对齐要等设备回调真正
+                // 消费该帧并提交新 AClock 后再发布，否则 UI 会过早切回旧音频时钟。
+                player_->releaseAudioSeekGate();
+                LOG_INFO("Seek: first target audio frame queued, audio output resumed");
             }
             rawFrame.unreference();
             checkPrebufferComplete();
@@ -248,6 +267,7 @@ bool DecodeWorker::normalizeAudioPTS(Frame& rawFrame) {
         return false;
     }
     rawFrame.setPTS(r.pts);
+    rawFrame.setPTSEstimated(r.estimated);
     return true;
 }
 
@@ -285,6 +305,14 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         return true;
     }
 
+    // seek 已发布但 Demuxer 尚未完成重定位时，任何解码输出都属于旧 read/decoder 残留。
+    // 即使 serial 防线因极端调度未拦住，也不能让它进入新 frame queue 或完成视频对齐。
+    if (!player_->seekDemuxReady_.load(std::memory_order_acquire) &&
+        !player_->seekVideoAligned_.load(std::memory_order_acquire)) {
+        rawFrame.unreference();
+        return true;
+    }
+
     // 精确跳转处理：快速丢弃所有中间帧
     if (clockController_->isDecodingToTarget()) {
         double targetPTS = clockController_->getDecodeTargetPTS();
@@ -292,13 +320,14 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         if (framePTS < targetPTS - 0.001) {  // 允许1ms的误差
             // 超时保护：seek 落点远早于目标时（如文件损坏导致 FFmpeg 回退到更早位置），
             // 避免长时间丢帧卡住，超过 2 秒后放弃精确跳转，从当前帧开始播放
-            if (clockController_->isSeekTimedOut()) {
+            if (clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
                 clockController_->finishSeekToTarget();
                 // 超时后重新校准 AV 同步时钟到实际位置，
                 // 否则 AClock 仍指向旧目标，渲染循环会强制跳 VClock 导致进度条错误
                 clockController_->avSync()->seekTo(framePTS);
                 player_->currentAudioFramePTS_.store(framePTS);
                 player_->samplesPlayedInFrame_.store(0);
+                player_->markSeekVideoAligned(framePTS);
                 LOG_WARN("Seek timeout, giving up, playing from PTS=" + std::to_string(framePTS));
                 // fall through：将当前帧入队，从此处开始播放
             } else {
@@ -309,6 +338,7 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         else {
             // **到达目标位置**
             clockController_->finishSeekToTarget();
+            player_->markSeekVideoAligned(framePTS);
             // seek 落点偏移检测：FFmpeg 回退到更晚的关键帧时，
             // 实际 PTS 可能远大于目标，需重新校准 AV 同步时钟，
             // 否则音频输出仍期望从旧目标位置开始，导致 AQueue 耗尽、播放器冻结
@@ -381,7 +411,8 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
     return true;
 }
 
-bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
+bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued) {
+    if (enqueued) *enqueued = false;
     auto& audioPktQueue_ = player_->queueManager_->audioPacketQueue();
     auto& audioQueue_ = player_->queueManager_->audioFrameQueue();
     auto& audioDecoder_ = player_->audioDecoder_;
@@ -428,27 +459,29 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
         }
     }
 
-    // 音频跳转：丢弃目标位置之前的所有音频帧
-    // 注意：音频不需要显示第一帧，直接快速丢弃到目标位置即可
-    if (clockController_->isDecodingToTarget()) {
-        double targetPTS = clockController_->getDecodeTargetPTS();
-
+    // 音频 seek 门控必须独立于 decodingToTarget：视频通常先到目标并清除共享标志，
+    // 音频仍可能落后数秒。Demuxer 未完成重定位前的所有输出都是旧残留，直接丢弃。
+    if (!player_->seekDemuxReady_.load(std::memory_order_acquire) &&
+        player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
+        rawFrame.unreference();
+        return true;
+    }
+    if (player_->seekDemuxReady_.load(std::memory_order_acquire) &&
+        player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
+        const double targetPTS = clockController_->getDecodeTargetPTS();
         if (audioPTS < targetPTS - 0.001) {
-            // 音频帧在目标位置之前，直接丢弃（跳过格式转换）
             rawFrame.unreference();
             return true;
         }
-
-        // seek 落点偏移检测：音频帧 PTS 远超目标（FFmpeg 回退到更晚位置），
-        // 立即重新校准 AV 同步时钟，无需等待视频帧到达，减少冻结时间
+        // 先把 AClock 基准移到真实首帧，再入队和恢复设备；这样音频回调的单调性保护
+        // 不会拿 seek 前的 7~15s 旧时钟拒绝 1~3s 的新 PTS。
+        clockController_->avSync()->updateAudioClock(audioPTS);
+        player_->currentAudioFramePTS_.store(audioPTS);
+        player_->samplesPlayedInFrame_.store(0);
+        player_->allowAudioClockRebase_.store(true, std::memory_order_release);
         if (audioPTS - targetPTS > 2.0) {
-            clockController_->finishSeekToTarget();
-            clockController_->avSync()->seekTo(audioPTS);
-            player_->currentAudioFramePTS_.store(audioPTS);
-            player_->samplesPlayedInFrame_.store(0);
-            LOG_WARN("Seek: audio PTS=" + std::to_string(audioPTS)
-                     + " far from target=" + std::to_string(targetPTS)
-                     + ", recalibrating early");
+            LOG_WARN("Seek: audio PTS=" + std::to_string(audioPTS) +
+                     " far from target=" + std::to_string(targetPTS));
         }
     }
 
@@ -458,6 +491,7 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
     if (!audioWritable) {
         // 队列满：先释放 rawFrame，再可中断等待
         double savedPTS = rawFrame.getPTS();
+        const bool savedEstimated = rawFrame.isPTSEstimated();
         AVFrame* tempAudio = av_frame_alloc();
         av_frame_move_ref(tempAudio, rawFrame.getAVFrame());
 
@@ -468,8 +502,10 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
         }
         if (audioDecoder_->convertToS16(tempAudio, *audioWritable)) {
             audioWritable->setPTS(savedPTS);
+            audioWritable->setPTSEstimated(savedEstimated);
             audioWritable->setType(FrameType::AUDIO);
             audioQueue_->push();
+            if (enqueued) *enqueued = true;
         } else {
             LOG_WARN("Failed to convert audio frame to S16 format");
             audioWritable->unreference();
@@ -478,8 +514,10 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial) {
     } else {
         if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
             audioWritable->setPTS(rawFrame.getPTS());
+            audioWritable->setPTSEstimated(rawFrame.isPTSEstimated());
             audioWritable->setType(FrameType::AUDIO);
             audioQueue_->push();
+            if (enqueued) *enqueued = true;
         } else {
             LOG_WARN("Failed to convert audio frame to S16 format");
             audioWritable->unreference();

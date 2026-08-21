@@ -64,6 +64,7 @@ namespace {
 // 否则设备线程迟迟不提交新 buffer，主时钟反而会停住。
 constexpr double kMaxAudioCatchupDiscardSec = 0.25;
 constexpr int kMaxHighSpeedFrameDropsPerTick = 64;
+constexpr int kMaxLiveCatchupDropsPerTick = 8; // 限制单次直播追赶工作量，避免主线程长时间不交换帧
 
 /**
  * 用 FFmpeg 将任意格式图片数据解码为 RGBA 像素
@@ -334,14 +335,24 @@ bool Player::open(const std::string& filePath) {
         if (info.isDash) {
             // DASH 分离流：启动合并器，Demuxer 读取管道
             dashMerger_ = std::make_unique<DashMerger>();
-            if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers)) {
+            const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
+            if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, 0.0,
+                                    &dashSeekGeneration_, dashGeneration,
+                                    &shouldQuit_)) {
                 triggerError("DASH 合并器启动失败");
                 setState(PlayerState::ERRORED);
                 return false;
             }
+            // 等待合并线程真正准备好；准备阶段网络失败时禁止继续打开空 pipe。
+            if (!dashMerger_->waitReady()) {
+                dashMerger_->stop();
+                dashMerger_.reset();
+                triggerError("DASH 合并器准备失败");
+                setState(PlayerState::ERRORED);
+                return false;
+            }
+            dashMerger_->commitPreparedStream();
             actualPath = dashMerger_->getPipeUrl();
-            // 等待合并线程完成 FFmpeg 初始化，避免和 Demuxer 竞态崩溃
-            dashMerger_->waitReady();
             LOG_INFO("Player::open: waitReady 返回, actualPath=" + actualPath);
             // 保存提取信息，用于 seek 时通过 -ss 参数重启 merger（见 restartDashMerger）
             lastExtractedInfo_ = info;
@@ -577,6 +588,9 @@ bool Player::play() {
     currentAudioFramePTS_.store(0.0);  // 重置音频播放位置
     samplesPlayedInFrame_.store(0);
     audioUnderrunCount_.store(0);  // 重置欠载计数器
+    audioPausedForSeek_.store(false);
+    allowAudioClockRebase_.store(false);
+    cancelSeekAlignment();
 
     // 重置码率统计
     totalBytesRead_.store(0);
@@ -831,6 +845,21 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 double masterClock = clockController_->avSync()->getMasterClock();
                 double rate = playbackRate_.load();
 
+                // 直播以音频主时钟调度，网络恢复后可能积压多帧。若每个 VSync 只消费一帧，
+                // 画面会长时间落后；若全部都渲染则看起来快进。丢弃明显落后帧，只渲染
+                // 接近当前主时钟的最后一帧，恢复实时但不展示快进过程。
+                if (isLiveStream_ && nextPTS < masterClock - 0.25 &&
+                    droppedThisTick < kMaxLiveCatchupDropsPerTick) {
+                    // 丢弃积压帧后同步推进 VClock；否则状态日志会永久停在旧值，且后续
+                    // 调度无法区分“正在追赶”和“视频时间轴已停滞”。
+                    clockController_->avSync()->updateVideoClock(nextPTS);
+                    droppedFrames_.fetch_add(1);
+                    queueManager_->videoFrameQueue()->consume();
+                    ++droppedThisTick;
+                    if (droppedThisTick >= kMaxLiveCatchupDropsPerTick) break;
+                    continue;
+                }
+
                 // 下一帧还没到显示时间：保持当前画面，等待主时钟追上。
                 if (nextPTS > masterClock + 0.005) {
                     if (!screenshotEffect_ || !screenshotEffect_->isActive()) {
@@ -915,6 +944,9 @@ void Player::renderVideoFrame(double& lastFrameTime) {
             // 检查 PTS 有效性，无效时不更新时钟。估算帧 PTS 单调累加，仍可驱动时钟
             bool validPTS = (std::isfinite(framePTS) &&
                             framePTS > -1e15 && framePTS < 1e15);
+            // 归一化后的 PTS（包括 discontinuity smoothing / 无 PTS 估算）已经是权威连续
+            // 时间轴。渲染真实帧时始终更新 VClock；是否 estimated 仅用于诊断，不应让
+            // VClock 长期停住后再突然跳跃。
             if (validPTS) {
                 clockController_->avSync()->updateVideoClock(framePTS);
                 lastFrameTime = framePTS;
@@ -957,16 +989,9 @@ void Player::renderVideoFrame(double& lastFrameTime) {
             if (renderer_->hasValidTexture()) {
                 renderer_->renderCachedFrame();
             }
-            // 解码器遇到损坏帧 flush 后等待下一个 I 帧期间，视频队列为空
-            // 此时让 VClock 跟随 AClock，避免进度条冻结
-            if (!clockController_->isDecodingToTarget() && !decodingFinished_.load()) {
-                double audioClock = clockController_->avSync()->getAudioClock();
-                double videoClock = clockController_->avSync()->getVideoClock();
-                if (audioClock - videoClock > 0.5) {
-                    clockController_->avSync()->updateVideoClock(audioClock);
-                    lastRenderedPTS_.store(audioClock);
-                }
-            }
+            // 队列短空时只复用最后纹理，不再把 VClock 强制写成 AClock。旧做法会让
+            // VClock 先前跳，真实视频恢复后又被较旧 PTS 覆盖，日志中出现 30→27、41→35
+            // 的倒退，并触发后续集中追帧。渲染到真实帧时再更新视频时钟。
         }
     } else {
         // 暂停或其他非播放状态：复用 GPU 纹理中的帧数据
@@ -1069,10 +1094,29 @@ double Player::getCurrentTime() const {
         return t;
     };
 
-    // 只要有音频输出，就以音频时钟作为 UI 进度和同步基准。
-    // 高倍速仍由音频回调按 playbackRate 插值推进，视频只负责追随和抽帧。
+    // seek 对齐期间禁止旧/尚未提交的 AClock 接管 UI。视频已对齐时显示实际渲染 PTS；
+    // 视频尚未对齐时固定在用户目标，直到音视频两路均 ready 才恢复音频主时钟。
+    const bool demuxReady = seekDemuxReady_.load(std::memory_order_acquire);
+    const bool videoAligned = seekVideoAligned_.load(std::memory_order_acquire);
+    const bool audioAligned = seekAudioAligned_.load(std::memory_order_acquire);
+    if (!demuxReady || !videoAligned || !audioAligned) {
+        const double uiPTS = videoAligned ? lastRenderedPTS_.load()
+                                          : seekUiTargetPTS_.load(std::memory_order_relaxed);
+        return clampToDuration(uiPTS);
+    }
+    if (audioPausedForSeek_.load(std::memory_order_acquire)) {
+        return clampToDuration(lastRenderedPTS_.load());
+    }
     if (audioOutput_ && clockController_) {
-        return clampToDuration(clockController_->avSync()->getAudioClock());
+        const double audioPTS = clampToDuration(clockController_->avSync()->getAudioClock());
+        const double videoPTS = clampToDuration(lastRenderedPTS_.load());
+        // 最后一道安全网：VOD 后退 seek 若平台音频设备仍短暂报告 seek 前时钟，不能让 UI
+        // 跨数秒跳回旧位置。正常播放 A/V 差应远小于 1s，超过阈值时以实际画面为准。
+        if (!isLiveStream_ && std::isfinite(audioPTS) && std::isfinite(videoPTS) &&
+            std::abs(audioPTS - videoPTS) > 1.0) {
+            return videoPTS;
+        }
+        return audioPTS;
     }
     // 无音频实时流降级到外部时钟（墙钟推进），否则进度条会一直停在 0。
     // 不能直接用 lastRenderedPTS_：视频帧 PTS 抖动 + 主循环偶尔卡顿会让其非匀速增长。
@@ -1186,6 +1230,9 @@ void Player::startWorkerThreads() {
 }
 
 void Player::joinWorkerThreads(bool abortQueues) {
+    // demux 可能正阻塞在 DASH 两路 HTTP open/read；先改变 generation，FFmpeg 的
+    // interrupt_callback 才能在队列 abort 之后及时退出，避免 stop/join 再等待 15 秒。
+    if (demuxWorker_) demuxWorker_->cancelPendingDashIo();
     if (abortQueues) {
         // 唤醒阻塞的线程：packet 队列 get、frame 队列 peekWritable 全部解除等待（QueueManager 聚合）
         queueManager_->abortAll();
@@ -1247,7 +1294,8 @@ void Player::triggerError(const std::string& errorMsg) {
 void Player::cleanup() {
     LOG_INFO("Cleaning up player resources");
 
-    // 停止所有线程
+    // 停止所有线程。generation 必须保持单调，只能递增，不能在复用 Player 时归零；
+    // 归零可能恰好等于旧 DashMerger 快照，让其 interrupt_callback 漏掉取消。
     shouldQuit_.store(true);
 
     // 停止录制（RecordingService 析构时自动处理，此处无需显式停止）
@@ -1317,6 +1365,10 @@ void Player::cleanup() {
 
     // 重置音频相关统计
     audioUnderrunCount_.store(0);
+    audioPausedForSeek_.store(false);
+    allowAudioClockRebase_.store(false);
+    cancelSeekAlignment();
+    dashSeekGeneration_.fetch_add(1, std::memory_order_release);
     audioQueueDepth_.store(0);
     audioBufferDelay_ = 0.0;
 }
@@ -1621,10 +1673,20 @@ bool Player::initDecoders() {
 }
 
 size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
+    // 与 seek flush 串行化。锁覆盖“取 frame + 更新 AClock”完整事务，确保 seek 返回后
+    // 不会再有 seek 前回调把旧 PTS 写回 AVSync。
+    std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
     // 参数验证
     if (!buffer || bufferSize == 0) {
         LOG_ERROR("Invalid audio callback parameters");
         return 0;
+    }
+
+    // AudioQueue/WASAPI 在 pause 刚生效时可能仍有一个已排队回调。DASH seek 冷启动期
+    // 直接交付静音且不读取 frame queue、不推进 AClock，也不计入 underrun。
+    if (audioPausedForSeek_.load(std::memory_order_acquire)) {
+        std::memset(buffer, 0, bufferSize);
+        return bufferSize;
     }
 
     if (!audioDecoder_ || audioSampleRate_ == 0 || audioChannels_ == 0) {
@@ -1674,7 +1736,9 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
         if (!hasFrame) {
             int underruns = audioUnderrunCount_.fetch_add(1) + 1;
-            if (underruns % 10 == 1) {
+            // 首次立即记录，之后每约 2.5s（100 个 25ms buffer）记录一次，避免网络抖动时
+            // 每 250ms 同步写日志反过来放大解码/渲染卡顿。
+            if (underruns == 1 || underruns % 100 == 0) {
                 LOG_WARN("Audio underrun detected, count: " + std::to_string(underruns));
             }
             queueDepth = 0;
@@ -1795,17 +1859,32 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         if (hasValidFrame) {
             double consumedMediaDuration = static_cast<double>(inSamples) / audioSampleRate_;
             currentAudioPTS = firstFramePTS + consumedMediaDuration;
-            if (currentAudioPTS + kAudioCatchupToleranceSec < previousAudioPTS) {
+            // 普通连续播放禁止 AClock 倒退；seek 后第一批新音频是合法重定位，必须允许
+            // 从旧的 10.9s 回到 3.6s，否则该保护会把进度条再次钉回旧位置。
+            const bool allowRebase = allowAudioClockRebase_.exchange(false, std::memory_order_acq_rel);
+            if (!allowRebase && currentAudioPTS + kAudioCatchupToleranceSec < previousAudioPTS) {
                 audioCatchupTargetPTS_.store(previousAudioPTS);
                 currentAudioPTS = previousAudioPTS;
             }
+        }
+
+        // 直播音频短暂断粮时，设备仍持续播放静音 buffer。若 AClock 完全停住，视频会
+        // 堵在浅队列里，音频恢复并一次跳到新 PTS 后视频才集中追赶，表现为“卡住后快进”。
+        // 仅直播且尚未 EOF 时按设备实际输出时长连续推进；新音频到来后 normalizer 已将
+        // 时间戳连续化，不会产生大幅回跳。
+        // 仅在整份设备 buffer 都没有真实音频时合成推进；部分填充已经用真实样本 PTS
+        // 计算 consumedMediaDuration，再按整 buffer 推进会重复计时，让 AClock 持续快于视频。
+        if (isLiveStream_ && inputFilled == 0 && !audioDrainedEof_.load()) {
+            currentAudioPTS = previousAudioPTS + outputDuration * rate;
+            shouldUpdateClock = true;
+            if (ptsNormalizer_) ptsNormalizer_->advanceAudioTimeline(outputDuration * rate);
         }
 
         // 4x/8x/16x 下音频队列短暂打空是常态。此时设备仍按墙钟输出
         // 一个 buffer（可能是静音），如果 AClock 不推进，音频主时钟会停住，
         // 视频追到该点后就只能等待。高倍速欠载时用输出时长 * rate 合成推进，
         // 让“音频主时钟”保持为播放调度主钟，而不是被队列瞬时欠载拖死。
-        if (rate >= 4.0 && inputFilled < inputNeeded && !audioDrainedEof_.load()) {
+        if (!isLiveStream_ && rate >= 4.0 && inputFilled < inputNeeded && !audioDrainedEof_.load()) {
             double syntheticPTS = previousAudioPTS + outputDuration * rate;
             if (duration_ > 0.0) {
                 syntheticPTS = std::min(syntheticPTS, duration_);
@@ -1824,6 +1903,10 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
         if (shouldUpdateClock) {
             clockController_->avSync()->updateAudioClock(currentAudioPTS);
+            // 音频真正提交到设备回调后才宣布对齐；此时 getCurrentTime 切回 AClock 不会
+            // 读到 seek 前值。mark 内部同时更新 UI 锚点，兼容只有音频的媒体。
+            if (!seekAudioAligned_.load(std::memory_order_acquire))
+                markSeekAudioAligned(currentAudioPTS);
         }
     }
 
@@ -1966,8 +2049,14 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     if (info.isDash) {
         dashMerger_ = std::make_unique<DashMerger>();
         // 直接用 seekTime 启动 merger（-ss 参数），避免在 pipe 上 seek
-        dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime);
-        actualUrl = dashMerger_->getPipeUrl();
+        const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
+        if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime,
+                                &dashSeekGeneration_, dashGeneration, &shouldQuit_)) {
+            LOG_ERROR("switchQuality: DASH 合并器启动失败");
+            dashMerger_.reset();
+            setState(PlayerState::ERRORED);
+            return false;
+        }
         lastExtractedInfo_ = info;
     } else {
         actualUrl = info.videoUrl;
@@ -1975,7 +2064,18 @@ bool Player::switchQuality(const std::string& formatId, double seekTime) {
     }
 
     demuxer_ = std::make_unique<Demuxer>();
-    if (info.isDash) dashMerger_->waitReady();
+    if (info.isDash && !dashMerger_->waitReady()) {
+        LOG_ERROR("switchQuality: DASH 合并器准备失败");
+        dashMerger_->stop();
+        dashMerger_.reset();
+        demuxer_.reset();
+        setState(PlayerState::ERRORED);
+        return false;
+    }
+    if (info.isDash) {
+        dashMerger_->commitPreparedStream();
+        actualUrl = dashMerger_->getPipeUrl();
+    }
     bool opened = headers.empty() && info.duration == 0.0
         ? demuxer_->open(actualUrl)
         : demuxer_->open(actualUrl, headers, info.duration);
@@ -2091,6 +2191,40 @@ void Player::pumpCommands() {
 // 公开方法投递命令，命令 execute() 调用这些 *Internal() 方法真正落地。
 // 后续阶段公开方法会改为「投递命令」，命令 execute() 调用 *Internal() 真正落地。
 
+void Player::markSeekVideoAligned(double pts) {
+    if (std::isfinite(pts)) {
+        lastRenderedPTS_.store(pts);
+        // 视频实际落点可晚于用户目标（关键帧/时间戳偏移）；在音频尚未提交前 UI 应跟随
+        // 这个真实画面位置，而不是继续显示旧目标。
+        seekUiTargetPTS_.store(pts, std::memory_order_relaxed);
+    }
+    seekVideoAligned_.store(true, std::memory_order_release);
+}
+
+void Player::markSeekAudioAligned(double pts) {
+    if (std::isfinite(pts)) seekUiTargetPTS_.store(pts, std::memory_order_relaxed);
+    seekAudioAligned_.store(true, std::memory_order_release);
+}
+
+void Player::cancelSeekAlignment() {
+    seekVideoAligned_.store(true, std::memory_order_release);
+    seekAudioAligned_.store(true, std::memory_order_release);
+    seekDemuxReady_.store(true, std::memory_order_release);
+}
+
+bool Player::releaseAudioSeekGate() {
+    bool shouldResume = false;
+    {
+        std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
+        if (!audioDeviceFlushReady_.load(std::memory_order_acquire)) return false;
+        if (!audioPausedForSeek_.exchange(false, std::memory_order_acq_rel)) return false;
+        shouldResume = audioOutput_ && stateManager_->current() == PlayerState::PLAYING;
+    }
+    // 不持有回调锁启动设备；部分平台可能在 start/restart 内同步触发一次回调。
+    if (shouldResume) audioOutput_->resume();
+    return true;
+}
+
 void Player::seekInternal(double seconds) {
     if (stateManager_->current() == PlayerState::IDLE || stateManager_->current() == PlayerState::ERRORED) {
         LOG_WARN("Cannot seek: invalid state");
@@ -2106,25 +2240,53 @@ void Player::seekInternal(double seconds) {
     LOG_INFO("Player::seekInternal() - seconds=" + std::to_string(seconds));
     LOG_INFO("  lastRenderedPTS before=" + std::to_string(lastRenderedPTS_.load()));
 
-    // 通过 DemuxWorker 投递 seek 请求（demux 线程下一轮循环落地）
-    if (demuxWorker_) {
-        demuxWorker_->postSeek(seconds);
+    {
+        // 门控必须早于 pauseAndFlush 可见；否则 decode 线程可能在平台 Reset 尚未完成时
+        // 恢复设备，随后 Reset 再把刚恢复的 AudioQueue 置空/暂停。
+        std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
+        audioPausedForSeek_.store(true, std::memory_order_release);
+        audioDeviceFlushReady_.store(false, std::memory_order_release);
+    }
+    if (audioOutput_ && audioOutput_->isPlaying()) audioOutput_->pauseAndFlush();
+    audioDeviceFlushReady_.store(true, std::memory_order_release);
+
+    // 与音频回调串行化后再发布目标与清队列，保证所有 seek 前回调已经结束。
+    {
+        std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
+
+        // 先发布目标，再投递 pending seek，随后建立 packet serial 边界并清 frame queue。
+        // 顺序不能反过来：若先 flush、后 postSeek，demux 正好在两者之间读完一个旧 packet，
+        // pending 仍为 false，它会把旧 packet 按 flush 后的新 serial 入队。
+        lastRenderedPTS_.store(seconds);
+        seekUiTargetPTS_.store(seconds, std::memory_order_relaxed);
+        seekDemuxReady_.store(false, std::memory_order_release);
+        seekVideoAligned_.store(!hasVideoStream_, std::memory_order_release);
+        seekAudioAligned_.store(!hasAudioStream_, std::memory_order_release);
+        currentAudioFramePTS_.store(seconds);
+        samplesPlayedInFrame_.store(0);
+        clockController_->startSeekToTarget(seconds);
+
+        if (demuxWorker_) {
+            // postSeek 在 seekMutex 内原子发布 pending、推进 serial 并清 frame queue。
+            demuxWorker_->postSeek(seconds);
+        }
+        pendingAudioOffset_.store(0);
+        audioCatchupTargetPTS_.store(-1.0);
+        allowAudioClockRebase_.store(false, std::memory_order_release);
+        audioUnderrunCount_.store(0);
     }
 
-    // 立即更新播放位置为目标位置
-    lastRenderedPTS_.store(seconds);
-    currentAudioFramePTS_.store(seconds);
-    samplesPlayedInFrame_.store(0);
-
-    // 立即进入精确跳转模式
-    clockController_->startSeekToTarget(seconds);
-
-    // 立即 flush packet 队列（serial++）
-    if (queueManager_->videoPacketQueue()) queueManager_->videoPacketQueue()->flush();
-    if (queueManager_->audioPacketQueue()) queueManager_->audioPacketQueue()->flush();
+    if (!demuxWorker_) {
+        clockController_->finishSeekToTarget();
+        cancelSeekAlignment();
+        releaseAudioSeekGate();
+        LOG_ERROR("Cannot seek: demux worker is unavailable");
+        return;
+    }
 
     LOG_INFO("  lastRenderedPTS after=" + std::to_string(lastRenderedPTS_.load()));
     LOG_INFO("  seekTarget=" + std::to_string(seconds));
+    LOG_INFO("  seek frame queues flushed, audio output gated until target audio frame");
 }
 
 void Player::pauseInternal() {
@@ -2291,8 +2453,14 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime)
     std::string headers;
     if (info.isDash) {
         dashMerger_ = std::make_unique<DashMerger>();
-        dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime);
-        actualUrl = dashMerger_->getPipeUrl();
+        const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
+        if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime,
+                                &dashSeekGeneration_, dashGeneration, &shouldQuit_)) {
+            LOG_ERROR("switchQualityInternal: DASH 合并器启动失败");
+            dashMerger_.reset();
+            setState(PlayerState::ERRORED);
+            return;
+        }
         lastExtractedInfo_ = info;
     } else {
         actualUrl = info.videoUrl;
@@ -2300,7 +2468,18 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime)
     }
 
     demuxer_ = std::make_unique<Demuxer>();
-    if (info.isDash) dashMerger_->waitReady();
+    if (info.isDash && !dashMerger_->waitReady()) {
+        LOG_ERROR("switchQualityInternal: DASH 合并器准备失败");
+        dashMerger_->stop();
+        dashMerger_.reset();
+        demuxer_.reset();
+        setState(PlayerState::ERRORED);
+        return;
+    }
+    if (info.isDash) {
+        dashMerger_->commitPreparedStream();
+        actualUrl = dashMerger_->getPipeUrl();
+    }
     bool opened = headers.empty() && info.duration == 0.0
         ? demuxer_->open(actualUrl)
         : demuxer_->open(actualUrl, headers, info.duration);
