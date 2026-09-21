@@ -420,7 +420,7 @@ int main(int argc, char* argv[]) {
                     LOG_ERROR("Settings controller init failed");
                     break;
                 }
-                settingsCtrl.openSettingsDialog();
+                settingsCtrl.openSettingsDialog(true);   // 仅设置：不画播放器底栏
 
                 while (!ui.shouldClose() && settingsCtrl.isSettingsDialogOpen()) {
                     ui.window()->pollEvents();

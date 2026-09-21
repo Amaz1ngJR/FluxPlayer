@@ -51,7 +51,7 @@ struct MergeClip {
 };
 
 /**
- * @brief 合并选项：分辨率、GOP 策略与硬件加速配置
+ * @brief 合并选项：分辨率、编码格式、GOP 策略与硬件加速配置
  */
 struct MergeOptions {
     /// 分辨率策略
@@ -61,6 +61,39 @@ struct MergeOptions {
     };
 
     ResolutionMode resolutionMode = ResolutionMode::Unified;
+
+    /// 输出视频编码格式（Unified 模式可选）
+    enum class VideoCodec {
+        KeepSource,  ///< 不干预：各源一致时流拷贝，不一致时转码为 H.264
+        H264,        ///< 指定 H.264（与源不同才转码）
+        HEVC         ///< 指定 HEVC（与源不同才转码）
+    };
+
+    /// 输出音频编码格式（Unified 模式可选）
+    enum class AudioCodec {
+        KeepSource,  ///< 不干预：各源一致时随视频流拷贝，不一致时转码为 AAC
+        AAC,         ///< 指定 AAC
+        PCM          ///< 指定 PCM（s16le；采样率与声道跟随首个 clip）
+    };
+
+    VideoCodec videoCodec = VideoCodec::KeepSource;
+    AudioCodec audioCodec = AudioCodec::KeepSource;
+
+    /// 界面文案，C++ 面板与 Lua 皮肤提示共用
+    static const char* videoCodecLabel(VideoCodec codec) {
+        switch (codec) {
+            case VideoCodec::H264: return "H.264";
+            case VideoCodec::HEVC: return "HEVC";
+            default:               return "Same as clip 1";
+        }
+    }
+    static const char* audioCodecLabel(AudioCodec codec) {
+        switch (codec) {
+            case AudioCodec::AAC:  return "AAC";
+            case AudioCodec::PCM:  return "PCM";
+            default:               return "Same as clip 1";
+        }
+    }
 
     /// Unified 模式：目标视频参数来源
     bool useFirstClipResolution = true;  ///< true=同时使用首个 clip 的分辨率与 GOP（默认）
@@ -169,6 +202,9 @@ public:
     /// 本次是否因输入缺音频而丢弃了音轨（完成后用于 UI 提示）
     bool audioDropped() const { return audioDropped_.load(); }
 
+    /// 本次输出音轨是否为 PCM（转码时使用 mov 复用器，扩展名 .mp4/.mov 均可）
+    bool pcmAudio() const { return pcmAudio_.load(); }
+
     /// 更新硬件加速信息（线程安全，转码过程中调用）
     void updateHWAccelInfo(bool isHWDecoding, const std::string& decoderName,
                            bool isHWEncoding, const std::string& encoderName,
@@ -191,6 +227,7 @@ private:
 
     std::atomic<bool> transcoded_{false};   ///< 是否走转码路径
     std::atomic<bool> audioDropped_{false}; ///< 是否丢弃了音轨
+    std::atomic<bool> pcmAudio_{false};     ///< 输出音轨是否为 PCM（决定容器与编码器路径）
 
     mutable std::mutex mutex_;   ///< 保护 error_ / outputPath_ / hwAccelInfo_
     std::string error_;

@@ -574,6 +574,17 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
         char layoutBuf[128];
         av_channel_layout_describe(&codecParams->ch_layout, layoutBuf, sizeof(layoutBuf));
         info.channelLayout = layoutBuf;
+        
+        // 回退：如果描述为空，根据声道数提供默认名称
+        if (info.channelLayout.empty() && info.channels > 0) {
+            if (info.channels == 1) {
+                info.channelLayout = "mono";
+            } else if (info.channels == 2) {
+                info.channelLayout = "stereo";
+            } else {
+                info.channelLayout = std::to_string(info.channels) + " channels";
+            }
+        }
 #else
         info.channels = codecParams->channels;
 
@@ -584,6 +595,17 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
                                         codecParams->channels,
                                         codecParams->channel_layout);
             info.channelLayout = layoutBuf;
+        }
+        
+        // 回退：如果布局未知，根据声道数提供默认名称
+        if (info.channelLayout.empty() && info.channels > 0) {
+            if (info.channels == 1) {
+                info.channelLayout = "mono";
+            } else if (info.channels == 2) {
+                info.channelLayout = "stereo";
+            } else {
+                info.channelLayout = std::to_string(info.channels) + " channels";
+            }
         }
 #endif
 

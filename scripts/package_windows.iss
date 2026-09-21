@@ -40,8 +40,6 @@ Source: "..\dist\staging\resources\*";    DestDir: "{app}\resources"; Flags: ign
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件
 Type: files;          Name: "{app}\imgui.ini"
-; 强制清理整个安装目录（处理程序运行时生成的残留文件）
-Type: filesandordirs; Name: "{app}"
 
 [Icons]
 ; 开始菜单快捷方式（IconFilename 显式指向 exe 内嵌图标，避免依赖默认解析）

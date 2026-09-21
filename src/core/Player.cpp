@@ -1474,7 +1474,11 @@ bool Player::initWindowAndRenderer() {
                         if (queueManager_->videoFrameQueue() && queueManager_->videoFrameQueue()->peekLastRef(leased)) {
                             // 仅在动画未激活时触发新动画（避免连续截图时动画被打断）
                             // 但截图文件和音效始终执行
-                            bool shouldTriggerAnimation = !screenshotEffect_ || !screenshotEffect_->isActive();
+                            // 闪光动画是可选反馈（Config.screenshotFlash）。关闭时直接跳过，
+                            // 文件与音效/Toast 不受影响。
+                            const bool flashEnabled = Config::getInstance().get().screenshotFlash;
+                            bool shouldTriggerAnimation = flashEnabled &&
+                                (!screenshotEffect_ || !screenshotEffect_->isActive());
                             if (shouldTriggerAnimation && screenshotEffect_) {
                                 screenshotEffect_->trigger();
                             }

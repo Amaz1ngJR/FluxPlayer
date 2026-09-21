@@ -122,10 +122,13 @@ $ico = "$root\source\pic.ico"
 Step "icon" {
     if (-not (Test-Path $ico)) {
         if (Get-Command magick -ErrorAction SilentlyContinue) {
-            magick convert $png -define icon:auto-resize="256,128,64,48,32,16" $ico
+            magick $png -define icon:auto-resize="256,128,64,48,32,16" $ico
         } else {
-            Write-Warning "ImageMagick not found. Place source\pic.ico manually to use a custom icon."
+            throw "source\pic.ico is required by Inno Setup. Install ImageMagick or provide the icon."
         }
+    }
+    if (-not (Test-Path -LiteralPath $ico -PathType Leaf)) {
+        throw "Failed to create installer icon: $ico"
     }
 }
 
@@ -143,11 +146,85 @@ Step "CMake configure" {
 }
 Step "CMake build" { & $cmakeExe --build $build --config Release }
 
-# ── 3. cmake --install 到干净的 staging 目录 ─────────────────────────────────
-# staging 与 build 完全隔离，不受 xmake 或其他工具残留 DLL 的影响
+# ── 3. 增量安装到 staging；仅清理当前发布清单中已移除的文件 ────────────────
 $stage = "$root\dist\staging"
+Step "prepare staging" {
+    if (-not (Test-Path -LiteralPath $stage -PathType Container)) {
+        New-Item -ItemType Directory -Path $stage | Out-Null
+    }
+}
 Step "cmake install (staging)" {
     & $cmakeExe --install $build --config Release --prefix $stage
+}
+
+# CMake 负责增量复制。这里只删除已不在源码或运行库闭包中的旧文件，
+# 避免 Inno Setup 的递归/通配符规则把它们再次装进新安装包。
+function Remove-StaleFiles([string]$sourceDir, [string]$installedDir) {
+    $expected = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    Get-ChildItem -LiteralPath $sourceDir -File -Recurse | ForEach-Object {
+        [void]$expected.Add($_.FullName.Substring($sourceDir.Length).TrimStart('\'))
+    }
+    Get-ChildItem -LiteralPath $installedDir -File -Recurse | ForEach-Object {
+        $relative = $_.FullName.Substring($installedDir.Length).TrimStart('\')
+        if (-not $expected.Contains($relative)) {
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+    }
+    Get-ChildItem -LiteralPath $installedDir -Directory -Recurse |
+        Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
+            if (-not (Get-ChildItem -LiteralPath $_.FullName -Force | Select-Object -First 1)) {
+                Remove-Item -LiteralPath $_.FullName -Force
+            }
+        }
+}
+
+foreach ($tree in @(
+    @{ Source = "$root\assets\shaders"; Destination = "$stage\shaders" },
+    @{ Source = "$root\assets\fonts"; Destination = "$stage\fonts" },
+    @{ Source = "$root\source\UI\skins\cyberpunk-neon"; Destination = "$stage\resources\skins\cyberpunk-neon" },
+    @{ Source = "$root\source\UI\skins\minimal-lua"; Destination = "$stage\resources\skins\minimal-lua" }
+)) {
+    Remove-StaleFiles $tree.Source $tree.Destination
+}
+$skinsDir = "$stage\resources\skins"
+Get-ChildItem -LiteralPath $skinsDir -Directory | Where-Object {
+    $_.Name -notin @("cyberpunk-neon", "minimal-lua")
+} | Remove-Item -Recurse -Force
+
+$runtimeDllManifest = Join-Path $stage "runtime-dlls.txt"
+if (-not (Test-Path -LiteralPath $runtimeDllManifest -PathType Leaf)) {
+    throw "CMake did not produce the runtime DLL manifest."
+}
+$currentDlls = (Get-Content -LiteralPath $runtimeDllManifest -Raw).Trim() -split ';'
+if (Test-Path -LiteralPath "$root\third_party\webview2\include\WebView2.h") {
+    $currentDlls += "WebView2Loader.dll"
+}
+Get-ChildItem -LiteralPath $stage -Filter "*.dll" -File | Where-Object {
+    $_.Name -notin $currentDlls
+} | Remove-Item -Force
+
+$requiredFiles = @(
+    "FluxPlayer.exe", "yt-dlp.exe", "resources\pic2.png",
+    "resources\video\video_01.mp4",
+    "resources\skins\cyberpunk-neon\cyberpunk-neon.lua",
+    "resources\skins\minimal-lua\minimal-lua.lua"
+)
+foreach ($file in $requiredFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $stage $file) -PathType Leaf)) {
+        throw "Packaging resource missing from staging: $file"
+    }
+}
+foreach ($directory in @("shaders", "fonts")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $stage $directory) -PathType Container)) {
+        throw "Packaging directory missing from staging: $directory"
+    }
+}
+if (-not (Get-ChildItem -LiteralPath $stage -Filter "*.dll" -File | Select-Object -First 1)) {
+    throw "No runtime DLLs were installed into staging."
+}
+if ((Test-Path -LiteralPath "$root\third_party\webview2\include\WebView2.h") -and
+    -not (Test-Path -LiteralPath (Join-Path $stage "WebView2Loader.dll") -PathType Leaf)) {
+    throw "WebView2 SDK was enabled, but WebView2Loader.dll is missing from staging."
 }
 
 # ── 4. Inno Setup 打包 ────────────────────────────────────────────────────────

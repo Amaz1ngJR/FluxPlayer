@@ -1,9 +1,9 @@
 /**
  * @file SkinManager.h
- * @brief 皮肤运行时管理器：负责加载、校验、监听 skin.json 并对外提供不可变快照
+ * @brief 单文件 Lua 皮肤运行时管理器：发现 `<id>.lua`、沙箱加载并热替换快照
  *
  * 设计要点：
- * - pImpl 隔离：本头文件不暴露 nlohmann/json、平台文件 API 等实现细节，
+ * - pImpl 隔离：本头文件不暴露 Lua、平台文件 API 等实现细节，
  *   外部仅依赖 STL 与 FluxPlayer/ui/Skin.h。
  * - 快照不可变：`current()` 返回 `shared_ptr<const SkinSnapshot>`；
  *   后台轮询线程在原子位置整体替换，UI 线程读取无锁。
@@ -22,9 +22,13 @@
 
 #include "FluxPlayer/ui/Skin.h"
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+namespace FluxPlayer::FluxUI { class IFluxUIBackend; struct Rect; }
 
 namespace FluxPlayer {
 
@@ -76,6 +80,26 @@ public:
 
     /// 最近一次失败的错误信息（成功时为空）
     std::string lastError() const;
+
+    /// 当前皮肤是否提供指定 Lua surface。
+    bool hasLuaSurface(const std::string& surfaceName) const;
+
+    /// 构建并渲染一个 Lua surface；失败返回 false，由调用方执行现有 C++ fallback。
+    bool renderLuaSurface(const std::string& surfaceName,
+                          FluxUI::IFluxUIBackend& backend,
+                          const FluxUI::Rect& bounds,
+                          float deltaTime = 0.0f);
+
+    /// 设置 Lua 白名单 action 处理器；Lua 不可直接调用应用核心对象。
+    void setLuaActionHandler(std::function<void(const std::string&,
+                                                const std::unordered_map<std::string, std::string>&)> handler);
+
+    /// 设置只读基础数据提供器，供 Lua 通过 ui.getData(name) 查询。
+    void setLuaDataProvider(std::function<std::vector<std::unordered_map<std::string, std::string>>(
+                                const std::string&)> provider);
+
+    /// Lua 运行时最近错误（无 Lua/无错误时为空）。
+    std::string luaError() const;
 
     SkinManager(const SkinManager&) = delete;
     SkinManager& operator=(const SkinManager&) = delete;

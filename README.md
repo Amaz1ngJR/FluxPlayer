@@ -1,16 +1,18 @@
 # FluxPlayer
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-blue)
-![Language](https://img.shields.io/badge/language-C%2B%2B17-orange)
+![Language](https://img.shields.io/badge/language-C%2B%2B17%20%7C%20Lua%205.4-orange)
 
 <div align="center">
   <img src="source/pic2.png" width="720" alt="FluxPlayer" />
 </div>
 
 
-基于 FFmpeg + OpenGL 的跨平台桌面视频播放器，使用 C++17 开发，覆盖 macOS / Windows / Linux 三端。从本地文件、纯音频，到 RTSP/RTMP/HTTP/HLS/DASH 网络流，再到 B站、YouTube 等 1000+ 平台的网页视频，都能直接打开播放。
+基于 FFmpeg + OpenGL 的跨平台桌面视频播放器：底层用 C++17 实现解码、渲染与业务管线，界面层用 Lua 5.4 皮肤脚本描述。覆盖 macOS / Windows / Linux 三端。从本地文件、纯音频，到 RTSP/RTMP/HTTP/HLS/DASH 网络流，再到 B站、YouTube 等 1000+ 平台的网页视频，都能直接打开播放。
 
-核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、Windows D3D11VA 与 macOS VideoToolbox 硬件解码及原生 GPU/OpenGL 零 CPU 拷贝互操作、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图（含 YUV/NV12 原始格式）、图片查看（JPG/PNG/YUV/NV12）、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。界面由 Dear ImGui 构建，配套语义 token 驱动、支持热加载的皮肤系统。
+核心能力包括：OpenGL YUV→RGB GPU 渲染与色彩空间自适应、Windows D3D11VA 与 macOS VideoToolbox 硬件解码及原生 GPU/OpenGL 零 CPU 拷贝互操作、自适应主时钟音视频同步、内嵌字幕解码渲染，以及截图（含 YUV/NV12 原始格式）、图片查看（JPG/PNG/YUV/NV12）、录像录音、多视频合并与片段截取、网页视频下载（断点续传）、画质切换、倍速播放等实用功能。
+
+界面采用「皮肤描述 UI，C++ 提供引擎」的分层设计：Home、播放控制层、Merge、字幕、Toast 和设置面板都由 Lua 皮肤驱动，皮肤单文件同时定义语义 token、布局参数与可执行 Surface。C++ 侧由 **FluxUI** 抽象层把控件描述与具体绘制后端解耦，**SettingsSchema** 注册表以「键名 → 类型 + 读 + 写」的方式驱动设置项的渲染与落地——新增设置项只改注册表，绘制代码不动。
 
 ## 功能特性
 
@@ -18,7 +20,7 @@
 - 🌐 支持网络流播放（RTSP、RTMP、HTTP、HLS）
 - 🖥️ OpenGL YUV→RGB GPU 渲染，自适应 BT.601/BT.709/BT.2020 色彩空间 + TV/PC 量化范围
 - 🔊 跨平台音频输出（macOS AudioToolbox / Windows WinMM / Linux ALSA）
-- 🎛️ ImGui 控制界面（播放控制、进度条、音量、媒体信息、统计面板）
+- 🎛️ Lua 皮肤驱动的控制界面（播放控制、进度条、音量、媒体信息、统计面板、设置面板）
 - 📂 支持文件拖放打开
 - ⏱️ 音视频同步（自适应主时钟：有音频用音频时钟、无音频退回外部时钟），音频时钟回调间隙实时插值消除阶梯跳变
 - 🚀 FFmpeg 多线程解码；软件 YUV420P 帧跳过不必要的 sws_scale 后直接上传 OpenGL
@@ -38,35 +40,190 @@
 - 🎬 多视频合并与片段截取（主页 MERGE VIDEOS 入口）：多选/拖放添加、拖拽调序、单项删除；每个片段可设 IN/OUT 截取范围并实时预览入点/出点画面；同一文件可多次添加各取一段；智能模式：全整段且参数一致走流拷贝极速无损，含截取或参数不一致时硬件加速转码 H.264/AAC 帧级精确；Keep Original 沿用各源片段分辨率与 GOP，Unified 可统一采用首片段参数或在同一行自定义分辨率和 GOP；FPS 保持源帧时间戳节奏；输出到录制目录
 - 🔁 循环播放
 - 🕒 观看历史（主页右侧侧栏）：本地视频/音频与网页视频自动记录，点击即重播；LRU 上限 10 条（最近置顶，超限淘汰最久），支持单条删除与一键清空；持久化到 `history.json`，关闭重开仍在
-- ⏩ 播放速度控制（0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x / 4.0x / 8.0x / 16.0x），音频最近邻重采样变速
+- ⏩ 播放速度控制（候选档位 0.5x～16.0x，按启动能力检测与当前视频分辨率动态筛选，并非固定上限），音频最近邻重采样变速
 - 🚀 高倍速智能抽帧（≥2x）：本地文件 + 硬件加速时自动启用，按固定间隔保留帧（8x 时每 8 帧保留 1 帧），保持原视频 fps 渲染，避免性能瓶颈；永不丢弃 I 帧，优先丢弃 B 帧，按间隔保留 P 帧
 - 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
 - 🌍 网页视频播放（B站、YouTube 等 1000+ 平台），自动提取真实流地址，支持 DASH 分离流合并
-- 🍪 内置浏览器登录窗口（WebView2 / WKWebView），Cookie 由程序自动维护，无需读取系统浏览器
+- 🍪 Cookie 由 `CookieStore` 和 `StreamExtractor` 统一管理；Lua Home 只提交 `playUrl` action，不直接打开网页或承担网页登录 UI
 - 📥 通用网络媒体保存：网页视频通过 yt-dlp 重新提取，MP4/HLS/DASH/RTSP/RTMP 等直链不依赖 yt-dlp；VOD 显示百分比/速度/大小/ETA，取消删除 `.part`，Live 显示保存时长并在 Stop 后封口保留；网络中断自动指数退避重连，输出文件冲突时追加序号且禁止覆盖
 - 🎯 画质切换（360P / 480P / 720P / 1080P），切换时保持播放位置
 - 🔒 网络代理支持（HTTP/SOCKS5），默认 127.0.0.1:7890，可配置开关
-- 🎨 皮肤系统（Skin System）：语义 token 驱动的 UI 主题，支持 JSON 皮肤包加载、三层搜索（用户/开发/内置）、热加载（文件变更自动刷新，无需重启）、Appearance 子页切换皮肤，默认内置 `cyberpunk-neon`
+- 🎨 Lua 驱动的可编程皮肤系统：每个 `<id>.lua` 是完整皮肤实现，同时定义语义 token、布局参数和可执行 Surface（`home` / `player` / `merge` / `subtitle` / `settings` / `toast`）；C++ 经 FluxUI 抽象层只提供沙箱运行时、控件描述与 ImGui/OpenGL 后端，不做 UI 兜底绘制。支持白名单 action、数据提供器、皮肤目录资源解析、运行时热重载和上一有效 VM 回退。内置 `cyberpunk-neon` 与 `minimal-lua` 两套官方皮肤
+- ⚙️ 表驱动的设置项注册表（SettingsSchema）：以「键名 → 类型 + 读 + 写」描述每项设置，新增设置项只改注册表。路径类设置由 Schema 声明 `pathKind`（文件/目录），皮肤据此自动获得对应的 Browse 按钮与系统选择器
 
 <div align="center">
-  <img src="source/UI/skins/cyberpunk-neon/preview.svg" width="720" alt="播放器主界面预览" />
   <img src="source/UI/skins/cyberpunk-neon/mockup_home.svg" width="720" alt="播放器主界面预览" />
   <br/>
   <img src="source/UI/skins/cyberpunk-neon/mockup_player.svg" width="720" alt="播放器界面预览" />
   <br/>
   <img src="source/UI/skins/cyberpunk-neon/mockup_merge.svg" width="720" alt="视频合并界面预览" />
   <br/>
+  <img src="source/UI/skins/cyberpunk-neon/mockup_merge_merging.svg" width="720" alt="合并进行中界面预览" />
+  <br/>
   <img src="source/UI/skins/cyberpunk-neon/mockup_skin_settings.svg" width="720" alt="皮肤设置预览" />
 </div>
+
+## Lua 皮肤系统
+
+FluxPlayer 采用「Lua 描述皮肤，C++ 提供引擎」的分层设计：Lua 文件负责各 Surface 的结构、布局、颜色、响应式计算和绘制命令；C++ 负责 Lua 沙箱、Widget 树解析、布局、输入命中、业务 action、数据提供以及 ImGui/OpenGL 绘制后端。
+
+已接入的 Surface：`home`、`player`、`merge`、`subtitle`、`settings`、`toast`；`opening` / `hud` / `popup` 目前只提供 token。Opening 过渡页与 INFO / STATS 面板保留 C++ 原生绘制，消费皮肤 token。
+
+C++ 不再有任何 UI 兜底绘制：皮肤没实现某个 Surface，对应界面就不出现，而不是回退到一套与皮肤无关的界面。这条取舍是有意的——UI 的唯一来源是皮肤，回退界面会让「改皮肤」和「改功能」两件事纠缠在一起。唯一的例外是 `toast`：皮肤未实现时回退 C++ ImGui 版本，两者共用同一份动画状态，不会双份渲染。
+
+这样调整任一界面的皮肤通常只需修改一个 Lua 文件，不需要重复实现页面 C++ 代码。
+
+### 皮肤入口与资源
+
+皮肤位于 `source/UI/skins/<id>/`。每个目录使用与目录同名的 `<id>.lua` 作为可选择皮肤入口，例如：
+
+```text
+source/UI/skins/
+├── cyberpunk-neon/
+│   ├── cyberpunk-neon.lua   # 完整皮肤实现
+│   ├── logo.png              # 由 Lua 通过 ui.getAssetPath() 安全解析
+│   └── *.svg                 # 预览或设计参考，不是运行时 UI 入口
+└── minimal-lua/
+    └── minimal-lua.lua
+```
+
+皮肤发现只认 `<id>.lua`，且目录名、Lua 文件名和脚本返回的 `id` 三者必须一致。新皮肤必须提供 `<id>.lua`。皮肤资源应放在自己的皮肤目录中，Lua 不应依赖进程当前工作目录拼接相对路径。
+
+### 渲染链（Home / Player / Merge / Settings / Subtitle / Toast）
+
+```text
+页面宿主（HomeScreen / Controller / MergeScreen，窗口循环与业务桥接）
+  → SkinManager（选择、快照、热重载）
+  → LuaSkinRuntime（沙箱执行 Lua）
+  → FluxUI（Widget 树与 DrawCommand）
+  → ImGuiBackend（ImGui DrawList / OpenGL）
+```
+
+内置皮肤提供 `home`、`player`、`merge`、`subtitle`、`settings`、`toast` 六个可执行 Surface：
+
+- `HomeScreen` 处理文件拖放、文件选择、播放/设置/合并 action，以及硬件信息和观看历史数据。
+- `Controller` 把播放状态、进度、音量、倍速、录制和下载状态提供给 Lua，并处理播放/暂停、停止、Seek、音量、静音、倍速、音视频录制、下载/暂停/取消、信息面板和设置 action。进度滑块传入 0～1 的归一化进度，Seek 按 100ms 合并派发并保留最后一次拖动值；直接 `seek` action 仍以秒为单位。原生与 Lua 下载入口复用同一实现。`ui.getData("player")` 的 `maxSpeed` 每帧读取硬件能力与当前视频分辨率对应的上限（测速完成后采用实测结果）；Lua 倍速菜单仅显示不超过该上限的档位，展开面板高度随选项数量变化。`setSpeed` / `cycleSpeed` action 同样校验最新上限，不能绕过限制。首页和直接打开文件的播放器入口均会触发同一后台能力检测（不会重复启动）；测速期间使用已有硬件估算，完成后自动采用实测结果，无需重启或重新展开菜单。SVG 的倍速展开态为动态模板，省略号代表按实际能力生成的档位，不规定 4x 或 16x 上限。
+- `Controller` 同时承载 `settings` Surface：皮肤负责遮罩、分页与控件摆放，C++ 通过 `SettingsSchema` 提供行数据并完成类型校验与落盘。设置面板打开时，底层 Lua 播放 UI 保持可见但停止接收输入。
+- `Controller` 还承载 `subtitle` 与 `toast` Surface：字幕叠加由皮肤绘制；`toast` 未实现时回退 C++ ImGui 版本，两者共用 `ToastManager` 的动画状态。
+- `MergeScreen` 把阶段、合并进度、片段列表、输出选项和预览纹理提供给 Lua；默认皮肤使用双栏片段列表/IN-OUT 编辑器，支持每页 3 个片段、页内拖拽排序、预览、重置、复制片段以及输出分辨率/GOP 设置。C++ 负责片段校验、预览解码和实际合并，添加/编辑/开始 action 按当前阶段校验。
+- 皮肤未实现某个 Surface 时该界面不出现（唯一例外是 `toast` 回退 C++ 版本），不退回与皮肤无关的一套界面。上述功能已接线不等于已完成 GUI 或像素级验收。
+
+#### Player 底栏与设计稿尺寸
+
+`mockup_player.svg` 使用 **1440×900** 参考坐标，默认皮肤按 `min(1, 窗口逻辑宽度/1440, 窗口逻辑高度/900)` 等比缩小，**大窗口不再放大底栏、按钮和时间字号**。左侧下载/硬件状态组贴左、播放组居中、右侧工具组贴右，进度条伸展至右侧时间列；背景和顶部光带铺满宽度，原生 Surface 不额外裁掉两侧边缘。这里的尺寸为逻辑像素，不是 Retina framebuffer 像素。
+
+| 部位 | 参考尺寸/位置 |
+| --- | --- |
+| 底栏 | y=812，高 88，贴底 |
+| 进度条 | x=8、y=819，1224×16 |
+| 时间 | 参考 x=1240..1432，宽 192，12px 等宽 mono 字体，基线 y=831；实际距右 8，格式 HH:MM:SS / HH:MM:SS |
+| 按钮行 | y=855，高 38，距底部 7 |
+| 字幕 | 使用与底栏一致的缩放，保持上方间距 |
+
+INFO / STATS 面板使用独立 `mono` 等宽字体角色、12px 基准字号及 SVG 显式基线；优先加载 Consolas，未安装时回退系统等宽字体并记录路径，不再沿用默认正文字体。
+
+SVG 的时间文字已收回画布内；实际字体来自运行时字体资源，字形和基线仍需截图对照，不能仅凭坐标一致认定像素级还原。布局调整保留在 Lua 中，不向 C++ 添加 Player 专用视觉布局。
+
+C++ 不再决定这些 Surface 的主布局与视觉样式；具体如何展示数据由 Lua 决定。
+
+### Lua API 概览
+
+皮肤脚本可使用以下 21 个组件构造器（全部位于 `ui` 表）：
+
+| 类别 | 构造器 |
+| --- | --- |
+| 布局 | `ui.container`、`ui.spacer`、`ui.scroll` |
+| 内容 | `ui.text`、`ui.button`、`ui.input`、`ui.slider`、`ui.checkbox` |
+| 表单 | `ui.combo`、`ui.numberInput`、`ui.selectableList` |
+| 装饰 | `ui.rect`、`ui.line`、`ui.panel`、`ui.circleDashed`、`ui.gearIcon`、`ui.image` |
+| 渐变 | `ui.gradientLine`、`ui.gradientPanel`、`ui.rectGradient`、`ui.radialGradient` |
+
+容器支持 `layout = "vbox" | "hbox" | "absolute"`。绝对定位需要两件事配合：容器设 `layout = "absolute"`，子元素设 `absolute = true` 并用 `x` / `y` 指定相对容器的偏移。VBox / HBox 会按 `measure()` 结果分配主轴空间，把剩余空间均分给没有显式尺寸的弹性子元素。
+
+运行时服务包括：
+
+- `ui.getWindowSize()`：获取当前窗口逻辑尺寸
+- `ui.getTime()`：获取皮肤启动以来的秒数，用于动画
+- `ui.getAssetPath(relativePath)`：解析皮肤目录内的资源，越界或文件不存在时返回 `nil`
+- `ui.getSkin()`：读取当前皮肤的有限颜色（`accentPrimary`、`accentSecondary`、`textPrimary`、`textMuted`）和字号（`typography.titlePx`、`typography.bodyPx`）
+- `ui.getData(name)`：读取 C++ 数据提供器返回的行数据，见下表
+- `ui.getInput()`：读取本帧输入快照，返回 `{ x, y, down, clicked }`
+- `state.get(key)` / `state.set(key, value)`：保存 Lua 皮肤状态
+- `events.emit(action, payload)`：向 C++ 发送白名单业务 action
+- `app.version`：编译期写入的版本号字符串
+
+数据提供器（`ui.getData(name)`）：
+
+| Provider | 归属 | 内容 |
+| --- | --- | --- |
+| `player` | Controller | 播放状态、进度、音量、倍速、录制与下载状态 |
+| `subtitle` | Controller | 当前字幕文本与控件可见性 |
+| `qualities` | Controller | 可用画质列表 |
+| `mediaInfo` | Controller | 文件名、平台、上传者、播放量、分辨率、编解码、GOP 等 |
+| `statistics` | Controller | FPS、丢帧、码率、队列深度、硬件后端与零拷贝状态 |
+| `toasts` | Controller | 通知浮层条目（Lua 未实现 `toast` Surface 时回退 C++ 版本） |
+| `settings` | Controller | 设置项注册表快照（见「设置项注册表」） |
+| `skins` | Controller | 当前皮肤状态 + 可选皮肤列表 |
+| `hardware` | HomeScreen | 硬件解码能力与设备信息 |
+| `history` | HomeScreen | 观看历史记录 |
+| `error` | HomeScreen | 主页错误提示（仅在有错误时返回） |
+| `merge` | MergeScreen | 合并阶段、进度、输出选项与预览状态 |
+| `mergeClips` | MergeScreen | 片段列表及其 IN/OUT、有效性与预览信息 |
+
+
+**action 白名单**（未知 action 记日志并忽略）：
+
+| Surface | action |
+| --- | --- |
+| Home | `openLocalFile`、`openSettings`、`openMerge`、`playUrl`、`replayHistory`、`clearHistory`、`removeHistory` |
+| Player | `togglePlayback`、`stop`、`seek`、`setVolume`、`toggleMute`、`download`、`toggleDownloadPause`、`cancelDownload`、`toggleVideoRecording`、`toggleAudioRecording`、`toggleMediaInfo`、`toggleStats`、`setQuality`、`setSpeed`、`cycleSpeed`、`openSettings`、`widgetChanged` |
+| Settings | `configChanged`、`browsePath`、`closeSettings`、`skinReload`、`skinRestoreDefault`、`openSkinsFolder` |
+| Merge | `widgetChanged`、`mergeOption`、`mergeReset`、`mergeDuplicate`、`mergeMove`、`mergeAddFiles`、`mergeBack`、`mergeStart`、`mergeCancel`、`mergeClear`、`mergeSelect`、`mergeRemove`、`mergeAgain` |
+
+Merge 的编辑类 action 仅在 `Editing` 阶段生效，`mergeStart` 等按当前阶段校验。
+
+`browsePath` 由 Schema 的 `pathKind` 驱动（见「设置项注册表」）：C++ 按该项是文件还是目录弹对应选择器，皮肤只发 `{ key }`。`browseFolder` 是仅弹目录选择器的旧动作，保留以兼容尚未迁移的皮肤。
+
+`gradientPanel` 支持 `cutLeft`、`cutRight`、`cutY` 表达非对称切角，也支持 `fill = false` 绘制仅描边的完整轮廓；不传这些新参数时仍兼容原有统一 `cut` 调用。按钮支持 `backgroundOpacity`、`hoverBackgroundOpacity` 和 `hoverTextColor`，可由皮肤独立控制悬停状态。`ui.text` 的 `baseline` 指定相对文本框顶部的逻辑像素偏移，省略时保持垂直居中。
+
+`color` / `theme` 既接受语义角色名（`accentPrimary`、`textMuted`、`bgPanel`、`lineSubtle`、`danger` 等），也接受 `#RRGGBB` / `#RRGGBBAA` 字面量；角色名未匹配时回退默认背景色。
+
+### 安全与热重载
+
+Lua 脚本运行在受限沙箱中，实际限制为：单脚本 256 KB、VM 内存 16 MB、Widget 深度 32 层、单容器 1000 个子节点、单次执行 10 万条 VM 指令；单资源 4 MB、整个皮肤目录 16 MB。沙箱只加载 `base`、`table`、`string`、`math`、`utf8`、`coroutine` 六个标准库，`io`、`os`、`debug`、`package`、`require`、`dofile`、`loadfile`、`load`、`ffi`、`collectgarbage` 全部置空，文件、网络、进程等宿主能力不直接暴露给皮肤。
+
+皮肤文件修改后由 `SkinManager` 以纳秒级 mtime + 防抖（默认 160ms，可由 `motion.reloadDebounceMs` 覆盖）热重载：新脚本在独立 VM 中解析校验，成功才原子替换快照与执行 VM，脚本失败时保留上一份有效 Lua VM，避免临时编辑错误导致当前 UI 立即失效。
+
+> 完整 API、字段含义、限制清单与验收标准见 [`docs/v0.8.5 Lua皮肤系统技术方案.md`](docs/v0.8.5%20Lua皮肤系统技术方案.md)；皮肤目录规范见 [`source/UI/README.md`](source/UI/README.md)。
+
+### 设置项注册表
+
+设置面板的内容不由皮肤硬编码，而来自 C++ 的 `SettingsSchema` 注册表——每项设置登记为「键名 → 类型 + 读 + 写 + 元信息」一行：
+
+```cpp
+{"tcpLogPort", "TCP Log Port", SettingType::Integer, "logging", "LOGGING",
+ 9999, 1, 65535, true, tcpLogPort_read, tcpLogPort_write, "Requires restart.",
+ nullptr, 0, 0.62, PathKind::File, "*.log", "Select Log File"},
+```
+
+皮肤用 `ui.getData("settings")` 拿到这张表的快照（`key` / `label` / `type` / `group` / `section` / `value` / `min` / `max` / `restart` / `hint` / `options` / `ratio` / `pathKind`），据此渲染控件；用户改动后统一发 `configChanged { key, value }`，由注册表的 `write` 完成解析、校验与落盘。**新增设置项只改这张表，绘制代码不动。**
+
+几个约定：
+
+- **类型校验在 C++**：`value` 一律是字符串，越界或非法值会被 `write` 拒绝并记日志，皮肤不需要自己保证合法性（但仍应在本地夹一次以避免闪烁）。
+- **`ratio`** 是控件宽度占内容区宽度的比例，让字段随面板缩放而非写死像素；为 `0` 时按 `0.75` 处理。
+- **`pathKind`**（`none` / `file` / `dir`）由 C++ 下发，皮肤据此决定是否在输入框右侧画 Browse 按钮，并发送 `browsePath { key }`。C++ 按 `pathKind` 弹对应的系统选择器（目录用 `tinyfd_selectFolderDialog`，文件用 `tinyfd_openFileDialog` 并套用 `fileFilter`）。这样皮肤不需要硬编码「哪些 key 是路径、是文件还是目录」。
+
+数字输入框（`type = "int"`）采用**失焦或回车提交**，而非每次按键提交。这一点是有意为之：即时提交会在用户输入 `9999` 的过程中依次把 `9`、`99`、`999` 写进配置并落盘，一旦中途中断就会永久留下一个残值。
 
 ## 技术栈
 | 组件 | 技术 |
 |------|------|
-| 语言 | C++17 |
+| 语言 | C++17 / Lua 5.4.8（仓库内置静态链接，无系统依赖） |
 | 视频解码 | FFmpeg（macOS 4.x / Windows 7.x，通过版本宏自动适配），支持硬件加速 |
 | 图形渲染 | OpenGL 3.3+ |
 | 窗口管理 | GLFW 3.3.8 |
-| UI | Dear ImGui |
+| UI | Lua Surface + FluxUI DrawCommand + Dear ImGui 后端 |
 | 数学库 | GLM |
 | 构建系统 | xmake / CMake |
 
@@ -91,12 +248,19 @@ FluxPlayer/
 │   ├── renderer/         # OpenGL 渲染 (GLRenderer, Shader)
 │   ├── subtitle/         # 字幕模块 (SubtitleDecoder, SubtitleManager)
 │   ├── video/            # 视频后处理 (FrameInterpolator 帧插值)
-│   ├── ui/               # 界面 (Window, Controller, HomeScreen, MergeScreen, OpeningScreen, UiContext, Skin/SkinManager/SkinRenderer 皮肤系统)
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, HWAccelDevice, Downloader, HistoryStore)
+│   ├── ui/               # UI 宿主与渲染引擎（Window, Controller, HomeScreen, MergeScreen, OpeningScreen, UiContext, Toast）
+│   │   ├── FluxUI/       # 后端无关的 Widget 树 / DrawCommand（FluxUI.cpp）与 ImGui 渲染后端（ImGuiBackend.cpp）
+│   │   ├── LuaSkinLoader.cpp   # 读取 <id>.lua 静态 token → SkinSnapshot
+│   │   ├── LuaSkinRuntime.cpp  # Lua 沙箱 VM、Surface 执行、事件分发、数据注入
+│   │   ├── SkinManager.cpp     # 候选发现、热重载、原子快照交换
+│   │   ├── SettingsSchema.cpp  # 设置项注册表：键名 → 类型 + 读 + 写（驱动设置面板）
+│   │   └── SkinRenderer.cpp    # 非 Lua 页面仍使用的通用 ImGui helper
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, SystemSound, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, HWAccelDevice, HardwareInfo, Downloader, HistoryStore)
 ├── include/FluxPlayer/   # 头文件
+├── source/UI/skins/      # Lua 皮肤包；每个目录以 <id>.lua 作为入口，SVG/PNG 为预览或皮肤资源
 ├── assets/shaders/       # GLSL 着色器
 ├── docs/                 # 技术文档
-├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs, FFmpeg (Win/Mac)
+├── third_party/          # GLFW, GLAD, ImGui, GLM, tinyfiledialogs, Lua 5.4.8, stb, FFmpeg (Win/Mac)
 ├── scripts/              # 构建辅助脚本
 ├── CMakeLists.txt
 └── xmake.lua
@@ -285,6 +449,7 @@ end note
 - C++17 编译器（GCC 8+ / Clang 10+ / MSVC 2019+）
 - OpenGL 3.3+
 - FFmpeg 已在 macOS 和 Windows 上自包含，无需系统安装
+- Lua 5.4.8 已内置于 `third_party/lua/`，作为皮肤脚本沙箱运行时静态链接，无需系统安装 Lua
 
 > **FFmpeg 版本说明**：macOS 使用 FFmpeg 4.x（avcodec-58），Windows 使用 FFmpeg 7.x（avcodec-62），两个平台的头文件和动态库均不共用。源码通过 `LIBAVCODEC_VERSION_MAJOR` 宏自动适配 API 差异（如 `channels` vs `ch_layout`）。
 
@@ -386,12 +551,14 @@ cmake --build build\cmake
 ```bash
 # macOS / Linux
 cmake -S . -B build/cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build/cmake -j
+cmake --build build/cmake --parallel 2
 
 # 运行
 ./build/bin/FluxPlayer
 ./build/bin/FluxPlayer /path/to/video.mp4
 ```
+
+构建后 CMake 会把 `source/`（包含 `source/UI/skins/`）同步到运行目录，并在 `build/bin/resources/skins/` 放置发布期皮肤副本。编辑源码目录中的 `<id>.lua` 后重新构建即可同步资源；开发运行时支持对当前皮肤文件进行热重载。
 
 ## 打包环境搭建
 
@@ -486,12 +653,12 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 
 ### 启动方式
 
-- **无参数启动**：进入 HomeScreen 主界面，提供三种入口：
-  - `OPEN LOCAL FILE`：弹出文件选择对话框打开本地视频 / 音频
+- **无参数启动**：进入由当前 Lua 皮肤定义的 Home 页面。默认 `cyberpunk-neon` 皮肤通过 Lua 创建背景、双层六边形面板、按钮、输入框、观看历史和装饰元素；C++ `HomeScreen` 不再绘制独立的原生 Home UI。
+  - `OPEN LOCAL FILE`：触发 C++ 白名单 action，弹出文件选择对话框打开本地视频 / 音频
   - 直接把文件拖放到窗口（提示 *or drag & drop a file here*）
   - `NETWORK URL` 输入框：粘贴网络流地址或网页视频地址后回车 / 点 `OPEN URL`
   - `MERGE VIDEOS`：进入多视频合并界面（见下文）
-  - 右侧 `WATCH HISTORY` 侧栏：列出最近观看（最多 10 条），点击任意一条直接重播；每条右侧 `x` 删除单条，底部 `CLEAR ALL` 一键清空（带二次确认）
+  - 右侧 `WATCH HISTORY` 侧栏：由 Lua 根据 C++ 数据提供器渲染最近观看记录，支持重播、单条删除和清空
 - **带参数启动**：`FluxPlayer <文件路径或URL>` 直接播放，跳过主界面
 
 ### 本地文件与纯音频
@@ -510,10 +677,7 @@ https://www.youtube.com/watch?v=...
 
 **依赖：** 需要 `yt-dlp`（已内置在 `third_party/yt-dlp/` 中，无需手动安装）
 
-**Cookie 支持：** 播放需要登录的网页视频时，程序在主界面输入 URL 后弹出登录询问，
-点击「登录并继续」会打开内置浏览器登录窗口（macOS：WKWebView，Windows：WebView2），
-登录完成后 Cookie 由 FluxPlayer 自动写入 `cookies/web_cookies.txt`，下次播放同站点
-可直接「使用已保存登录」。Cookie 文件路径不暴露给用户，无需手动配置。
+**Cookie 支持：** `StreamExtractor` 会自动检查 `CookieStore` 中与目标站点匹配的 Cookie，并在调用 yt-dlp 时附带。当前 Lua Home 的 `OPEN URL` 只发送 `playUrl` action 并进入 Opening 流程，不会主动弹出网页登录窗口。
 
 播放网页视频时，工具栏会出现：
 - **画质按钮**：切换 360P / 480P / 720P / 1080P，切换后自动 seek 到原位置
@@ -556,17 +720,27 @@ https://www.youtube.com/watch?v=...
 | `Rec V` / `Stop V` | 开始 / 停止录像（录制中按钮变红，显示时长和文件大小） |
 | `Rec A` / `Stop A` | 开始 / 停止录音（录制中按钮变红，显示时长和文件大小） |
 | 🔊 音量滑块 | 拖动调节音量 |
-| ⚙ 设置 | 打开设置菜单（循环播放、字幕开关） |
+| ⚙ 设置 | 打开设置面板（8 个分页，见「设置菜单」） |
 | 🎬 画质 | 切换 360P / 480P / 720P / 1080P（仅网页视频） |
 | ⏩ 倍速 | 切换播放速度（0.5x ~ 16.0x），≥2x 时启用智能抽帧 |
 | ⬇ Download | 保存当前网络媒体（本地文件不显示）；VOD 可暂停/取消，Live 为停止并保存，断网自动重连 |
 
 ### 设置菜单
 
-| 选项 | 功能 |
+设置面板由皮肤渲染，左侧为固定导航，右侧按页展示；内容来自 C++ 的 `SettingsSchema` 注册表（见「设置项注册表」），共 8 页：
+
+| 页 | 设置项 |
 |------|------|
-| Loop Playback | 循环播放开关 |
-| Subtitles | 字幕显示开关（内嵌字幕流） |
+| GENERAL | Window Width、Window Height、Show Controls On Start |
+| PLAYBACK | Loop Playback、Volume、Default Speed、Frame Interpolation、Hardware Decoding |
+| SUBTITLE | Subtitle Enabled、Font Scale、Custom Font Path |
+| PROXY | Use Proxy、HTTP Proxy、SOCKS5 Proxy |
+| CAPTURE | Record Dir、Screenshot Dir、Format、Sound / Toast / Flash |
+| PANELS | Show Media Info、Show Statistics |
+| LOGGING | Log Level、Write Log To File、Log File Path、TCP Log Port |
+| APPEARANCE | Skin、Hot Reload |
+
+设置项下方会显示其 `hint`（如 "Requires restart."）。路径类项（Record Dir、Screenshot Dir、Log File Path、Custom Font Path）在输入框右侧带 Browse 按钮，点击弹出系统选择器——文件项会套用相应的类型过滤（字体限 `*.ttf *.ttc *.otf`，日志限 `*.log`）。
 
 ## 支持格式
 
@@ -670,7 +844,7 @@ https://www.youtube.com/watch?v=...
 
 [Audio]
 # volume: 音量 (0.0 ~ 1.0)
-volume=0.6
+volume=1.0
 
 [Log]
 # logLevel: 日志级别 (DEBUG / INFO / WARN / ERROR)
@@ -696,9 +870,9 @@ windowHeight=600
 # uiVisible: 是否显示控制面板 (true / false)
 uiVisible=true
 # showMediaInfo: 是否显示媒体信息面板 (true / false)
-showMediaInfo=true
+showMediaInfo=false
 # showStats: 是否显示统计信息面板 (true / false)
-showStats=true
+showStats=false
 # 说明：当前激活皮肤 ID（皮肤包目录名）。无效时回退到内置 cyberpunk-neon。
 # 取值：cyberpunk-neon 等已安装皮肤 id
 # 默认：cyberpunk-neon
@@ -736,12 +910,12 @@ screenshotDir=Screenshot
 #       会额外生成同名 .txt 元数据文件（含宽高、格式、FFplay 查看命令）。
 #       查看示例：ffplay -f rawvideo -pixel_format yuv420p -video_size 1920x1080 文件名.yuv
 screenshotFormat=png
-# screenshotToastEnabled: 截图后是否显示 Toast 提示 (true / false)
-screenshotToastEnabled=true
-# screenshotFlashEnabled: 截图时是否显示闪光动画 (true / false)
-screenshotFlashEnabled=true
-# screenshotSoundEnabled: 截图时是否播放音效 (true / false)
-screenshotSoundEnabled=true
+# screenshotToast: 截图后是否显示 Toast 提示 (true / false)
+screenshotToast=true
+# screenshotFlash: 截图时是否显示闪光动画 (true / false)
+screenshotFlash=true
+# screenshotSound: 截图时是否播放音效 (true / false)
+screenshotSound=true
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）
@@ -911,7 +1085,7 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 
 ### 高倍速播放
 
-- 倍速范围：0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x / 4.0x / 8.0x / 16.0x
+- 候选倍速档位：0.5x / 0.75x / 1.0x / 1.25x / 1.5x / 2.0x / 4.0x / 8.0x / 16.0x；菜单只显示不超过当前能力上限的档位，不表示所有设备都支持到 16x。启动时即触发后台检测，打开媒体后根据当前分辨率更新，Lua 每帧刷新，设置入口再次校验。
 - 音频变速：最近邻重采样（改��音调），8x 时每次回调消耗 8 倍音频数据并压缩播放
 - 智能抽帧（≥2x，本地文件 + 硬件加速）：按固定间隔保留帧（8x 时每 8 帧保留 1 帧），保持原视频 fps 渲染，避免高倍速时渲染性能瓶颈
 - 帧类型优先级：永不丢弃 I 帧（关键帧），优先丢弃 B 帧（双向预测帧），按间隔保留 P 帧（前向预测帧）
@@ -936,4 +1110,3 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 
 - 通过 `LIBAVCODEC_VERSION_MAJOR` 宏自动适配 FFmpeg 4.x（channels）和 5.x+（ch_layout）API 差异
 - `swr_alloc_set_opts` / `swr_alloc_set_opts2` 自动选择
-

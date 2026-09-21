@@ -1,0 +1,137 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Merge Videos — MERGING 态设计稿。
+       与 mockup_merge.svg（编辑态）互补：合并中沿用同一块 1000×640 面板，
+       内容换成 标题 + 进度条 + Merge Pipeline + CANCEL。
+       几何来源：cyberpunk-neon.lua render_merge() 的 merging 分支（1:1 对应）。
+       链路信息的字段来自 MergeScreen::provideLuaData("merge") 的
+       transcoded / hwDeviceType / hwDecoding / decoderName / hwEncoding /
+       encoderName / zeroCopy —— 即 v0.8.3 C++ renderMerging() 展示的那一组。 -->
+  <defs>
+    <linearGradient id="rail" x1="0" y1="0" x2="1440" y2="0">
+      <stop stop-color="#00E8FF" stop-opacity="0"/>
+      <stop offset="0.18" stop-color="#00E8FF"/>
+      <stop offset="0.52" stop-color="#2DA7FF"/>
+      <stop offset="0.78" stop-color="#A855FF"/>
+      <stop offset="1"    stop-color="#FF3DF2" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="panelTop" x1="220" y1="0" x2="1220" y2="0">
+      <stop stop-color="#A855FF" stop-opacity="0"/>
+      <stop offset="0.2"  stop-color="#A855FF" stop-opacity="0.8"/>
+      <stop offset="0.8"  stop-color="#00E8FF" stop-opacity="0.8"/>
+      <stop offset="1"    stop-color="#00E8FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="panelBot" x1="220" y1="0" x2="1220" y2="0">
+      <stop stop-color="#A855FF" stop-opacity="0"/>
+      <stop offset="0.35" stop-color="#A855FF"/>
+      <stop offset="0.65" stop-color="#FF3DF2"/>
+      <stop offset="1"    stop-color="#A855FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="energy" x1="484" y1="0" x2="956" y2="0">
+      <stop stop-color="#A855FF" stop-opacity="0"/>
+      <stop offset="0.3"  stop-color="#A855FF"/>
+      <stop offset="0.7"  stop-color="#00E8FF"/>
+      <stop offset="1"    stop-color="#00E8FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="progressFill" x1="480" y1="0" x2="960" y2="0">
+      <stop stop-color="#00E8FF"/>
+      <stop offset="1" stop-color="#2DA7FF"/>
+    </linearGradient>
+    <radialGradient id="bgVoid" cx="0.5" cy="0.5" r="0.7">
+      <stop stop-color="#071B31"/>
+      <stop offset="0.55" stop-color="#050A18"/>
+      <stop offset="1"    stop-color="#02040E"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1440" height="900" fill="url(#bgVoid)"/>
+
+  <!-- Subtle diagonal traces -->
+  <g stroke="#A855FF" stroke-opacity="0.06" stroke-width="1">
+    <path d="M220 130L100 40M1220 130L1340 40M220 770L80 860M1220 770L1360 860"/>
+  </g>
+  <g fill="#A855FF" opacity="0.18">
+    <circle cx="160" cy="85" r="2"/><circle cx="1280" cy="85" r="2"/>
+    <circle cx="130" cy="815" r="2"/><circle cx="1310" cy="815" r="2"/>
+  </g>
+
+  <!-- Top/bottom rails -->
+  <path d="M0 2H1440"   stroke="url(#rail)" stroke-width="2.5"/>
+  <path d="M0 898H1440" stroke="url(#rail)" stroke-width="2.5"/>
+
+  <!-- Screen corner brackets -->
+  <g stroke="#136C8F" stroke-width="1.5" fill="none">
+    <path d="M28 28H84L100 44M1412 28H1356L1340 44M28 872H84L100 856M1412 872H1356L1340 856"/>
+  </g>
+  <g stroke="#A855FF" stroke-opacity="0.48" stroke-width="1.5" fill="none">
+    <path d="M28 58H66M1374 58H1412M28 842H66M1374 842H1412"/>
+  </g>
+
+  <!-- Top status: 右侧显示当前阶段（合并中 → MERGING） -->
+  <text x="48"   y="22" font-family="Consolas,monospace" font-size="9" fill="#3C5870" letter-spacing="2.5">FLUX / MERGE TOOL</text>
+  <text x="1392" y="22" text-anchor="end" font-family="Consolas,monospace" font-size="9" fill="#00E8FF" letter-spacing="2.5">MERGING</text>
+
+  <!-- Title area -->
+  <text x="724" y="82" text-anchor="middle" font-family="Consolas,monospace" font-size="48" fill="#A855FF" fill-opacity="0.30" letter-spacing="8">MERGE VIDEOS</text>
+  <text x="716" y="78" text-anchor="middle" font-family="Consolas,monospace" font-size="48" fill="#00E8FF" fill-opacity="0.24" letter-spacing="8">MERGE VIDEOS</text>
+  <text x="720" y="80" text-anchor="middle" font-family="Consolas,monospace" font-size="48" fill="#EAF8FF" letter-spacing="8">MERGE VIDEOS</text>
+  <text x="720" y="105" text-anchor="middle" font-family="Consolas,monospace" font-size="10" fill="#7792B2" letter-spacing="4">CONCATENATE MULTIPLE FILES INTO ONE</text>
+  <path d="M450 118H610M830 118H990" stroke="url(#energy)" stroke-width="1.5"/>
+  <circle cx="720" cy="118" r="3" fill="#A855FF"/>
+
+  <!-- Main panel: 1000×640 hex-cut border（与编辑态同一块，故此处内容居中留白） -->
+  <path d="M244 130H1196L1220 154V746L1196 770H244L220 746V154Z"
+        fill="#050A1A" fill-opacity="0.96" stroke="url(#panelTop)" stroke-width="2"/>
+  <path d="M258 144H1182L1206 168V732L1182 756H258L234 732V168L258 144Z"
+        stroke="#6336A4" stroke-opacity="0.68"/>
+  <path d="M258 144H440M234 168V260" stroke="#A855FF" stroke-width="2"/>
+  <path d="M1182 756H1000M1206 732V640" stroke="#00E8FF" stroke-opacity="0.5" stroke-width="1.5"/>
+  <path d="M220 750H1220" stroke="url(#panelBot)" stroke-width="3"/>
+
+  <!-- === 合并进度区（内容区 y=330 起，宽 268..1172）=== -->
+
+  <!-- 标题：阶段 + 百分比，accentPrimary，30px -->
+  <text x="720" y="330" text-anchor="middle" font-family="Consolas,monospace" font-size="30" fill="#00E8FF" letter-spacing="2">MERGING... 47%</text>
+
+  <!-- 进度条：480..960，高 8px；槽底 bgPanelRaised，已播放段 accentPrimary。
+       收在内容区中部，与下方链路信息同宽，不再横贯整块面板。 -->
+  <rect x="480" y="455" width="480" height="8" rx="2" fill="#0A1230"/>
+  <rect x="480" y="455" width="225.6" height="8" rx="2" fill="url(#progressFill)"/>
+  <circle cx="705.6" cy="459" r="5" fill="#00E8FF"/>
+
+  <!-- === Merge Pipeline 区块 === -->
+  <text x="720" y="505" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#EAF8FF" letter-spacing="2">Merge Pipeline</text>
+
+  <!-- 设备行：流拷贝显示 "Stream Copy"；转码显示 hwDeviceType（如 videotoolbox / d3d11va），
+       回退软件显示 "CPU / Software"。此处示例为硬件转码。 -->
+  <text x="720" y="528" text-anchor="middle" font-family="Consolas,monospace" font-size="12" fill="#00E8FF" letter-spacing="1">videotoolbox</text>
+
+  <!-- 解码器行：流拷贝为 BYPASS；转码为 HW/SW + (decoderName) -->
+  <text x="548" y="556" font-family="Consolas,monospace" font-size="11" fill="#5A7A94">Decode:</text>
+  <text x="676" y="556" font-family="Consolas,monospace" font-size="11" fill="#A855FF">HW (h264_videotoolbox)</text>
+
+  <!-- 编码器行：同上，对应 encoderName -->
+  <text x="548" y="580" font-family="Consolas,monospace" font-size="11" fill="#5A7A94">Encode:</text>
+  <text x="676" y="580" font-family="Consolas,monospace" font-size="11" fill="#A855FF">HW (h264_videotoolbox)</text>
+
+  <!-- 零拷贝备注：zeroCopy=true → 亮青色；否则 muted 说明原因。
+       流拷贝时固定为 "Packet remux (no decode / encode)"。 -->
+  <text x="720" y="610" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#00E8FF">GPU Zero-Copy Pipeline</text>
+
+  <!-- CANCEL：合并中唯一的出口。不复用编辑态的 BACK ——
+       合并在后台线程运行，此时退出语义模糊（C++ 版同样只在 Editing/Result 态给 BACK）。 -->
+  <rect x="480" y="640" width="480" height="48" rx="3" fill="#A855FF" fill-opacity="0.04" stroke="#A855FF" stroke-opacity="0.68"/>
+  <text x="720" y="670" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#A855FF" letter-spacing="2">CANCEL</text>
+
+  <!-- Bottom status -->
+  <text x="102"  y="882" font-family="Consolas,monospace" font-size="9" fill="#3A5A74" letter-spacing="1.5">VIDEO MERGE TOOL</text>
+  <text x="1338" y="882" text-anchor="end" font-family="Consolas,monospace" font-size="9" fill="#3A5A74" letter-spacing="1.5">MP4 · MKV · AVI · MOV · FLV</text>
+  <path d="M102 862H1338" stroke="url(#rail)" stroke-width="1.2"/>
+
+  <!-- 变体说明：以下三态共用同一套几何，仅替换链路信息的取值 -->
+  <g font-family="Consolas,monospace" font-size="10" fill="#3A5A74">
+    <text x="268" y="806">变体 A · 流拷贝（transcoded=false）：设备 "Stream Copy"，Decode/Encode 均为 "BYPASS"，备注 "Packet remux (no decode / encode)"</text>
+    <text x="268" y="822">变体 B · 软件回退（transcoded=true, hw=false）：设备 "CPU / Software"，Decode/Encode 为 "SW (name)"，备注 "Software pipeline (CPU frames)"</text>
+    <text x="268" y="838">变体 C · 初始化中：decoderName/encoderName 为空时显示 "(initializing...)"，不能留空白</text>
+  </g>
+</svg>

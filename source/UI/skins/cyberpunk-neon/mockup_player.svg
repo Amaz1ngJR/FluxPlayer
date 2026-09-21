@@ -1,5 +1,5 @@
 <svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Runtime-aligned Player surface: optional HUD panels and 64px bottom dock. -->
+  <!-- Runtime-aligned Player surface: optional HUD panels and 88px bottom dock. -->
   <defs>
     <linearGradient id="video" x1="0" y1="0" x2="1" y2="1">
       <stop stop-color="#080B12"/>
@@ -27,70 +27,74 @@
   <rect width="1440" height="836" fill="url(#frame)"/>
   <text x="720" y="410" text-anchor="middle" font-family="Consolas, monospace" font-size="15" fill="#6F89A8" letter-spacing="3">PLAYING MEDIA</text>
 
-  <!-- Media Info: surfaces.hud.mediaInfoW=450, web height=384 (增加GOP行), margin=10. -->
+  <!-- Media Info: web height=405; the local variant is 293px tall. -->
   <g font-family="Consolas, monospace" font-size="12">
-    <rect x="10" y="10" width="450" height="384" rx="6" fill="#070D22" fill-opacity=".92" stroke="#00E8FF" stroke-opacity=".68"/>
+    <rect x="10" y="10" width="450" height="405" rx="6" fill="#070D22" fill-opacity=".96"/>
     <rect x="10" y="10" width="450" height="27" rx="6" fill="#0A1230"/>
-    <text x="22" y="29" fill="#EAF8FF">Media Info</text>
-    <text x="438" y="29" fill="#6F89A8">x</text>
-    <text x="24" y="59" fill="#A8C7E8">FILE: stream_title.mp4</text>
+    <rect x="10" y="10" width="450" height="405" rx="6" fill="none" stroke="#00E8FF" stroke-width="2"/>
+    <text x="22" y="29" fill="#FFFFFF">Media Info</text>
+    <text x="438" y="29" fill="#FFFFFF">x</text>
+    <text x="24" y="59" fill="#FFFFFF">FILE: stream_title.mp4</text>
     <path d="M22 69H448" stroke="#5A8CBE" stroke-opacity=".22"/>
-    <text x="24" y="91" fill="#EAF8FF">WEB VIDEO:</text>
-    <text x="42" y="111" fill="#A8C7E8">Platform   : bilibili</text>
-    <text x="42" y="130" fill="#A8C7E8">Uploader   : Flux Channel</text>
-    <text x="42" y="149" fill="#A8C7E8">Views      : 1,234,567</text>
-    <text x="42" y="168" fill="#A8C7E8">Upload Date: 2024-01-15</text>
+    <text x="24" y="91" fill="#FFFFFF">WEB VIDEO:</text>
+    <text x="42" y="111" fill="#FFFFFF">Platform   : bilibili</text>
+    <text x="42" y="130" fill="#FFFFFF">Uploader   : Flux Channel</text>
+    <text x="42" y="149" fill="#FFFFFF">Views      : 1,234,567</text>
+    <text x="42" y="168" fill="#FFFFFF">Upload Date: 2024-01-15</text>
     <path d="M22 182H448" stroke="#5A8CBE" stroke-opacity=".22"/>
-    <text x="24" y="204" fill="#EAF8FF">VIDEO:</text>
-    <text x="42" y="223" fill="#A8C7E8">Resolution : 1920x1080</text>
-    <text x="42" y="242" fill="#A8C7E8">Codec      : H.264 (High)</text>
-    <text x="42" y="261" fill="#A8C7E8">FPS        : 30.00</text>
-    <text x="42" y="280" fill="#A8C7E8">GOP        : 60 frames (2.00 sec)</text>
+    <text x="24" y="204" fill="#FFFFFF">VIDEO:</text>
+    <text x="42" y="223" fill="#FFFFFF">Resolution : 1920x1080</text>
+    <text x="42" y="242" fill="#FFFFFF">Codec      : H.264 (High)</text>
+    <text x="42" y="261" fill="#FFFFFF">FPS        : 30.00</text>
+    <text x="42" y="280" fill="#FFFFFF">GOP        : 60 frames (2.00 sec)</text>
     <path d="M22 294H448" stroke="#5A8CBE" stroke-opacity=".22"/>
-    <text x="24" y="316" fill="#EAF8FF">AUDIO:</text>
-    <text x="42" y="335" fill="#A8C7E8">Codec      : AAC (LC)</text>
-    <text x="42" y="354" fill="#A8C7E8">Sample Rate: 48000 Hz</text>
-    <text x="42" y="373" fill="#A8C7E8">Channels   : 2 (Stereo)</text>
-    <text x="24" y="393" fill="#A8C7E8">Duration   : 01:32:18</text>
+    <text x="24" y="316" fill="#FFFFFF">AUDIO:</text>
+    <text x="42" y="335" fill="#FFFFFF">Codec      : AAC (LC)</text>
+    <text x="42" y="354" fill="#FFFFFF">Sample Rate: 48000 Hz</text>
+    <text x="42" y="373" fill="#FFFFFF">Channels   : 2 (Stereo)</text>
+    <text x="24" y="393" fill="#FFFFFF">Duration   : 01:32:18</text>
   </g>
 
-  <!-- Statistics: surfaces.hud.statsW=240→400, statsH=180→330 (新增 VIDEO PIPELINE 区块). -->
+  <!-- Statistics: 400x348 with room below the final state line. -->
   <g font-family="Consolas, monospace" font-size="12">
-    <rect x="1030" y="10" width="400" height="330" rx="6" fill="#070D22" fill-opacity=".92" stroke="#A855FF" stroke-opacity=".62"/>
+    <rect x="1030" y="10" width="400" height="348" rx="6" fill="#070D22" fill-opacity=".96"/>
     <rect x="1030" y="10" width="400" height="27" rx="6" fill="#0A1230"/>
-    <text x="1042" y="29" fill="#EAF8FF">Statistics</text>
-    <text x="1418" y="29" fill="#6F89A8">x</text>
-    <text x="1044" y="59" fill="#EAF8FF">PERFORMANCE:</text>
-    <text x="1060" y="80" fill="#00E8FF">FPS        : 30</text>
-    <text x="1060" y="99" fill="#A8C7E8">Bitrate    : 4.62 Mbps</text>
-    <text x="1060" y="118" fill="#A8C7E8">Dropped    : 0</text>
+    <rect x="1030" y="10" width="400" height="348" rx="6" fill="none" stroke="#A855FF" stroke-width="2"/>
+    <text x="1042" y="29" fill="#FFFFFF">Statistics</text>
+    <text x="1418" y="29" fill="#FFFFFF">x</text>
+    <text x="1044" y="59" fill="#FFFFFF">PERFORMANCE:</text>
+    <text x="1060" y="80" fill="#FFFFFF">FPS        : 30</text>
+    <text x="1060" y="99" fill="#FFFFFF">Bitrate    : 4.62 Mbps</text>
+    <text x="1060" y="118" fill="#FFFFFF">Dropped    : 0</text>
     <path d="M1042 130H1418" stroke="#A855FF" stroke-opacity=".3"/>
-    <text x="1044" y="152" fill="#EAF8FF">BUFFER:</text>
-    <text x="1060" y="171" fill="#A8C7E8">Video : 16 frames</text>
-    <text x="1060" y="190" fill="#A8C7E8">Audio : 24 frames</text>
+    <text x="1044" y="152" fill="#FFFFFF">BUFFER:</text>
+    <text x="1060" y="171" fill="#FFFFFF">Video : 16 frames</text>
+    <text x="1060" y="190" fill="#FFFFFF">Audio : 24 frames</text>
     <path d="M1042 202H1418" stroke="#A855FF" stroke-opacity=".3"/>
-    <text x="1044" y="224" fill="#EAF8FF">VIDEO PIPELINE:</text>
-    <text x="1060" y="243" fill="#A8C7E8">Decoder   : HARDWARE</text>
-    <text x="1060" y="262" fill="#A8C7E8">Backend   : VideoToolbox</text>
-    <text x="1060" y="281" fill="#A8C7E8">Device    : Apple M3</text>
-    <text x="1060" y="300" fill="#00E8FF">Zero-copy : ACTIVE</text>
-    <text x="1060" y="319" fill="#A8C7E8">Path      : IOSurface -> CGL texture -> OpenGL</text>
-    <text x="1044" y="339" fill="#00E8FF">STATE : PLAYING</text>
+    <text x="1044" y="224" fill="#FFFFFF">VIDEO PIPELINE:</text>
+    <text x="1060" y="243" fill="#FFFFFF">Decoder   : HARDWARE</text>
+    <text x="1060" y="262" fill="#FFFFFF">Backend   : VideoToolbox</text>
+    <text x="1060" y="281" fill="#FFFFFF">Device    : Apple M3</text>
+    <text x="1060" y="300" fill="#FFFFFF">Zero-copy : ACTIVE</text>
+    <text x="1060" y="319" fill="#FFFFFF">Path      : IOSurface -> CGL texture -> OpenGL</text>
+    <text x="1044" y="339" fill="#FFFFFF">STATE : PLAYING</text>
   </g>
 
   <!-- Subtitle surface above the visible dock. -->
   <rect x="413" y="762" width="614" height="28" rx="3" fill="#030511" fill-opacity=".55"/>
   <text x="720" y="781" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" fill="#EAF8FF">Current subtitle remains clear above player controls.</text>
 
-  <!-- Bottom dock: y=812, height=88; controls center in the area below the seek row. -->
+  <!-- Bottom dock: y=812, height=88; control row y=855, height=38, bottom inset=7.
+       Runtime uses logical pixels, scales down to fit, never enlarges above this reference.
+       Seek ends at x=1232; time column x=1240..1432 stays inside the viewBox. -->
   <rect y="812" width="1440" height="88" fill="#070D22" fill-opacity=".92"/>
   <path d="M0 813H1440" stroke="url(#rail)" stroke-width="2"/>
-  <rect x="8" y="819" width="1316" height="16" rx="2" fill="#0A1230" stroke="#5A8CBE" stroke-opacity=".22"/>
-  <rect x="8" y="819" width="654" height="16" rx="2" fill="url(#played)"/>
-  <circle cx="662" cy="827" r="12" fill="#00E8FF" fill-opacity=".08"/>
-  <circle cx="662" cy="827" r="8" fill="#00E8FF" fill-opacity=".22"/>
-  <circle cx="662" cy="827" r="5" fill="#00E8FF"/>
-  <text x="1333" y="831" font-family="Consolas, monospace" font-size="12" fill="#EAF8FF">00:41:52 / 01:32:18</text>
+  <rect x="8" y="819" width="1224" height="16" rx="2" fill="#0A1230" stroke="#5A8CBE" stroke-opacity=".22"/>
+  <rect x="8" y="819" width="555.2" height="16" rx="2" fill="url(#played)"/>
+  <circle cx="563.2" cy="827" r="12" fill="#00E8FF" fill-opacity=".08"/>
+  <circle cx="563.2" cy="827" r="8" fill="#00E8FF" fill-opacity=".22"/>
+  <circle cx="563.2" cy="827" r="5" fill="#00E8FF"/>
+  <text x="1432" y="831" text-anchor="end" font-family="Consolas, monospace" font-size="12" fill="#EAF8FF">00:41:52 / 01:32:18</text>
 
   <!-- Active VOD download group; all unrelated player UI remains unchanged. -->
   <g font-family="Consolas, monospace" font-size="12">
@@ -107,8 +111,9 @@
     <text x="270" y="888" fill="#00E8FF" fill-opacity=".62">ETA 00:56 · FAST PULL</text>
     <rect x="427" y="855" width="38" height="17" rx="2" fill="#00E8FF" fill-opacity=".12" stroke="#00E8FF" stroke-opacity=".48"/>
     <text x="446" y="867" text-anchor="middle" font-size="9" fill="#00E8FF">HW D</text>
-    <rect x="469" y="855" width="38" height="17" rx="2" fill="#A855FF" fill-opacity=".12" stroke="#A855FF" stroke-opacity=".48"/>
-    <text x="488" y="867" text-anchor="middle" font-size="9" fill="#D8A8FF">HW E</text>
+    <!-- Encoder chip remains visible but inactive: playback/recording uses packet remux. -->
+    <rect x="469" y="855" width="38" height="17" rx="2" fill="#A855FF" fill-opacity=".05" stroke="#A855FF" stroke-opacity=".25"/>
+    <text x="488" y="867" text-anchor="middle" font-size="9" fill="#5A7A94">HW E</text>
     <rect x="427" y="876" width="80" height="17" rx="2" fill="#00E8FF" fill-opacity=".12" stroke="#00E8FF" stroke-opacity=".48"/>
     <circle cx="436" cy="884.5" r="3" fill="#00E8FF"/>
     <text x="469" y="888" text-anchor="middle" font-size="9" fill="#00E8FF">ZERO-COPY</text>
@@ -126,13 +131,46 @@
     <text x="844" y="879" text-anchor="middle" fill="#00E8FF">REC A</text>
   </g>
 
+  <!-- HUD visibility toggles, matching the Lua dock positions. -->
+  <g id="hud-toggles" font-family="Consolas, monospace" font-size="12" text-anchor="middle">
+    <rect x="918" y="855" width="60" height="38" rx="3" fill="#00E8FF" fill-opacity=".04" stroke="#00E8FF" stroke-opacity=".68"/>
+    <text x="948" y="879" fill="#00E8FF">INFO</text>
+    <rect x="986" y="855" width="60" height="38" rx="3" fill="#A855FF" fill-opacity=".04" stroke="#A855FF" stroke-opacity=".68"/>
+    <text x="1016" y="879" fill="#A855FF">STATS</text>
+  </g>
+
   <!-- Right toolbar. -->
   <g font-family="Consolas, monospace" font-size="12">
     <rect x="1090" y="855" width="60" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
     <text x="1120" y="879" text-anchor="middle" fill="#00E8FF">1080P</text>
     <rect x="1154" y="855" width="60" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".68"/>
     <text x="1184" y="879" text-anchor="middle" fill="#00E8FF">Speed</text>
-    <!-- 亮度入口预留：保留原放射形图标，后续接入视频亮度调节。 -->
+    <!-- 倍速展开态为动态模板，不指定设备上限；省略号代表按启动能力检测结果
+         和当前视频分辨率生成的可选档位，面板随选项数量向上伸缩。 -->
+    <g id="speed-expanded" text-anchor="middle">
+      <desc>Dynamic template: resolve supported rates from player.maxSpeed at runtime, not a fixed 4x/16x cap.</desc>
+      <text x="1170" y="653" font-size="9" fill="#A8C7E8">DYNAMIC</text>
+      <rect x="1136" y="661" width="68" height="186" rx="4" fill="#0A1230" fill-opacity=".96" stroke="#00E8FF" stroke-opacity=".68"/>
+      <g fill="#00E8FF" fill-opacity=".04" stroke="#00E8FF" stroke-opacity=".68">
+        <rect x="1140" y="665" width="60" height="24" rx="3"/>
+        <rect x="1140" y="691" width="60" height="24" rx="3"/>
+        <rect x="1140" y="717" width="60" height="24" rx="3"/>
+        <rect x="1140" y="743" width="60" height="24" rx="3"/>
+        <rect x="1140" y="769" width="60" height="24" rx="3" fill-opacity=".18"/>
+        <rect x="1140" y="795" width="60" height="24" rx="3"/>
+        <rect x="1140" y="821" width="60" height="24" rx="3"/>
+      </g>
+      <g fill="#00E8FF">
+        <text x="1170" y="681">…</text>
+        <text x="1170" y="707">2x</text>
+        <text x="1170" y="733">1.5x</text>
+        <text x="1170" y="759">1.25x</text>
+        <text x="1170" y="785">1x</text>
+        <text x="1170" y="811">0.75x</text>
+        <text x="1170" y="837">0.5x</text>
+      </g>
+    </g>
+    <!-- 亮度入口与向上展开的滑条。 -->
     <rect x="1218" y="855" width="26" height="38" rx="3" stroke="#00E8FF" stroke-opacity=".42"/>
     <g stroke="#00E8FF" stroke-opacity=".72" fill="none" stroke-linecap="round">
       <circle cx="1231" cy="874" r="4.2"/>

@@ -7,7 +7,7 @@
 
 [Audio]
 # volume: 音量 (0.0 ~ 1.0)
-volume=0.6
+volume=1.0
 
 [Log]
 # logLevel: 日志级别 (DEBUG / INFO / WARN / ERROR)
@@ -33,9 +33,9 @@ windowHeight=600
 # uiVisible: 是否显示控制面板 (true / false)
 uiVisible=true
 # showMediaInfo: 是否显示媒体信息面板 (true / false)
-showMediaInfo=true
+showMediaInfo=false
 # showStats: 是否显示统计信息面板 (true / false)
-showStats=true
+showStats=false
 # 说明：当前激活皮肤 ID（皮肤包目录名）。无效时回退到内置 cyberpunk-neon。
 # 取值：cyberpunk-neon 等已安装皮肤 id
 # 默认：cyberpunk-neon
@@ -73,15 +73,15 @@ screenshotDir=Screenshot
 #       会额外生成同名 .txt 元数据文件（含宽高、格式、FFplay 查看命令）。
 #       查看示例：ffplay -f rawvideo -pixel_format yuv420p -video_size 1920x1080 文件名.yuv
 screenshotFormat=png
-# screenshotToastEnabled: 截图后是否显示 Toast 提示 (true / false)
+# screenshotToast: 截图后是否显示 Toast 提示 (true / false)
 # 默认：true
-screenshotToastEnabled=true
-# screenshotFlashEnabled: 截图时是否显示闪光动画 (true / false)
+screenshotToast=true
+# screenshotFlash: 截图时是否播放闪光动画 (true / false)
 # 默认：true
-screenshotFlashEnabled=true
-# screenshotSoundEnabled: 截图时是否播放音效 (true / false)
+screenshotFlash=true
+# screenshotSound: 截图时是否播放音效 (true / false)
 # 默认：true
-screenshotSoundEnabled=true
+screenshotSound=true
 
 [Record]
 # recordDir: 录制文件保存目录（默认为平台缓存目录下的 Record 子目录）

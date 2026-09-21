@@ -139,7 +139,7 @@ void UiContext::destroy() {
         backendsInited_ = false;
     }
     ImGui::DestroyContext();
-    titleFont_ = defaultFont_ = subtitleFont_ = nullptr;
+    titleFont_ = defaultFont_ = subtitleFont_ = monoFont_ = nullptr;
 
     if (window_) window_->destroy();
     window_.reset();
@@ -148,6 +148,57 @@ void UiContext::destroy() {
 
 bool UiContext::shouldClose() const {
     return !window_ || window_->shouldClose();
+}
+
+ImFont* UiContext::loadMonoFont() {
+    ImGuiIO& io = ImGui::GetIO();
+    // Consolas is optional/licensed; never substitute the decorative title font.
+    std::vector<std::string> candidates = {getExeDir() + "/fonts/consola.ttf"};
+    const char* cjk = nullptr;
+#if defined(_WIN32)
+    candidates.push_back("C:/Windows/Fonts/consola.ttf");
+    candidates.push_back("C:/Windows/Fonts/cour.ttf");
+    cjk = "C:/Windows/Fonts/msyh.ttc";
+#elif defined(__APPLE__)
+    candidates.push_back("/Library/Fonts/Consolas.ttf");
+    candidates.push_back("/Library/Fonts/consola.ttf");
+    candidates.push_back("/System/Library/Fonts/Menlo.ttc");
+    candidates.push_back("/System/Library/Fonts/Supplemental/Courier New.ttf");
+    cjk = "/System/Library/Fonts/PingFang.ttc";
+#else
+    candidates.push_back("/usr/share/fonts/truetype/msttcorefonts/Consolas.ttf");
+    candidates.push_back("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
+    candidates.push_back("/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf");
+    cjk = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+#endif
+    ImFont* font = nullptr;
+    ImFontConfig monoConfig;
+    monoConfig.RasterizerMultiply = 1.5f;
+    monoConfig.PixelSnapH = true;
+    for (const auto& path : candidates) {
+        if (!std::ifstream(path).good()) continue;
+        font = io.Fonts->AddFontFromFileTTF(path.c_str(), 12.0f, &monoConfig);
+        if (font) {
+            LOG_INFO("UI mono font (Consolas preferred): " + path);
+            break;
+        }
+    }
+    if (!font) {
+        monoConfig.SizePixels = 12.0f;
+        font = io.Fonts->AddFontDefault(&monoConfig);
+        LOG_WARN("UI mono font: Consolas/system monospace unavailable; using built-in monospace");
+    }
+    // Keep Chinese filenames/uploader names readable without changing Latin advances.
+    if (font && cjk && std::ifstream(cjk).good()) {
+        ImFontConfig config;
+        config.MergeMode = true;
+        config.DstFont = font;
+        config.RasterizerMultiply = monoConfig.RasterizerMultiply;
+        config.PixelSnapH = true;
+        io.Fonts->AddFontFromFileTTF(cjk, 12.0f, &config,
+                                   io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    }
+    return font;
 }
 
 void UiContext::loadFonts() {
@@ -239,6 +290,8 @@ void UiContext::loadFonts() {
         subtitleFont_ = defaultFont_;  // 回退：用默认字体（小字号字幕也比缺字好）
         LOG_WARN("UiContext: subtitle font fell back to default font");
     }
+    // Load last so subtitle glyph merges keep their original destination.
+    monoFont_ = loadMonoFont();
 }
 
 } // namespace FluxPlayer

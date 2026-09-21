@@ -20,9 +20,12 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 namespace FluxPlayer {
+
+namespace FluxUI { class ImGuiBackend; }
 
 class Player;
 class UiContext;
@@ -52,6 +55,20 @@ public:
     OpeningScreen(UiContext& ui, Player& player);
 
     /**
+     * @brief 析构在 .cpp 中定义
+     *
+     * luaBackend_ 是 unique_ptr<ImGuiBackend>，而本头文件只前向声明了 ImGuiBackend。
+     * unique_ptr 的析构需要完整类型才能生成 delete，若用隐式析构，
+     * 每个包含本头文件的翻译单元都会展开析构并报
+     * "invalid application of 'sizeof' to an incomplete type"。
+     * 把析构出线到 .cpp（那里已 include ImGuiBackend.h）即可保持头文件轻量。
+     */
+    ~OpeningScreen();
+
+    OpeningScreen(const OpeningScreen&) = delete;
+    OpeningScreen& operator=(const OpeningScreen&) = delete;
+
+    /**
      * @brief 同步打开 mediaPath，期间在共享窗口上绘制 splash
      * @param mediaPath 本地路径或网络 URL
      * @return 见 OpeningResult
@@ -64,6 +81,10 @@ private:
 
     UiContext& ui_;
     Player&    player_;
+    /// 皮肤驱动的 splash：皮肤实现 opening surface 时由它绘制，C++ 只提供
+    /// mediaPath / phase / 启动时长。没有 surface 就是空屏，不再有 C++ 兜底外观。
+    std::unique_ptr<FluxUI::ImGuiBackend> luaBackend_;
+    double startedAt_ = 0.0;   ///< run() 起点（ImGui 时间轴），用于皮肤做 dots 动画
 };
 
 } // namespace FluxPlayer

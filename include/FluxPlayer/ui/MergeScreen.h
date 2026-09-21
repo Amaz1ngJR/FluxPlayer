@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
 
 struct ImFont;
 
@@ -34,6 +35,7 @@ namespace FluxPlayer {
 
 class UiContext;
 class VideoFramePreviewer;
+namespace FluxUI { class ImGuiBackend; }
 
 /**
  * @brief MergeScreen 运行结果
@@ -93,6 +95,11 @@ private:
     void setupStyle();
     void renderBackground();
     void renderUI();
+    void renderLuaUI();
+    void handleLuaAction(const std::string& action,
+                         const std::unordered_map<std::string, std::string>& payload);
+    std::vector<std::unordered_map<std::string, std::string>>
+    provideLuaData(const std::string& name) const;
 
     /// 编辑态：左栏片段列表 + 右栏片段编辑（含预览）
     void renderEditing(float contentW);
@@ -109,6 +116,12 @@ private:
     void addClip(const std::string& path);
     /// 启动合并：构造输出路径并把 clips_ 传给 VideoMerger
     void startMerge();
+
+    /**
+     * 当前格式选择的后果提示（C++ 面板小字与 Lua 皮肤共用）。
+     * 都选 KeepSource 时各源格式一致仍可流拷贝；指定了具体格式则必须重编码。
+     */
+    std::string formatHintText() const;
     /// 轮询 VideoMerger 状态，驱动 phase 切换
     void pollMerger();
 
@@ -138,6 +151,8 @@ private:
     int customWidth_ = 1920;                ///< Unified 模式：自定义宽度
     int customHeight_ = 1080;               ///< Unified 模式：自定义高度
     int customGopSize_ = 250;                ///< Unified 模式：自定义 GOP（帧）
+    MergeOptions::VideoCodec videoCodec_ = MergeOptions::VideoCodec::KeepSource;  ///< Unified 模式：输出视频格式
+    MergeOptions::AudioCodec audioCodec_ = MergeOptions::AudioCodec::KeepSource;  ///< Unified 模式：输出音频格式
     bool enableHardwareAccel_ = true;       ///< 硬件加速开关
 
     // —— 预览状态 ——
@@ -154,6 +169,7 @@ private:
     ImFont* defaultFont_ = nullptr;
 
     uint64_t appliedSkinGeneration_ = 0;
+    std::unique_ptr<FluxUI::ImGuiBackend> luaBackend_;
 };
 
 } // namespace FluxPlayer

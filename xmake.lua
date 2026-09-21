@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.8.3"
+local version = "0.8.5"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -170,6 +170,27 @@ target("imgui_local")
 -- ========================
 -- 5. FluxPlayer 主程序
 -- ========================
+target("lua_local")
+    set_kind("static")
+    add_files("third_party/lua/src/*.c")
+    add_includedirs("third_party/lua/src", {public = true})
+    if is_plat("windows") then
+        add_defines("LUA_USE_WINDOWS")
+    elseif is_plat("macosx") then
+        add_defines("LUA_USE_MACOSX")
+    else
+        add_defines("LUA_USE_LINUX")
+        add_syslinks("m", "dl")
+    end
+    set_warnings("none")
+
+-- 皮肤资源（Lua/SVG/JSON）不是编译输入，但要登记为目标输入文件：
+-- 否则改皮肤后 xmake 认为目标无需重建，after_build 不执行，运行目录里仍是旧皮肤。
+-- xmake 默认不识别这些扩展名，需先用 rule 声明，否则报 "unknown source file"。
+rule("flux.skin.asset")
+    set_extensions(".lua", ".svg", ".json")
+    on_build_file(function (target, sourcefile) end)
+
 target("FluxPlayer")
     set_kind("binary")  -- 编译为可执行文件
 
@@ -183,6 +204,10 @@ target("FluxPlayer")
     add_files("src/*.cpp")
     add_files("src/**/*.cpp")
 
+    -- 皮肤资源登记为规则输入：内容变化触发重建，从而带动 after_build 复制。
+    add_files("source/UI/skins/**/*.lua", {rule = "flux.skin.asset"})
+    add_files("source/UI/skins/**/*.svg", {rule = "flux.skin.asset"})
+
     -- 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)。
     -- Linux 仍需保留 WebLogin_win.cpp：未定义 FLUXPLAYER_HAVE_WEBVIEW2 时，该文件会
     -- 编译出 Unsupported 占位实现，与 CMake 的源文件选择保持一致，避免 Linux 链接缺符号。
@@ -194,7 +219,7 @@ target("FluxPlayer")
     end
 
     -- 声明依赖的静态库（会自动传递头文件路径）
-    add_deps("glfw_local", "glad_local", "imgui_local", "tinyfiledialogs_local")
+    add_deps("glfw_local", "glad_local", "imgui_local", "tinyfiledialogs_local", "lua_local")
 
     -- 传递版本号宏到代码（引用开头定义的 version 变量）
     add_defines("FLUXPLAYER_VERSION=\"" .. version .. "\"")
@@ -222,7 +247,11 @@ target("FluxPlayer")
     -- UiContext 与 OpeningScreen 直接 include <glad/glad.h> + GLFW，跟 Controller 等其他 GL TU 不能合并
     add_files("src/ui/UiContext.cpp", {unity_ignored = true})
     add_files("src/ui/OpeningScreen.cpp", {unity_ignored = true})
-    -- nlohmann/json.hpp 接近 1MB，单独编译避免污染其他 TU 的编译时间
+    -- Lua runtime 与 backend 边界独立编译，避免 Unity TU 中的 Lua C 宏和 ImGui 头互相污染
+    add_files("src/ui/LuaSkinRuntime.cpp", {unity_ignored = true})
+    add_files("src/ui/LuaSkinLoader.cpp", {unity_ignored = true})
+    add_files("src/ui/FluxUI/*.cpp", {unity_ignored = true})
+    -- SkinManager coordinates threads and runtime lifetime; compile it separately for isolation.
     add_files("src/ui/SkinManager.cpp", {unity_ignored = true})
     -- WebView2 头依赖大量 Windows COM 宏，与其他 .cpp 合并会触发宏冲突
     if is_plat("windows") then
@@ -235,7 +264,7 @@ target("FluxPlayer")
     -- 项目头文件搜索路径
     add_includedirs("include")              -- 项目自身头文件
     add_includedirs("third_party/glm")      -- GLM 数学库（仅头文件）
-    add_includedirs("third_party")          -- nlohmann/json 等仅头文件库的根目录（include 形式 <nlohmann/json.hpp>）
+    add_includedirs("third_party")          -- 项目内其他模块使用的仅头文件第三方库根目录
 
     -- FFmpeg：添加头文件路径、库搜索路径，然后链接各模块
     add_includedirs(ffmpeg_root .. "/include")
@@ -327,20 +356,32 @@ target("FluxPlayer")
         -- 把字体文件复制到可执行文件旁边（主界面 TTF 字体运行时加载）
         os.cp("assets/fonts", path.join(target:targetdir(), "fonts"))
         -- source/ 全拷贝（开发期依赖，含字幕测试、封面兜底图）
-        os.cp("source", path.join(target:targetdir(), "source"))
+        -- 先删目标再拷：os.cp 在目标已存在时会把 source 嵌成 source/source，
+        -- 且增量拷贝不会清除已删除的旧皮肤，导致加载到过期文件。
+        local source_dst = path.join(target:targetdir(), "source")
+        os.tryrm(source_dst)
+        os.cp("source", source_dst)
+        -- source/ 是增量复制，清理全部皮肤，避免已经删除的 JSON manifest 残留。
+        os.tryrm(path.join(target:targetdir(), "source/UI/skins/cyberpunk-neon"))
+        os.cp("source/UI/skins/cyberpunk-neon",
+              path.join(target:targetdir(), "source/UI/skins/cyberpunk-neon"))
+        os.tryrm(path.join(target:targetdir(), "source/UI/skins/minimal-lua"))
+        os.cp("source/UI/skins/minimal-lua",
+              path.join(target:targetdir(), "source/UI/skins/minimal-lua"))
         -- 发布运行时按 Config::getResourcePath() 从 resources/ 读取纯音频兜底封面。
         -- CMake install 使用相同布局；保留上面的 source/ 仅用于开发期资源热加载。
         local resources_dir = path.join(target:targetdir(), "resources")
         os.mkdir(resources_dir)
         cp_if_changed("source/pic2.png", resources_dir)
-        -- 皮肤包内置回退：与 source/UI/skins 解耦，发布版从 resources/skins 加载
-        -- 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
-        -- 先清空目标目录：os.cp 不删除已存在文件，否则旧构建残留的 mockup 会滞留
+        -- 单文件 Lua 皮肤包内置回退；SVG 资源原样保留。
+        -- 清掉整个 skins/ 再重建：避免历史嵌套目录（skins/skins/...）和已删皮肤的残留。
+        os.tryrm(path.join(resources_dir, "skins"))
         local skin_dst = path.join(target:targetdir(), "resources/skins/cyberpunk-neon")
         os.tryrm(skin_dst)
-        os.mkdir(skin_dst)
-        os.cp("source/UI/skins/cyberpunk-neon/skin.json", skin_dst)
-        os.cp("source/UI/skins/cyberpunk-neon/preview.svg", skin_dst)
+        os.cp("source/UI/skins/cyberpunk-neon", skin_dst)
+        local lua_skin_dst = path.join(target:targetdir(), "resources/skins/minimal-lua")
+        os.tryrm(lua_skin_dst)
+        os.cp("source/UI/skins/minimal-lua", lua_skin_dst)
         if is_plat("windows") then
             -- Windows：把 FFmpeg 的 DLL 增量复制到可执行文件旁边，否则运行时找不到
             local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")

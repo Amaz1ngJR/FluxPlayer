@@ -70,6 +70,10 @@ public:
     ImFont* defaultFont()  const { return defaultFont_; }
     /// 字幕字体（22px，含 CJK + 拉丁 + 希腊 + 数学符号等扩展范围）
     ImFont* subtitleFont() const { return subtitleFont_; }
+    /// SVG monospace role, independent of the decorative display font.
+    ImFont* monoFont() const { return monoFont_; }
+    /// Register in the current atlas before backend initialization (also for direct playback).
+    static ImFont* loadMonoFont();
 
     /// 标记是否已成功初始化
     bool initialized() const { return initialized_; }
@@ -84,6 +88,7 @@ private:
     ImFont* titleFont_       = nullptr;
     ImFont* defaultFont_     = nullptr;
     ImFont* subtitleFont_    = nullptr;
+    ImFont* monoFont_        = nullptr;
 };
 
 } // namespace FluxPlayer

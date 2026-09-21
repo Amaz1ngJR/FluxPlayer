@@ -78,6 +78,42 @@ void ToastManager::update(float deltaTime) {
     }
 }
 
+float ToastManager::slideOffsetFor(const ActiveToast& toast) {
+    // 仅淡入阶段从右侧滑入；缓动曲线与 render() 共用，Lua 皮肤因此不必重写一份
+    const float totalDuration = toast.message.duration + kFadeInDuration;
+    if (toast.remainingTime <= toast.message.duration) return 0.0f;
+    const float fadeInProgress = (totalDuration - toast.remainingTime) / kFadeInDuration;
+    const float eased = 1.0f - std::pow(1.0f - fadeInProgress, 3.0f);  // easeOutCubic
+    return (1.0f - eased) * (kToastWidth + kMarginRight);
+}
+
+const char* ToastManager::typeName(ToastType type) {
+    switch (type) {
+        case ToastType::Success: return "success";
+        case ToastType::Warning: return "warning";
+        case ToastType::Error:   return "error";
+        case ToastType::Info:
+        default:                 return "info";
+    }
+}
+
+std::vector<ToastView> ToastManager::snapshot() const {
+    std::vector<ToastView> out;
+    out.reserve(activeToasts_.size());
+    for (const auto& toast : activeToasts_) {
+        ToastView view;
+        view.type         = typeName(toast.message.type);
+        view.icon         = getIconForType(toast.message.type);
+        view.title        = toast.message.title;
+        view.content      = toast.message.content;
+        view.detail       = toast.message.detail;
+        view.alpha        = toast.alpha;
+        view.slideOffset  = slideOffsetFor(toast);
+        out.push_back(std::move(view));
+    }
+    return out;
+}
+
 void ToastManager::render() {
     if (activeToasts_.empty()) {
         return;
@@ -92,17 +128,7 @@ void ToastManager::render() {
     for (size_t i = 0; i < activeToasts_.size(); ++i) {
         auto& toast = activeToasts_[i];
 
-        // 计算滑入动画偏移（从右侧滑入）
-        float slideOffset = 0.0f;
-        float totalDuration = toast.message.duration + kFadeInDuration;
-
-        if (toast.remainingTime > toast.message.duration) {
-            // 淡入阶段：从右侧滑入
-            float fadeInProgress = (totalDuration - toast.remainingTime) / kFadeInDuration;
-            // 使用 easeOutCubic 缓动函数，使滑入更自然
-            float eased = 1.0f - std::pow(1.0f - fadeInProgress, 3.0f);
-            slideOffset = (1.0f - eased) * (kToastWidth + kMarginRight);
-        }
+        const float slideOffset = slideOffsetFor(toast);
 
         // 计算 Toast 位置（右上角，带滑入偏移）
         ImVec2 toastPos(

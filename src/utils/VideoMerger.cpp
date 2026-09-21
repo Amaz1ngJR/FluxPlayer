@@ -65,6 +65,9 @@ namespace {
 /// 转码目标音频格式：AAC 原生编码器要求平面浮点（FLTP），码率 128kbps
 constexpr int    kAacBitRate     = 128000;
 constexpr int    kAudioFrameSize = 1024;   ///< AAC 默认每帧采样数（编码器未给出时的回退值）
+/// PCM 输出：s16le 交错。本合并器只做格式统一，不重采样到位深更高，故固定 16bit。
+constexpr int    kPcmBitRate     = 4608000; ///< 48kHz 立体声 s16 的名义码率（仅作参数占位）
+constexpr int    kPcmFrameSize   = 1024;    ///< PCM 每帧采样数（无编码器帧长，取 1024 与 AAC 对齐）
 /// 转码目标视频码率回退（编码器主要由 CRF 控制质量，bit_rate 仅作上限提示）
 constexpr int    kVideoBitRate   = 4000000;
 /// x264 默认关键帧间隔也是 250 帧；源文件无法可靠探测 GOP 时使用该值，避免退回旧的 12 帧短 GOP。
@@ -329,7 +332,7 @@ bool canStreamCopy(const std::vector<ClipInfo>& infos) {
         if (hasAudio != audioUniformPresent) return false;  // 有的有音频有的没有
         if (hasAudio) {
             if (b.aCodec != a.aCodec || b.sampleRate != a.sampleRate ||
-                b.channels != a.channels || b.aSampleFmt != a.aSampleFmt) {
+                b.channels != a.channels) {
                 return false;
             }
         }
@@ -337,17 +340,103 @@ bool canStreamCopy(const std::vector<ClipInfo>& infos) {
     return true;
 }
 
-/// Unified 模式只有在无需改变分辨率且各片段 GOP 已一致时才允许流拷贝。
-/// 自定义 GOP/分辨率必须重新编码，否则界面设置只会被原压缩码流静默忽略。
+/// 用户显式指定的视频格式对应的编解码器；KeepSource 返回 NONE 表示不干预
+AVCodecID requestedVideoCodec(MergeOptions::VideoCodec codec) {
+    switch (codec) {
+        case MergeOptions::VideoCodec::H264: return AV_CODEC_ID_H264;
+        case MergeOptions::VideoCodec::HEVC: return AV_CODEC_ID_HEVC;
+        default:                             return AV_CODEC_ID_NONE;
+    }
+}
+
+/// 用户显式指定的音频格式对应的编解码器；KeepSource 返回 NONE 表示不干预
+AVCodecID requestedAudioCodec(MergeOptions::AudioCodec codec) {
+    switch (codec) {
+        case MergeOptions::AudioCodec::AAC: return AV_CODEC_ID_AAC;
+        case MergeOptions::AudioCodec::PCM: return AV_CODEC_ID_PCM_S16LE;
+        default:                            return AV_CODEC_ID_NONE;
+    }
+}
+
+/// 音频编码器能否接受指定采样格式（PCM 只吃 s16 等整数格式，AAC 只吃 fltp）。
+/// 目标格式先按编解码器的首选采样格式探测，避免出现「编码器存在但打不开」。
+struct AudioSampleFormats {
+    const AVSampleFormat* values = nullptr;
+    int count = 0;
+    bool allSupported = false;
+};
+
+bool queryAudioSampleFormats(const AVCodec* codec, AudioSampleFormats& out) {
+    if (!codec) return false;
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    const void* configs = nullptr;
+    int count = 0;
+    if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT,
+                                     0, &configs, &count) < 0) {
+        return false;
+    }
+    out.values = static_cast<const AVSampleFormat*>(configs);
+    out.count = count;
+    out.allSupported = configs == nullptr;
+    return true;
+#else
+    // FFmpeg 4.x 尚无 avcodec_get_supported_config()，只能读取旧公开字段。
+    out.values = codec->sample_fmts;
+    if (!out.values) return false;
+    while (out.values[out.count] != AV_SAMPLE_FMT_NONE) ++out.count;
+    return out.count > 0;
+#endif
+}
+
+bool audioEncoderAcceptsFormat(AVCodecID codecId, AVSampleFormat fmt) {
+    const AVCodec* codec = avcodec_find_encoder(codecId);
+    AudioSampleFormats formats;
+    if (!queryAudioSampleFormats(codec, formats)) return false;
+    if (formats.allSupported) return true;
+    for (int i = 0; i < formats.count; ++i) {
+        if (formats.values[i] == fmt) return true;
+    }
+    return false;
+}
+
+/// 从编码器声明的可用采样格式里挑一个（优先第一个，通常也是质量最高的）
+AVSampleFormat pickAudioSampleFormat(AVCodecID codecId, AVSampleFormat fallback) {
+    const AVCodec* codec = avcodec_find_encoder(codecId);
+    AudioSampleFormats formats;
+    if (!queryAudioSampleFormats(codec, formats) || formats.allSupported ||
+        formats.count == 0) {
+        return fallback;
+    }
+    return formats.values[0];
+}
+
+/// 源片段的视频格式是否已满足用户选择（KeepSource 视为始终满足）
+bool videoMatchesRequest(const std::vector<ClipInfo>& infos, MergeOptions::VideoCodec codec) {
+    const AVCodecID want = requestedVideoCodec(codec);
+    if (want == AV_CODEC_ID_NONE) return true;
+    return std::all_of(infos.begin(), infos.end(), [want](const ClipInfo& i) {
+        return i.vCodec == want;
+    });
+}
+
+/// 源片段的音频格式是否已满足用户选择（KeepSource 视为始终满足）
+bool audioMatchesRequest(const std::vector<ClipInfo>& infos, MergeOptions::AudioCodec codec) {
+    const AVCodecID want = requestedAudioCodec(codec);
+    if (want == AV_CODEC_ID_NONE) return true;
+    return std::all_of(infos.begin(), infos.end(), [want](const ClipInfo& i) {
+        return i.aCodec == want;
+    });
+}
+
+/// Unified 模式并非「必须转码」：分辨率、GOP 一致且所选编码格式与源一致时仍可流拷贝。
+/// 仅当用户改动分辨率/GOP，或指定了与源不同的编码格式时，才需要真正重编码；
+/// 否则界面上的设置只会被原压缩码流静默忽略。
 bool optionsRequireTranscode(const std::vector<ClipInfo>& infos, const MergeOptions& options) {
     if (options.resolutionMode != MergeOptions::ResolutionMode::Unified) return false;
     if (!options.useFirstClipResolution) return true;
-    if (infos.empty()) return false;
-
-    const int firstGop = normalizeGopSize(infos.front().gopSize);
-    return std::any_of(infos.begin() + 1, infos.end(), [firstGop](const ClipInfo& info) {
-        return normalizeGopSize(info.gopSize) != firstGop;
-    });
+    if (!videoMatchesRequest(infos, options.videoCodec)) return true;
+    if (!audioMatchesRequest(infos, options.audioCodec)) return true;
+    return false;
 }
 
 } // anonymous namespace
@@ -583,6 +672,10 @@ struct TranscodeCtx {
     bool keepAudio = false;
     int targetSampleRate = 44100;
     int targetChannels   = 2;
+    AVSampleFormat targetSampleFmt = AV_SAMPLE_FMT_FLTP; ///< 音频编码器/重采样器目标格式（AAC=FLTP，PCM=S16）
+    int aFrameSize = kAudioFrameSize;                   ///< 音频每帧采样数（PCM 无编码器帧长，用固定值）
+    AVCodecID aCodecId = AV_CODEC_ID_AAC;               ///< 本次音频编码格式
+    AVCodecID vCodecId = AV_CODEC_ID_H264;              ///< 本次视频编码格式（KeepOriginal 重建编码器时沿用）
     AVRational targetFrameRate{25, 1}; ///< 当前片段源帧率；仅作编码器提示，输出 PTS 仍来自真实时间戳
     int targetGopSize = kDefaultGopSize; ///< 当前编码阶段使用的关键帧间隔（帧）
 
@@ -632,20 +725,26 @@ int encodeWriteFrame(AVFormatContext* out, AVCodecContext* enc, int streamIdx,
 }
 
 // 前向声明（需要在 TranscodeCtx 定义之后）
-bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std::string& err);
+bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
+                       AVCodecID codecId, std::string& err);
 bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
-                                bool globalHeader, std::string& err);
+                                bool globalHeader, AVCodecID codecId, std::string& err);
 
-/// 探测并返回可用的硬件 H.264 编码器名称（优先级：NVENC > QSV > AMF > VideoToolbox）
+/// 探测并返回可用的硬件编码器名称（优先级：NVENC > QSV > AMF > VideoToolbox）
 /// 返回空字符串表示无可用硬件编码器
-static std::string probeHardwareEncoder() {
+static std::string probeHardwareEncoder(AVCodecID codecId) {
+    const bool hevc = (codecId == AV_CODEC_ID_HEVC);
 #if defined(_WIN32)
     // Windows 优先级：NVENC（NVIDIA）> QSV（Intel）> AMF（AMD）
-    const char* candidates[] = {"h264_nvenc", "h264_qsv", "h264_amf"};
+    const char* nvenc = hevc ? "hevc_nvenc" : "h264_nvenc";
+    const char* qsv   = hevc ? "hevc_qsv"   : "h264_qsv";
+    const char* amf   = hevc ? "hevc_amf"   : "h264_amf";
+    const char* candidates[] = { nvenc, qsv, amf };
 #elif defined(__APPLE__)
     // macOS：VideoToolbox（Apple Silicon / Intel Mac 都支持）
-    const char* candidates[] = {"h264_videotoolbox"};
+    const char* candidates[] = { hevc ? "hevc_videotoolbox" : "h264_videotoolbox" };
 #else
+    (void)hevc;
     return "";
 #endif
 
@@ -659,11 +758,12 @@ static std::string probeHardwareEncoder() {
     return "";
 }
 
-/// 构建硬件 H.264 视频编码器（带 hw_device_ctx 和 hw_frames_ctx）
+/// 构建硬件视频编码器（带 hw_device_ctx 和 hw_frames_ctx）
 /// @param globalHeader KeepOriginal 模式下，阶段一需要 true（容器 extradata），阶段二需要 false（SPS/PPS in-band）
+/// @param codecId      目标编码格式（H.264 或 HEVC），决定探测哪个硬件编码器
 bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
-                                bool globalHeader, std::string& err) {
-    std::string encName = probeHardwareEncoder();
+                                bool globalHeader, AVCodecID codecId, std::string& err) {
+    std::string encName = probeHardwareEncoder(codecId);
     if (encName.empty()) {
         err = "No hardware encoder available";
         return false;
@@ -763,6 +863,8 @@ bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameR
         return false;
     }
     avcodec_parameters_from_context(st->codecpar, tc.vEnc);
+    // HEVC 在 MP4/MOV 中写 hvc1，理由同 setupVideoEncoder
+    if (codecId == AV_CODEC_ID_HEVC) st->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
     st->time_base = tc.vEnc->time_base;
     tc.vStreamIdx = st->index;
 
@@ -1115,9 +1217,9 @@ bool switchEncoderParametersIfNeeded(TranscodeCtx& tc, int newW, int newH,
     // 重建编码器（阶段二不设 GLOBAL_HEADER，让 SPS/PPS in-band）
     bool success = false;
     if (tc.useHardware) {
-        success = setupHardwareVideoEncoder(tc, newW, newH, tc.targetFrameRate, false, err);
+        success = setupHardwareVideoEncoder(tc, newW, newH, tc.targetFrameRate, false, tc.vCodecId, err);
     } else {
-        success = setupVideoEncoder(tc, newW, newH, tc.targetFrameRate, err);
+        success = setupVideoEncoder(tc, newW, newH, tc.targetFrameRate, tc.vCodecId, err);
     }
 
     if (!success) {
@@ -1319,13 +1421,17 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
     return swDstFrame;
 }
 
-/// 构建软件 H.264 视频编码器并挂到输出
+/// 构建软件视频编码器并挂到输出（H.264 或 HEVC）
 /// time_base 取细粒度 1/90000：视频 PTS 由各帧真实时间戳驱动（见 transcodeFile），
 /// 以兼容「不同输入文件帧率不一致」——若按固定帧率计数摆放，帧率不同的片段会
-/// 出现快放/慢放并与音频失步。framerate 仅作 x264 码控提示。
-bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std::string& err) {
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!codec) { err = "H.264 encoder not found"; return false; }
+/// 出现快放/慢放并与音频失步。framerate 仅作 x264/x265 码控提示。
+bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
+                       AVCodecID codecId, std::string& err) {
+    const AVCodec* codec = avcodec_find_encoder(codecId);
+    if (!codec) {
+        err = std::string(avcodec_get_name(codecId)) + " encoder not found";
+        return false;
+    }
     tc.vEnc = avcodec_alloc_context3(codec);
     tc.vEnc->width = w;
     tc.vEnc->height = h;
@@ -1338,10 +1444,23 @@ bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std
     av_opt_set(tc.vEnc->priv_data, "preset", "medium", 0);
     if (tc.out->oformat->flags & AVFMT_GLOBALHEADER)
         tc.vEnc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    if (avcodec_open2(tc.vEnc, codec, nullptr) < 0) { err = "Failed to open H.264 encoder"; return false; }
+    const int openRet = avcodec_open2(tc.vEnc, codec, nullptr);
+    if (openRet < 0) {
+        err = std::string("Failed to open ") + avcodec_get_name(codecId) + " encoder";
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
 
     AVStream* st = avformat_new_stream(tc.out, nullptr);
+    if (!st) {
+        err = "avformat_new_stream failed";
+        avcodec_free_context(&tc.vEnc);
+        return false;
+    }
     avcodec_parameters_from_context(st->codecpar, tc.vEnc);
+    // MP4/MOV 的 HEVC 默认写成 hev1（参数集 in-band），QuickTime/AVFoundation 只认 hvc1。
+    // 本合并器的编码器都带 GLOBAL_HEADER，参数集在 extradata 中，写 hvc1 是正确且兼容的选择。
+    if (codecId == AV_CODEC_ID_HEVC) st->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
     st->time_base = tc.vEnc->time_base;
     tc.vStreamIdx = st->index;
     LOG_INFO(std::string("VideoMerger: software video encoder opened: ") + codec->name +
@@ -1351,14 +1470,22 @@ bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate, std
     return true;
 }
 
-/// 构建 AAC 音频编码器并挂到输出
-bool setupAudioEncoder(TranscodeCtx& tc, std::string& err) {
-    const AVCodec* codec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-    if (!codec) { err = "AAC encoder not found"; return false; }
+/// 构建音频编码器并挂到输出（AAC 平面浮点 / PCM s16 交错）
+/// PCM 无编码器内部帧长概念，因此每帧长度、采样格式与 FIFO 格式都随 codecId 切换。
+bool setupAudioEncoder(TranscodeCtx& tc, AVCodecID codecId, std::string& err) {
+    const AVCodec* codec = avcodec_find_encoder(codecId);
+    if (!codec) {
+        err = std::string(avcodec_get_name(codecId)) + " encoder not found";
+        return false;
+    }
+    const bool isPcm = (codecId == AV_CODEC_ID_PCM_S16LE);
+    tc.aFrameSize   = isPcm ? kPcmFrameSize : kAudioFrameSize;
+    tc.targetSampleFmt = pickAudioSampleFormat(codecId, AV_SAMPLE_FMT_FLTP);
+
     tc.aEnc = avcodec_alloc_context3(codec);
-    tc.aEnc->sample_fmt  = AV_SAMPLE_FMT_FLTP;
+    tc.aEnc->sample_fmt  = tc.targetSampleFmt;
     tc.aEnc->sample_rate = tc.targetSampleRate;
-    tc.aEnc->bit_rate    = kAacBitRate;
+    tc.aEnc->bit_rate    = isPcm ? kPcmBitRate : kAacBitRate;
     tc.aEnc->time_base   = AVRational{1, tc.targetSampleRate};
 #if LIBAVUTIL_VERSION_MAJOR >= 57
     av_channel_layout_default(&tc.aEnc->ch_layout, tc.targetChannels);
@@ -1368,25 +1495,43 @@ bool setupAudioEncoder(TranscodeCtx& tc, std::string& err) {
 #endif
     if (tc.out->oformat->flags & AVFMT_GLOBALHEADER)
         tc.aEnc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    if (avcodec_open2(tc.aEnc, codec, nullptr) < 0) { err = "Failed to open AAC encoder"; return false; }
+    const int openRet = avcodec_open2(tc.aEnc, codec, nullptr);
+    if (openRet < 0) {
+        err = std::string("Failed to open ") + avcodec_get_name(codecId) + " encoder";
+        avcodec_free_context(&tc.aEnc);
+        return false;
+    }
 
     AVStream* st = avformat_new_stream(tc.out, nullptr);
+    if (!st) {
+        err = "avformat_new_stream failed";
+        avcodec_free_context(&tc.aEnc);
+        return false;
+    }
     avcodec_parameters_from_context(st->codecpar, tc.aEnc);
     st->time_base = tc.aEnc->time_base;
     tc.aStreamIdx = st->index;
-    tc.fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, tc.targetChannels, 1);
+    // PCM 交给 mov/mp4 复用器时需要显式 lpcm 标签；matroska 会自动识别，无需设置
+    if (isPcm && st->codecpar->codec_tag == 0) {
+        st->codecpar->codec_tag = MKTAG('l', 'p', 'c', 'm');
+    }
+    tc.fifo = av_audio_fifo_alloc(tc.targetSampleFmt, tc.targetChannels, 1);
+    LOG_INFO(std::string("VideoMerger: audio encoder opened: ") + codec->name +
+             ", rate=" + std::to_string(tc.targetSampleRate) +
+             ", channels=" + std::to_string(tc.targetChannels) +
+             ", frame=" + std::to_string(tc.aFrameSize));
     return tc.fifo != nullptr;
 }
 
-/// 从 FIFO 取出整帧（frame_size）送 AAC 编码；drainAll=true 时把不足一帧的尾部也编码
+/// 从 FIFO 取出整帧送音频编码；drainAll=true 时把不足一帧的尾部也编码
 void drainAudioFifo(TranscodeCtx& tc, AVPacket* pkt, bool drainAll) {
-    int frameSize = tc.aEnc->frame_size > 0 ? tc.aEnc->frame_size : kAudioFrameSize;
+    int frameSize = tc.aEnc->frame_size > 0 ? tc.aEnc->frame_size : tc.aFrameSize;
     while (av_audio_fifo_size(tc.fifo) >= frameSize ||
            (drainAll && av_audio_fifo_size(tc.fifo) > 0)) {
         int n = std::min(frameSize, av_audio_fifo_size(tc.fifo));
         AVFrame* f = av_frame_alloc();
         f->nb_samples = n;
-        f->format = AV_SAMPLE_FMT_FLTP;
+        f->format = tc.targetSampleFmt;
         f->sample_rate = tc.targetSampleRate;
 #if LIBAVUTIL_VERSION_MAJOR >= 57
         av_channel_layout_default(&f->ch_layout, tc.targetChannels);
@@ -1470,11 +1615,11 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 #if LIBAVUTIL_VERSION_MAJOR >= 57
             AVChannelLayout outLayout;
             av_channel_layout_default(&outLayout, tc.targetChannels);
-            swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_FLTP, tc.targetSampleRate,
+            swr_alloc_set_opts2(&swr, &outLayout, tc.targetSampleFmt, tc.targetSampleRate,
                                 &aDec->ch_layout, aDec->sample_fmt, aDec->sample_rate, 0, nullptr);
 #else
             swr = swr_alloc_set_opts(nullptr,
-                    av_get_default_channel_layout(tc.targetChannels), AV_SAMPLE_FMT_FLTP, tc.targetSampleRate,
+                    av_get_default_channel_layout(tc.targetChannels), tc.targetSampleFmt, tc.targetSampleRate,
                     av_get_default_channel_layout(aDec->channels), aDec->sample_fmt, aDec->sample_rate, 0, nullptr);
 #endif
             if (swr) swr_init(swr);
@@ -1551,8 +1696,8 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                     int chunk = (int)std::min<int64_t>(remain, 4096);
                     uint8_t** sil = nullptr;
                     av_samples_alloc_array_and_samples(&sil, nullptr, tc.targetChannels,
-                                                       chunk, AV_SAMPLE_FMT_FLTP, 0);
-                    av_samples_set_silence(sil, 0, chunk, tc.targetChannels, AV_SAMPLE_FMT_FLTP);
+                                                       chunk, tc.targetSampleFmt, 0);
+                    av_samples_set_silence(sil, 0, chunk, tc.targetChannels, tc.targetSampleFmt);
                     av_audio_fifo_write(tc.fifo, (void**)sil, chunk);
                     if (sil) { av_freep(&sil[0]); av_freep(&sil); }
                     remain -= chunk;
@@ -1596,7 +1741,7 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             tc.targetSampleRate, aDec->sample_rate, AV_ROUND_UP);
         uint8_t** buf = nullptr;
         av_samples_alloc_array_and_samples(&buf, nullptr, tc.targetChannels,
-                                           outSamples, AV_SAMPLE_FMT_FLTP, 0);
+                                           outSamples, tc.targetSampleFmt, 0);
         int got = swr_convert(swr, buf, outSamples,
                               (const uint8_t**)af->data, af->nb_samples);
 
@@ -1739,8 +1884,9 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 }
 
 /// 统一转码主流程：建立输出与编码器，逐文件转码，最后 flush
+/// @param pcmOutput 输出音轨为 PCM：mp4 复用器不接受 lpcm，改用同族的 mov 复用器
 bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const std::string& outputPath,
-                  bool keepAudio, const MergeOptions& options,
+                  bool keepAudio, bool pcmOutput, const MergeOptions& options,
                   std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                   std::string& err) {
     TranscodeCtx tc{merger};  // 初始化 merger 引用
@@ -1785,6 +1931,40 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
              (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal
                   ? " (per source clip)" : " (unified)"));
 
+    // 目标视频编码格式：KeepSource 表示「不干预」，走到这里只可能是源格式不一致，
+    // 此时按首个 clip 的格式对齐（HEVC 源合并 HEVC，H.264 源合并 H.264）。
+    AVCodecID vCodecId = requestedVideoCodec(options.videoCodec);
+    if (vCodecId == AV_CODEC_ID_NONE) {
+        vCodecId = (infos.front().vCodec == AV_CODEC_ID_HEVC) ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
+    }
+
+    // 目标音频编码格式：KeepSource 且各源不一致时按首个 clip 的格式对齐。
+    // 探测必须连「能不能接受源采样格式」一起看：源是 8kHz 单声道 mulaw 时，编码器
+    // 虽存在却只接受 s16，直接沿用会在 avcodec_open2 才失败（早期版本就是这样）。
+    AVCodecID aCodecId = requestedAudioCodec(options.audioCodec);
+    if (aCodecId == AV_CODEC_ID_NONE) {
+        // KeepSource 且走到转码，说明各源格式不一致：按首个 clip 的格式对齐。
+        // 采样率/声道数的差异可以靠重采样抹平，采样格式不能——编码器存在但不吃源
+        // 采样格式时（如 8kHz 单声道 mulaw 源）必须在编码器打开前回退 AAC。
+        const AVCodecID sourceCodec = infos.front().aCodec;
+        const AVSampleFormat sourceFmt = static_cast<AVSampleFormat>(infos.front().aSampleFmt);
+        if (audioEncoderAcceptsFormat(sourceCodec, sourceFmt)) {
+            aCodecId = sourceCodec;
+        } else {
+            LOG_INFO(std::string("VideoMerger: cannot re-encode source audio (") +
+                     avcodec_get_name(sourceCodec) + " / " + av_get_sample_fmt_name(sourceFmt) +
+                     "), falling back to AAC");
+            aCodecId = AV_CODEC_ID_AAC;
+        }
+    }
+    tc.aCodecId = aCodecId;
+    tc.vCodecId = vCodecId;
+
+    LOG_INFO(std::string("VideoMerger: output codecs: video=") + avcodec_get_name(vCodecId) +
+             (options.videoCodec == MergeOptions::VideoCodec::KeepSource ? " (from clip 1)" : " (requested)") +
+             ", audio=" + avcodec_get_name(aCodecId) +
+             (options.audioCodec == MergeOptions::AudioCodec::KeepSource ? " (from clip 1)" : " (requested)"));
+
     // 初始化硬件设备（如果启用）
     if (options.enableHardwareAccel) {
         std::string hwErr;
@@ -1803,7 +1983,9 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
         }
     }
 
-    if (avformat_alloc_output_context2(&tc.out, nullptr, nullptr, outputPath.c_str()) < 0 || !tc.out) {
+    // 容器：PCM 音轨必须走 mov 复用器（mp4 拒绝 lpcm），其余交给扩展名自动判定
+    if (avformat_alloc_output_context2(&tc.out, nullptr, pcmOutput ? "mov" : nullptr,
+                                       outputPath.c_str()) < 0 || !tc.out) {
         err = "Failed to create output context"; return false;
     }
 
@@ -1831,18 +2013,18 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
     if (tc.useHardware) {
         // KeepOriginal 模式阶段一需要 GLOBAL_HEADER
         bool globalHeader = (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal);
-        encoderOk = setupHardwareVideoEncoder(tc, targetW, targetH, frameRate, globalHeader, err);
+        encoderOk = setupHardwareVideoEncoder(tc, targetW, targetH, frameRate, globalHeader, vCodecId, err);
         if (!encoderOk) {
             LOG_WARN(std::string("VideoMerger: hardware encoder setup failed (") + err + "), falling back to software");
             tc.useHardware = false;
         }
     }
     if (!encoderOk) {
-        encoderOk = setupVideoEncoder(tc, targetW, targetH, frameRate, err);
+        encoderOk = setupVideoEncoder(tc, targetW, targetH, frameRate, vCodecId, err);
     }
     if (!encoderOk) { cleanup(); return false; }
 
-    if (keepAudio && !setupAudioEncoder(tc, err)) { cleanup(); return false; }
+    if (keepAudio && !setupAudioEncoder(tc, aCodecId, err)) { cleanup(); return false; }
 
     // 填充硬件加速信息（供 UI 显示）- 编码器部分
     std::string encoderName = tc.vEnc ? tc.vEnc->codec->name : "";
@@ -1963,12 +2145,16 @@ void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath
     }
     totalDuration_.store(total);
 
-    // —— 智能决策 ——（任一片段有截取，或 Unified 要改变分辨率/GOP，均走精确转码）
+    // —— 智能决策 ——（任一片段有截取，或 Unified 要改变分辨率/GOP/编码格式，均走精确转码）
     bool streamCopy = canStreamCopy(infos) && !optionsRequireTranscode(infos, options);
     bool keepAudio = true;
     for (const auto& info : infos) {
         if (info.aIdx < 0) { keepAudio = false; break; }  // 任一片段无音频 → 转码时丢音轨
     }
+    // PCM 音轨进不了 mp4 复用器，转码容器改用 mov（同为 ISO BMFF，沿用 .mp4 扩展名）
+    const bool pcmOutput = !streamCopy && keepAudio &&
+                           (options.audioCodec == MergeOptions::AudioCodec::PCM);
+    pcmAudio_.store(pcmOutput);
 
     // 校正输出扩展名：流拷贝→.mkv，转码→.mp4
     std::filesystem::path op(outputPath);
@@ -1980,7 +2166,8 @@ void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath
     std::filesystem::create_directories(op.parent_path());
 
     LOG_INFO(std::string("VideoMerger: 策略=") + (streamCopy ? "流拷贝" : "转码") +
-             ", 片段数=" + std::to_string(infos.size()) + ", 输出=" + finalPath);
+             ", 片段数=" + std::to_string(infos.size()) + ", 输出=" + finalPath +
+             ", 容器=" + (pcmOutput ? "mov(lpcm)" : "auto"));
 
     state_.store(State::Merging);
     transcoded_.store(!streamCopy);
@@ -1989,7 +2176,8 @@ void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath
     std::string err;
     bool ok = streamCopy
         ? runStreamCopy(infos, finalPath, cancelRequested_, processedDuration_, err)
-        : runTranscode(*this, infos, finalPath, keepAudio, options, cancelRequested_, processedDuration_, err);
+        : runTranscode(*this, infos, finalPath, keepAudio, pcmOutput, options,
+                       cancelRequested_, processedDuration_, err);
 
     if (cancelRequested_.load()) {
         std::error_code ec;

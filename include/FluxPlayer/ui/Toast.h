@@ -26,6 +26,22 @@ struct ToastMessage {
 };
 
 /**
+ * @brief Toast 渲染视图（不含任何 ImGui 类型）
+ *
+ * Lua 皮肤自行绘制 Toast 时，C++ 只提供数据：透明度、滑入偏移都由
+ * ToastManager::update() 提前算好，渲染方只管摆位置。
+ */
+struct ToastView {
+    std::string type;     ///< info / success / warning / error
+    std::string icon;     ///< [i] / [OK] / [!] / [X]
+    std::string title;
+    std::string content;
+    std::string detail;
+    float alpha = 1.0f;         ///< 淡入淡出后的最终透明度
+    float slideOffset = 0.0f;   ///< 从右侧滑入的像素偏移（0 = 已就位）
+};
+
+/**
  * @brief Toast 通知管理器
  *
  * 在屏幕右上角显示短暂的通知消息，支持淡入淡出动画。
@@ -54,6 +70,20 @@ public:
      * 应该在主渲染循环的最后调用，确保 Toast 显示在最上层
      */
     void render();
+
+    /**
+     * @brief 取当前活动 Toast 的只读视图，供 Lua 皮肤自行绘制
+     *
+     * 与 render() 互斥使用：皮肤实现了 toast surface 时走这里，否则走 render()。
+     */
+    std::vector<ToastView> snapshot() const;
+
+    /// 布局常量，渲染方（含 Lua）按同一套尺寸摆放
+    static constexpr float toastWidth()  { return kToastWidth; }
+    static constexpr float toastHeight() { return kToastHeight; }
+    static constexpr float marginRight() { return kMarginRight; }
+    static constexpr float marginTop()   { return kMarginTop; }
+    static constexpr float spacing()     { return kSpacing; }
 
     /**
      * @brief 清除所有活动的 Toast
@@ -89,6 +119,16 @@ private:
      * @brief 根据 Toast 类型获取图标（UTF-8 emoji）
      */
     static const char* getIconForType(ToastType type);
+
+    /**
+     * @brief 计算某个 Toast 当前的滑入偏移（像素，0 表示已就位）
+     *
+     * C++ 的 render() 与 Lua 皮肤共用同一条动画曲线，避免两处各写一份缓动。
+     */
+    static float slideOffsetFor(const ActiveToast& toast);
+
+    /// 枚举值 → 稳定字符串（Lua 侧按字符串分派颜色）
+    static const char* typeName(ToastType type);
 };
 
 } // namespace FluxPlayer

@@ -7,6 +7,9 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
+
+#include "FluxPlayer/core/PlayerState.h"   // stateText(PlayerState) 按值取参，需完整类型
 
 namespace FluxPlayer {
 
@@ -16,6 +19,7 @@ class Window;
 class SubtitleManager;
 class Downloader;
 class UiContext;
+namespace FluxUI { class ImGuiBackend; }
 
 /**
  * Controller 类 - UI 控制界面
@@ -80,8 +84,16 @@ public:
     void setVisible(bool visible) { visible_ = visible; }
     bool isVisible() const { return visible_; }
 
-    /// 强制打开设置对话框（主页无媒体状态下使用）
-    void openSettingsDialog() { showSettingsMenu_ = true; }
+    /**
+     * @brief 强制打开设置对话框（主页无媒体状态下使用）
+     * @param settingsOnly true 表示「只要设置面板」：这一帧不提交 player surface。
+     *        主页点设置时走的是一个空壳 Controller（无媒体），若照常画 player
+     *        就会露出一套进度为 0、时间 00:00:00 的播放器底栏，叠在设置面板下方。
+     */
+    void openSettingsDialog(bool settingsOnly = false) {
+        showSettingsMenu_ = true;
+        settingsOnly_ = settingsOnly;
+    }
     /// 查询设置对话框是否仍处于打开状态
     bool isSettingsDialogOpen() const { return showSettingsMenu_; }
     void toggleVisible() { forceVisible_ = !forceVisible_; if (!forceVisible_) visible_ = false; }
@@ -106,46 +118,38 @@ public:
     bool isSubtitleEnabled() const { return subtitleEnabled_; }
 
 private:
-    void renderBottomOverlay();
-
-    /** @brief 绘制进度条（支持精确点击、拖动、量化跳转、悬停预览） */
-    void renderProgressBar(float progressBarWidth, float progress, double duration);
-
+    
     /**
-     * @brief 绘制播放控制按钮（播放/暂停/停止）和录制按钮
-     * @param btnH 按钮高度
+     * @brief 发起下载/实时保存（弹目录选择框，随后交给 Downloader 后台执行）
+     *
+     * 归 C++ 而非皮肤：它会弹出系统目录选择框，属于宿主能力。
      */
-    void renderPlaybackButtons(float btnH);
+    void startDownload();
 
-    /**
-     * @brief 绘制设置齿轮图标 + 音量图标/滑块
-     * @param btnH 按钮高度
-     */
-    void renderVolumeAndSettings(float btnH);
-
-    /**
-     * @brief 绘制速度选择按钮和弹出菜单
-     * @param btnH 按钮高度
-     */
-    void renderSpeedButton(float btnH);
-    void renderQualityButton(float btnH);   ///< 画质切换按钮（仅网页视频时显示）
-    void renderDownloadButton(float btnH);  ///< 所有网络来源的下载/实时保存入口
-
-    /// 绘制下载进度条 + 暂停/取消图标按钮（Download 按钮右侧）
-    void renderDownloadProgress(float btnH, float btnMinX, float btnMinY,
-                                float btnMaxX, float btnMaxY);
-
-    /// 绘制下载速度/文件大小/ETA 文字信息（取消按钮右侧，缩小字号双行排列）
-    void renderDownloadInfo(float btnH, float btnMinY, float infoStartX);
-
-    void renderMediaInfo();
-    void renderStats();
-    /// 居中模态：设置 + 皮肤切换；参考 source/UI/skins/cyberpunk-neon/mockup_skin_settings.svg
-    void renderSettingsModal();
     std::string formatTime(double seconds);
 
-    /** @brief 绘制字幕浮层（在 render() 中每帧调用，独立于 UI 可见性） */
-    void renderSubtitles();
+    /** @brief 播放状态枚举 → 大写文案（数据供给与 Lua 展示共用同一套字面量） */
+    static std::string stateText(PlayerState state);
+
+    /** @brief 提交 player surface（皮肤的全屏播放界面与 HUD 都在其中） */
+    void renderLuaPlayer();
+    /** @brief 提交 settings surface（设置面板；显示状态仍由 C++ 的 showSettingsMenu_ 持有） */
+    void renderSettings();
+    /** @brief 提交 toast surface（通知浮层） */
+    void renderToasts();
+
+    /**
+     * @brief 落地本帧登记的皮肤操作（切换 / 重载 / 恢复默认 / 热加载开关）
+     *
+     * 必须在所有 renderLuaSurface() 返回之后、渲染下一帧之前调用：
+     * 那时 SkinManager 的 luaMutex_ 已释放，configureLua() 才能安全获取。
+     */
+    void applyPendingSkinOps();
+
+    void handleLuaAction(const std::string& action,
+                         const std::unordered_map<std::string, std::string>& payload);
+    std::vector<std::unordered_map<std::string, std::string>>
+    provideLuaData(const std::string& name) const;
 
     /**
      * @brief 按平台探测并加载支持 CJK 的字体
@@ -187,23 +191,35 @@ private:
     std::string webUploadDate_;     ///< 上传日期（YYYY-MM-DD）
 
     // UI 状态
-    bool isDraggingProgress_;
-    float draggedProgress_;
     double seekPrecision_;
     bool settingsHovered_;      // 设置按钮悬停状态
     bool showSettingsMenu_;     // 设置菜单显示状态
+    bool settingsOnly_ = false; // 仅设置模式：不提交 player surface（主页设置入口用）
+    bool lastPlayerInputState_ = true;  // 上一帧 player surface 的输入开关，用于翻转时打日志
     bool settingsModalWasOpen_ = false; // 上一帧的 showSettingsMenu_，用来判定"刚打开"那一帧
+
+    /**
+     * 待执行的皮肤操作，延后到 Lua 渲染结束之后再落地。
+     *
+     * 皮肤动作是在 renderLuaSurface() 内部被回调的，那一刻 SkinManager 已经持有
+     * luaMutex_；而切换/重载皮肤要走 configureLua()，它会再次获取同一把非递归
+     * mutex——在当前线程里直接调用就是自死锁（界面表现为「一点就卡住」）。
+     * 所以这里只登记意图，等这一帧渲染返回后再执行。
+     */
+    enum class PendingSkinOp { None, Reload, RestoreDefault };
+    PendingSkinOp pendingSkinOp_ = PendingSkinOp::None;
+    std::string pendingSkinId_;            ///< 待切换的皮肤 id（空表示无）
+    bool pendingHotReload_ = false;        ///< 待设置的热加载开关
+    bool pendingHotReloadValid_ = false;   ///< pendingHotReload_ 是否有效
     float settingsMenuPosX_;    // 设置菜单X坐标
     float settingsMenuPosY_;    // 设置菜单Y坐标
 
     // 速度选择器状态
-    bool showSpeedMenu_;        // 速度菜单显示状态
     float speedMenuPosX_;       // 速度菜单X坐标
     float speedMenuPosY_;       // 速度菜单Y坐标
     bool showBrightnessSlider_ = false; ///< 点击亮度按钮后显示垂直滑条
 
     // ==================== 画质选择 ====================
-    bool showQualityMenu_ = false;
     float qualityMenuPosX_ = 0.0f;
     float qualityMenuPosY_ = 0.0f;
     std::vector<QualityItem> qualities_;   ///< 当前可用画质列表
@@ -243,6 +259,9 @@ private:
     // ==================== 皮肤状态 ====================
     /// 已应用皮肤代号；与 SkinManager::currentGeneration() 比较以决定是否重应用样式
     uint64_t appliedSkinGeneration_ = 0;
+    std::unique_ptr<FluxUI::ImGuiBackend> luaBackend_;
+    double lastLuaSeekDispatchTime_ = 0.0;
+    double pendingLuaSeekProgress_ = -1.0;
     /// Appearance 子页是否展开
     bool showAppearanceMenu_ = false;
     enum class SettingsPage { General, Capture, Logging, Appearance };

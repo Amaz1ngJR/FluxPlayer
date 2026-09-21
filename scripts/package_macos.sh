@@ -1,11 +1,12 @@
 #!/bin/bash
 # macOS 打包脚本：生成 FluxPlayer.app 并打包为 FluxPlayer.dmg
 #
-# 依赖（均为 macOS 系统自带，无需额外安装）：
-#   - cmake        构建系统
+# 依赖：
+#   - cmake        构建系统（需预先安装）
 #   - sips         图片缩放（系统工具）
 #   - iconutil     .iconset -> .icns 转换（系统工具）
 #   - hdiutil      创建 .dmg 磁盘镜像（系统工具）
+#   - otool        检查动态库引用（系统工具）
 #
 # 图标优先级：
 #   1. source/pic.icns（已有则直接使用）
@@ -17,7 +18,7 @@
 # 输出：
 #   dist/FluxPlayer-<版本号>.dmg
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
@@ -30,10 +31,21 @@ APP_NAME="FluxPlayer"
 VERSION=$(grep -m1 'project(FluxPlayer VERSION' "$ROOT/CMakeLists.txt" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 APP_BUNDLE="$BIN_DIR/$APP_NAME.app"
 DMG_OUT="$ROOT/dist/$APP_NAME-$VERSION.dmg"
+FFMPEG_LIB_DIR="$ROOT/third_party/ffmpeg-macos/lib"
+YTDLP="$ROOT/third_party/yt-dlp/yt-dlp_macos"
+
+for required in "$FFMPEG_LIB_DIR/libavformat.dylib" "$YTDLP" \
+    "$ROOT/source/pic2.png" "$ROOT/source/video/video_01.mp4" \
+    "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua"; do
+    if [ ! -f "$required" ]; then
+        echo "Missing packaging input: $required" >&2
+        exit 1
+    fi
+done
 
 # ── 1. CMake 构建（Release 模式）──────────────────────────────────────────────
 cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
-cmake --build "$BUILD_DIR" --config Release -j$(sysctl -n hw.logicalcpu)
+cmake --build "$BUILD_DIR" --config Release --parallel
 
 # ── 2. 创建 .app bundle 目录结构 ──────────────────────────────────────────────
 # macOS .app 规范：
@@ -61,24 +73,39 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/video"
 cp "$ROOT/source/video/video_01.mp4" "$APP_BUNDLE/Contents/Resources/video/video_01.mp4"
 
 # 皮肤包：Config::getResourcePath("skins") 在 macOS 优先解析到 ../Resources/skins，
-# 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
+# 单文件 Lua 皮肤是唯一运行时入口；保留目录内 SVG 预览和设计稿。
 mkdir -p "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon"
-cp "$ROOT/source/UI/skins/cyberpunk-neon/skin.json" \
-   "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon/"
-cp "$ROOT/source/UI/skins/cyberpunk-neon/preview.svg" \
-   "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon/"
+cp -R "$ROOT/source/UI/skins/cyberpunk-neon/." \
+      "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon/"
+mkdir -p "$APP_BUNDLE/Contents/Resources/skins/minimal-lua"
+cp -R "$ROOT/source/UI/skins/minimal-lua/." \
+      "$APP_BUNDLE/Contents/Resources/skins/minimal-lua/"
 
-# 复制 FFmpeg dylib（rpath 设为 @executable_path，dylib 需与可执行文件同目录）
-find "$BIN_DIR" -maxdepth 1 -name "*.dylib" -exec cp {} "$APP_BUNDLE/Contents/MacOS/" \;
+# 从当前声明的 FFmpeg 目录复制完整依赖闭包，避免共享 build/bin 中的旧库混入发布包。
+# dylib 内部使用 @loader_path，版本别名为相对符号链接，两者都要求库与 exe 同级。
+cp -R "$FFMPEG_LIB_DIR/." "$APP_BUNDLE/Contents/MacOS/"
+
+# 发布前检查每个 Mach-O 引用：系统库允许外链，其他依赖必须已在包内。
+for binary in "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"*.dylib; do
+    [ -e "$binary" ] || { echo "Broken bundled library: $binary" >&2; exit 1; }
+    otool -L "$binary" | awk 'NR > 1 { print $1 }' | while IFS= read -r dependency; do
+        case "$dependency" in
+            @loader_path/*|@executable_path/*)
+                [ -e "$APP_BUNDLE/Contents/MacOS/${dependency#*/}" ] || {
+                    echo "Missing dependency for $binary: $dependency" >&2
+                    exit 1
+                }
+                ;;
+            /System/*|/usr/lib/*) ;;
+            *) echo "Unbundled dependency for $binary: $dependency" >&2; exit 1 ;;
+        esac
+    done
+done
 
 # yt-dlp：网页流提取依赖，必须与可执行文件同级（getYtDlpPath 优先在 exe 同级查找），
 # 否则装到目标机后运行时报「找不到 dlp」。保留可执行权限。
-if [ -f "$ROOT/third_party/yt-dlp/yt-dlp_macos" ]; then
-    cp "$ROOT/third_party/yt-dlp/yt-dlp_macos" "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
-    chmod +x "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
-else
-    echo "WARNING: third_party/yt-dlp/yt-dlp_macos 缺失，打包后将无法提取网页流"
-fi
+cp "$YTDLP" "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
+chmod +x "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
 
 # ── 3. 图标处理 ───────────────────────────────────────────────────────────────
 ICNS_OUT="$APP_BUNDLE/Contents/Resources/AppIcon.icns"
@@ -90,7 +117,7 @@ else
     # iconutil 要求 iconset 目录包含各尺寸 PNG，命名格式固定
     ICONSET="$BUILD_DIR/AppIcon.iconset"
     mkdir -p "$ICONSET"
-    for size in 16 32 64 128 256 512; do
+    for size in 16 32 128 256 512; do
         sips -z $size $size "$ROOT/source/pic.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
         sips -z $((size*2)) $((size*2)) "$ROOT/source/pic.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
     done

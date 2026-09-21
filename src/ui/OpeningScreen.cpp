@@ -23,6 +23,9 @@
 
 #include "FluxPlayer/ui/OpeningScreen.h"
 #include "FluxPlayer/ui/UiContext.h"
+#include "FluxPlayer/ui/FluxUI/ImGuiBackend.h"
+#include <vector>
+#include <unordered_map>
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/ui/SkinManager.h"
 #include "FluxPlayer/ui/SkinRenderer.h"
@@ -44,7 +47,12 @@
 namespace FluxPlayer {
 
 OpeningScreen::OpeningScreen(UiContext& ui, Player& player)
-    : ui_(ui), player_(player) {}
+    : ui_(ui), player_(player) {
+    luaBackend_.reset(new FluxUI::ImGuiBackend(ui.defaultFont(), ui.titleFont(), ui.monoFont()));
+}
+
+// 出线定义：此处 ImGuiBackend 是完整类型，unique_ptr 的 delete 才能生成。
+OpeningScreen::~OpeningScreen() = default;
 
 void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::string& phase) {
     Window* w = ui_.window();
@@ -59,72 +67,25 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
     auto snap = SkinManager::instance().current();
     if (!snap) return;
     const auto& sk = *snap;
-    const auto& opening = sk.surfaces.opening;
     ImGuiIO& io = ImGui::GetIO();
-    float W = io.DisplaySize.x;
-    float H = io.DisplaySize.y;
-    float t = (float)ImGui::GetTime();
 
-    ImDrawList* bg = ImGui::GetBackgroundDrawList();
-
-    bg->AddRectFilled(ImVec2(0,0), ImVec2(W, H), ScaleAlpha(sk.colors.bgVoid, opening.overlayAlpha));
-
-    const float cardW = std::min(sk.metrics.size.openingPanelW, W * opening.maxWidthRatio);
-    const float cardH = sk.metrics.size.openingPanelH;
-    ImVec2 cMin((W - cardW)*0.5f, (H - cardH)*0.5f);
-    ImVec2 cMax(cMin.x + cardW, cMin.y + cardH);
-
-    {
-        ImVec4 fill = ToImVec4(sk.colors.bgPanel); fill.w = sk.metrics.opacity.popup;
-        bg->AddRectFilled(cMin, cMax, ImGui::ColorConvertFloat4ToU32(fill),
-                          sk.metrics.radius.panel);
-        DrawGlowRect(bg, cMin, cMax, sk.colors.accentPrimary, sk,
-                     sk.metrics.radius.panel);
-        DrawCornerCuts(bg, cMin, cMax, sk.colors.accentPrimary, sk,
-                       opening.cornerLength, opening.cornerThickness);
-    }
-
-    {
-        const char* title = "OPENING";
-        ImFont* font = ui_.titleFont() ? ui_.titleFont() : ImGui::GetFont();
-        float fs = font == ui_.titleFont() ? opening.titlePx : font->FontSize;
-        ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, title);
-        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + opening.titleOffsetY);
-        ImU32 col = ToImU32(sk.colors.accentPrimary);
-        if (sk.decoration.glow) {
-            DrawTextGlow(bg, font, fs, pos, sk.colors.accentPrimary, title, sk);
-        }
-        bg->AddText(font, fs, pos, col, title);
-    }
-
-    {
-        ImFont* font = ImGui::GetFont();
-        ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, phase.c_str());
-        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + opening.phaseOffsetY);
-        ImU32 col = ToImU32(sk.colors.textPrimary);
-        bg->AddText(pos, col, phase.c_str());
-    }
-
-    {
-        std::string shown = mediaPath;
-        if (shown.size() > 64) shown = "..." + shown.substr(shown.size() - 60);
-        ImFont* font = ImGui::GetFont();
-        ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, shown.c_str());
-        ImVec2 pos(cMin.x + (cardW - ts.x)*0.5f, cMin.y + opening.sourceOffsetY);
-        ImU32 col = ToImU32(sk.colors.textMuted);
-        bg->AddText(pos, col, shown.c_str());
-    }
-
-    {
-        const float dy = cMin.y + cardH - opening.dotsBottomOffset;
-        const float cx = cMin.x + cardW * 0.5f;
-        const float gap = opening.dotsGap;
-        for (int i = 0; i < 3; ++i) {
-            float phi = t * 2.0f - i * 0.4f;
-            float a = 0.35f + 0.55f * (0.5f + 0.5f * std::sin(phi));
-            ImU32 c = ScaleAlpha(sk.colors.accentPrimary, a);
-            bg->AddCircleFilled(ImVec2(cx + (i-1)*gap, dy), opening.dotRadius, c, 16);
-        }
+    // 皮肤实现 opening surface 时由它绘制 splash；没有就是空屏。
+    // 数据供给在这里临时挂上：splash 期间 Controller 尚未存在，没有第二个消费者。
+    if (luaBackend_) {
+        SkinManager::instance().setLuaDataProvider(
+            [&mediaPath, &phase, this](const std::string& name) {
+                if (name != "opening") return std::vector<std::unordered_map<std::string, std::string>>{};
+                char elapsed[32];
+                std::snprintf(elapsed, sizeof(elapsed), "%.3f", ImGui::GetTime() - startedAt_);
+                return std::vector<std::unordered_map<std::string, std::string>>{{
+                    {"mediaPath", mediaPath},
+                    {"phase", phase},
+                    {"elapsed", elapsed},
+                    {"needsExtract", StreamExtractor::needsExtraction(mediaPath) ? "true" : "false"},
+                }};
+            });
+        SkinManager::instance().renderLuaSurface("opening", *luaBackend_,
+            {0.0f, 0.0f, io.DisplaySize.x, io.DisplaySize.y}, io.DeltaTime);
     }
 
     ImGui::Render();
@@ -165,6 +126,7 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
     });
 
     const bool needsExtract = StreamExtractor::needsExtraction(mediaPath);
+    startedAt_ = ImGui::GetTime();
 
     // 1) 渲染一帧 splash 给用户看
     renderSplashFrame(mediaPath, needsExtract ? "RESOLVING SOURCE..." : "OPENING MEDIA STREAM...");
@@ -188,11 +150,11 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
         while (extractDone.load(std::memory_order_acquire) == 0) {
             glfwPollEvents();
             if (glfwWindowShouldClose(w->getGLFWWindow())) break;
-            // 按当前皮肤设定的间隔重绘 splash，让 dots 动画保持连续
+            // splash 的重绘间隔由 C++ 决定：这是「主线程在等 worker 时多久画一帧」的
+            // 调度参数，属于宿主节奏而非皮肤外观。皮肤只收到 elapsed 并按它做动画。
+            constexpr long kSplashRedrawMs = 100;
             auto now = std::chrono::steady_clock::now();
-            auto snap = SkinManager::instance().current();
-            float redrawMs = snap ? snap->surfaces.opening.redrawIntervalMs : 100.0f;
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDraw).count() > redrawMs) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastDraw).count() > kSplashRedrawMs) {
                 renderSplashFrame(mediaPath, "RESOLVING SOURCE...");
                 lastDraw = now;
             }

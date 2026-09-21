@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.8.3 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.8.5 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -158,7 +158,24 @@ add_library(tinyfiledialogs STATIC third_party/tinyfiledialogs/tinyfiledialogs.c
 target_include_directories(tinyfiledialogs PUBLIC third_party/tinyfiledialogs)
 
 # ========================
-# 5. FluxPlayer 主程序
+# 5. Lua 5.4（皮肤脚本沙箱运行时）
+# ========================
+# 固定使用仓库内置 Lua，保证 Windows/macOS/Linux 版本一致且发布包不依赖系统安装。
+file(GLOB LUA_SOURCES CONFIGURE_DEPENDS "third_party/lua/src/*.c")
+add_library(lua_static STATIC ${LUA_SOURCES})
+target_include_directories(lua_static PUBLIC third_party/lua/src)
+target_compile_definitions(lua_static PRIVATE
+    $<$<PLATFORM_ID:Windows>:LUA_USE_WINDOWS>
+    $<$<PLATFORM_ID:Darwin>:LUA_USE_MACOSX>
+    $<$<PLATFORM_ID:Linux>:LUA_USE_LINUX>
+)
+target_compile_options(lua_static PRIVATE $<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(lua_static PUBLIC m ${CMAKE_DL_LIBS})
+endif()
+
+# ========================
+# 6. FluxPlayer 主程序
 # ========================
 # CONFIGURE_DEPENDS：新增/删除 .cpp 时 cmake --build 自动重新 glob，无需手动 cmake
 file(GLOB_RECURSE FLUXPLAYER_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
@@ -181,6 +198,13 @@ if(WIN32)
 else()
     add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
 endif()
+
+# 皮肤资源清单：供下方资源复制步骤做 DEPENDS，确保改皮肤即重新复制。
+# （不再挂进 target_sources：HEADER_FILE_ONLY 只影响编译依赖，不会触发复制步骤。）
+file(GLOB_RECURSE FLUXPLAYER_SKIN_ASSETS CONFIGURE_DEPENDS
+    "source/UI/skins/*.lua"
+    "source/UI/skins/*.svg"
+)
 
 # CMake 的缓存、对象文件和静态库保留在 -B 指定的 build/cmake 中；
 # 只有可直接运行的主程序进入共享的 build/bin。xmake 也把主程序及运行时依赖
@@ -225,11 +249,11 @@ target_precompile_headers(FluxPlayer PRIVATE "include/FluxPlayer/pch.h")
 target_include_directories(FluxPlayer PRIVATE
     include              # 项目头文件根目录
     third_party/glm      # 数学库（仅头文件）
-    third_party          # nlohmann/json 等仅头文件库的根目录（include 形式 <nlohmann/json.hpp>）
+    third_party          # 项目内其他模块使用的仅头文件第三方库根目录
 )
 
 # 链接第三方静态库
-target_link_libraries(FluxPlayer PRIVATE glfw glad imgui tinyfiledialogs)
+target_link_libraries(FluxPlayer PRIVATE glfw glad imgui tinyfiledialogs lua_static)
 
 # FFmpeg：添加头文件路径和库搜索路径，然后链接各个模块
 target_include_directories(FluxPlayer PRIVATE ${FFMPEG_ROOT}/include)
@@ -340,35 +364,62 @@ if(APPLE)
     )
 endif()
 
-# 构建完成后，自动把 assets/shaders/ 目录复制到可执行文件旁边
-# $<TARGET_FILE_DIR:FluxPlayer> 会自动解析为实际的输出目录
-add_custom_command(TARGET FluxPlayer POST_BUILD
+# 运行时资源复制（shaders / fonts / source / resources）。
+#
+# 不能只靠 POST_BUILD：POST_BUILD 随可执行文件重新链接而触发，而 Lua/SVG 皮肤
+# 不参与编译。曾因此出现"改了皮肤、cmake --build 报 Built target、但运行目录仍是
+# 旧皮肤"的情况。这里用 stamp 文件显式声明 DEPENDS，皮肤内容变化即重新复制。
+file(GLOB_RECURSE FLUXPLAYER_SHADER_ASSETS CONFIGURE_DEPENDS "assets/shaders/*")
+file(GLOB_RECURSE FLUXPLAYER_FONT_ASSETS   CONFIGURE_DEPENDS "assets/fonts/*")
+file(GLOB_RECURSE FLUXPLAYER_SOURCE_ASSETS CONFIGURE_DEPENDS "source/*")
+
+set(FLUXPLAYER_RESOURCE_STAMP "${CMAKE_CURRENT_BINARY_DIR}/fluxplayer_resources.stamp")
+add_custom_command(
+    OUTPUT "${FLUXPLAYER_RESOURCE_STAMP}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders
-        $<TARGET_FILE_DIR:FluxPlayer>/shaders
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/shaders
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts
-        $<TARGET_FILE_DIR:FluxPlayer>/fonts
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/fonts
     # source/ 全拷贝（开发期依赖，含字幕测试、封面兜底图）
+    # 先删目标再拷：copy_directory 只做覆盖，不会清除已删除的旧皮肤或
+    # 历史嵌套目录（source/source/...），残留旧文件会被运行时误加载。
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/source
-        $<TARGET_FILE_DIR:FluxPlayer>/source
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source
     # 皮肤包内置回退路径：与开发期 source/UI/skins 解耦，
-    # 让发布版即便缺失开发目录也能从 resources/skins 加载到内置 cyberpunk-neon
-    # 只拷贝运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
-    # 先清空目标目录：避免旧构建（曾整目录拷贝）残留的 mockup 滞留
+    # 让发布版即便缺失开发目录也能从 resources/skins 加载到内置 cyberpunk-neon。
+    # 单文件 Lua 是唯一皮肤入口；SVG 仅作预览/设计参考。
+    # 清空整个 skins/ 再重建：copy_directory 只覆盖不清理，历史嵌套目录
+    # （skins/skins/...）和已删除的旧皮肤会残留，可能被运行时误加载。
     COMMAND ${CMAKE_COMMAND} -E remove_directory
-        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/skins
     COMMAND ${CMAKE_COMMAND} -E make_directory
-        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins/cyberpunk-neon/skin.json
-        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon/skin.json
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins/cyberpunk-neon/preview.svg
-        $<TARGET_FILE_DIR:FluxPlayer>/resources/skins/cyberpunk-neon/preview.svg
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/skins
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins/cyberpunk-neon
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/skins/cyberpunk-neon
+    # Lua 示例皮肤完整复制（<id>.lua + preview）
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/UI/skins/minimal-lua
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/skins/minimal-lua
+    COMMAND ${CMAKE_COMMAND} -E touch "${FLUXPLAYER_RESOURCE_STAMP}"
+    DEPENDS
+        ${FLUXPLAYER_SKIN_ASSETS}
+        ${FLUXPLAYER_SHADER_ASSETS}
+        ${FLUXPLAYER_FONT_ASSETS}
+        ${FLUXPLAYER_SOURCE_ASSETS}
     COMMENT "Copying runtime resources..."
+    VERBATIM
 )
+add_custom_target(FluxPlayerResources DEPENDS "${FLUXPLAYER_RESOURCE_STAMP}")
+
+# 注意方向：FluxPlayer → Resources（不能反向，否则与 TARGET_FILE_DIR 形成循环依赖）。
+# POST_BUILD 只负责让首次链接后资源就位；后续皮肤改动由上面的 stamp 依赖单独触发。
+add_dependencies(FluxPlayer FluxPlayerResources)
 
 # Windows：构建完成后把 FFmpeg 的 DLL 复制到可执行文件旁边，否则运行时找不到
 if(WIN32)
@@ -427,13 +478,12 @@ install(FILES source/pic2.png DESTINATION resources)
 # video_01.mp4 是启动真实解码测速样片，HardwareInfo 通过
 # Config::getResourcePath("video/video_01.mp4") 查找。
 install(FILES source/video/video_01.mp4 DESTINATION resources/video)
-# 安装阶段同步把皮肤包当作只读资源放到 resources/skins，
-# 与运行期 Config::getResourcePath("skins") 的解析路径对齐
-# 只安装运行时必需文件（skin.json + preview.svg），排除设计稿 mockup_*.svg
-install(FILES
-    source/UI/skins/cyberpunk-neon/skin.json
-    source/UI/skins/cyberpunk-neon/preview.svg
+# 安装阶段同步把单文件 Lua 皮肤包放到 resources/skins。
+install(DIRECTORY source/UI/skins/cyberpunk-neon/
     DESTINATION resources/skins/cyberpunk-neon)
+install(DIRECTORY source/UI/skins/minimal-lua/
+    DESTINATION resources/skins/minimal-lua
+    PATTERN "mockup_*" EXCLUDE)
 
 # yt-dlp 可执行文件：发布版必须随程序分发到 exe 同级，
 # 否则安装到目标机后 StreamExtractor 找不到 yt-dlp（运行时报「找不到 dlp」）。
@@ -467,8 +517,13 @@ if(WIN32)
                 \".*[Ss]ystem32.*\"
                 \".*SysWOW64.*\"
         )
+        if(_u_deps)
+            message(FATAL_ERROR \"Unresolved runtime dependencies: \${_u_deps}\")
+        endif()
+        set(_runtime_dll_names)
         foreach(_dep \${_r_deps})
             get_filename_component(_dep_name \"\${_dep}\" NAME)
+            list(APPEND _runtime_dll_names \"\${_dep_name}\")
             set(_dep_dst \"\${CMAKE_INSTALL_PREFIX}/\${_dep_name}\")
             # 找原始源文件（跳过 build/ 中转，避免 POST_BUILD copy 刷新时间戳导致误判）
             set(_dep_src \"\${_dep}\")
@@ -479,11 +534,10 @@ if(WIN32)
                 endif()
             endforeach()
             if(NOT EXISTS \"\${_dep_dst}\" OR \"\${_dep_src}\" IS_NEWER_THAN \"\${_dep_dst}\")
-                file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}\" TYPE SHARED_LIBRARY FILES \"\${_dep}\")
+                file(INSTALL DESTINATION \"\${CMAKE_INSTALL_PREFIX}\" TYPE SHARED_LIBRARY FILES \"\${_dep_src}\")
             endif()
         endforeach()
-        foreach(_dep \${_u_deps})
-            message(STATUS \"[install] Skipped unresolved: \${_dep}\")
-        endforeach()
+        list(REMOVE_DUPLICATES _runtime_dll_names)
+        file(WRITE \"\${CMAKE_INSTALL_PREFIX}/runtime-dlls.txt\" \"\${_runtime_dll_names}\")
     ")
 endif()

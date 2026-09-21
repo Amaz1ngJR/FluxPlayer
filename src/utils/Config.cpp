@@ -174,8 +174,12 @@ bool Config::load() {
                 else if (key == "loopPlayback") settings_.loopPlayback = (value == "true" || value == "1");
                 else if (key == "screenshotDir") settings_.screenshotDir = value;
                 else if (key == "screenshotFormat") settings_.screenshotFormat = value;
-                else if (key == "screenshotSound") settings_.screenshotSound = (value == "true" || value == "1");
-                else if (key == "screenshotToast") settings_.screenshotToast = (value == "true" || value == "1");
+                else if (key == "screenshotSound" || key == "screenshotSoundEnabled")
+                    settings_.screenshotSound = (value == "true" || value == "1");
+                else if (key == "screenshotToast" || key == "screenshotToastEnabled")
+                    settings_.screenshotToast = (value == "true" || value == "1");
+                else if (key == "screenshotFlash" || key == "screenshotFlashEnabled")
+                    settings_.screenshotFlash = (value == "true" || value == "1");
                 else if (key == "recordDir") settings_.recordDir = value;
                 else if (key == "hwaccel") settings_.hwaccel = (value == "true" || value == "1");
                 else if (key == "subtitleEnabled") settings_.subtitleEnabled = (value == "true" || value == "1");
@@ -272,7 +276,9 @@ bool Config::save() {
     file << "# screenshotSound: 截图时播放系统提示音 (true / false)\n";
     file << "screenshotSound=" << (settings_.screenshotSound ? "true" : "false") << "\n";
     file << "# screenshotToast: 显示截图结果通知 (true / false)\n";
-    file << "screenshotToast=" << (settings_.screenshotToast ? "true" : "false") << "\n\n";
+    file << "screenshotToast=" << (settings_.screenshotToast ? "true" : "false") << "\n";
+    file << "# screenshotFlash: 截图时播放闪光动画 (true / false)\n";
+    file << "screenshotFlash=" << (settings_.screenshotFlash ? "true" : "false") << "\n\n";
     file << "[Record]\n";
     file << "recordDir=" << settings_.recordDir << "\n\n";
     file << "[Decoder]\n";
@@ -313,6 +319,10 @@ bool Config::save() {
     file << "socksProxy=" << settings_.socksProxy << "\n";
 
     LOG_INFO("Config saved to: " + configPath_);
+    // 必须刷新 mtime 哨兵：save() 之后文件 mtime 一定比 lastModTime_ 新，若不更新，
+    // 下一帧 checkAndReload() 会把刚写下去的值当成外部改动重新加载一遍。
+    // 界面上连续调参数（滑块/输入框）时会表现为设置被反复回滚。
+    lastModTime_ = getFileModTime();
     return true;
 }
 
