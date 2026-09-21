@@ -252,12 +252,11 @@ bool DemuxWorker::restartDashMerger(double seekTime) {
         if (seekGeneration_.load(std::memory_order_acquire) != generation) return false;
 
         auto candidateMerger = std::make_unique<DashMerger>();
-        // 已配置代理时先使用代理（保持与播放/鉴权路径一致）；若代理发生 TLS/pull 错误，
-        // 第二次候选改用直连，避免对同一故障路由机械重试。
+        // 合并器先直连，首次候选允许失败后尝试代理；第二次候选只走直连。
         const bool useProxyThisAttempt = proxyAvailable && attempt == 1;
         LOG_INFO("restartDashMerger: 候选 " + std::to_string(attempt) + "/" +
                  std::to_string(maxRestartAttempts) +
-                 (useProxyThisAttempt ? " 使用代理" : " 使用直连"));
+                 (useProxyThisAttempt ? " 直连优先，允许代理回退" : " 仅使用直连"));
         if (!candidateMerger->start(player_->lastExtractedInfo_.videoUrl,
                                     player_->lastExtractedInfo_.audioUrl,
                                     player_->lastExtractedInfo_.headers,
@@ -449,12 +448,16 @@ void DemuxWorker::run() {
                 av_packet_unref(packet);
             }
         } else {
-            // readPacket 失败处理（实时流重连退避 / DASH 过渡 / 本地文件 EOF）
-            // DASH seek 重建上游、HTTP Range seek 的 CDN reseat 等过渡瞬间 readPacket 可能
-            // 短暂返回 false；任何「刚 seek 完、还没解到目标 PTS」状态下失败都不应误判为 EOF。
-            const bool isStreamingPipe = isLiveStream_ || (dashMerger_ != nullptr);
-            const bool postSeekTransient = clockController_->isDecodingToTarget();
-            if (isStreamingPipe || postSeekTransient) {
+            // DASH 是不可重连的本地合并管道，只对 EAGAIN 重试。
+            // EOF/损坏数据必须进入停泊路径，不能因尚未追到 seek 目标而反复读死管道。
+            const bool isDash = player_->lastExtractedInfo_.isDash;
+            const int readError = demuxer_ ? demuxer_->getLastReadError() : AVERROR(EINVAL);
+            if (isDash && readError == AVERROR(EAGAIN)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            const bool postSeekTransient = !isDash && clockController_->isDecodingToTarget();
+            if ((!isDash && isLiveStream_) || postSeekTransient) {
                 // 实时流网络重试机制（指数退避 + 周期性完整重连）
                 const int MAX_READ_RETRIES = 30;
                 const int MAX_RETRY_DELAY_MS = 3000;

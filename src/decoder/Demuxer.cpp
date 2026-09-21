@@ -9,17 +9,23 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
+#include <cerrno>
 
 namespace FluxPlayer {
 
 namespace {
+bool isPipeInput(const std::string& filename) {
+    return filename.rfind("pipe:", 0) == 0 ||
+           filename.rfind("\\\\.\\pipe\\", 0) == 0;
+}
+
 // 判断 avformat_open_input 后是否已无需 find_stream_info。
 // DASH pipe（DashMerger 输出的 Matroska）写头时已带完整 codecpar（含 extradata）+ 帧率，
 // 解析容器头即得全部流信息。此时 find_stream_info 只会从管道再读包/试解码一帧来"确认"，
 // 而读包速度受限于 merger 从远程下载 —— 这正是 seek 后探测段长达数秒的根源。
 // 仅当所有音视频流的 codecpar 关键字段就绪才跳过；否则回退到正常探测，保证健壮。
 bool streamInfoReadyForPipe(const std::string& filename, AVFormatContext* ctx) {
-    if (filename.rfind("pipe:", 0) != 0 || !ctx) {
+    if (!isPipeInput(filename) || !ctx) {
         return false;
     }
     bool sawAV = false;
@@ -109,7 +115,7 @@ bool Demuxer::openInternal(const std::string& filename,
  */
 AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename,
                                                 bool useConfiguredProxy) const {
-    const bool isPipe = (filename.rfind("pipe:", 0) == 0);
+    const bool isPipe = isPipeInput(filename);
     const bool isHttp = FluxPlayer::isHttpUrl(filename);
     const bool isRtsp = FluxPlayer::isRtspUrl(filename);
     const bool isRtmp = FluxPlayer::isRtmpUrl(filename);
@@ -129,6 +135,8 @@ AVDictionary* Demuxer::configureNetworkOptions(const std::string& filename,
     // 之前 2MB 意味着要等 merger 从远程下完 2MB 4K 数据（受带宽限制达数秒）才返回。
     // 256KB 足够覆盖 MKV header + 少量包，且远小于下载瓶颈。
     if (isPipe) {
+        // Windows 命名管道由 file 协议打开，必须显式禁止 seek，不能当作磁盘文件。
+        av_dict_set(&options, "seekable", "0", 0);
         av_dict_set(&options, "probesize", "262144", 0);       // 256 KB（默认 5 MB）
         av_dict_set(&options, "analyzeduration", "500000", 0); // 500ms（默认 5s）
         LOG_DEBUG("Pipe options: fast probe (probesize=256KB, analyze=500ms)");
@@ -291,6 +299,7 @@ void Demuxer::close() {
  * 注意：调用者需要在使用完 packet 后调用 av_packet_unref() 释放
  */
 bool Demuxer::readPacket(AVPacket* packet) {
+    m_lastReadError = AVERROR(EINVAL);
     if (!m_formatCtx) {
         LOG_ERROR("Format context is null, cannot read packet");
         return false;
@@ -299,6 +308,7 @@ bool Demuxer::readPacket(AVPacket* packet) {
     // 从文件中读取下一个数据包
     // packet 可能属于视频流、音频流或其他流
     int ret = av_read_frame(m_formatCtx, packet);
+    m_lastReadError = ret;
     if (ret < 0) {
         if (ret == AVERROR_EOF) {
             LOG_DEBUG("End of file reached during packet reading");
@@ -464,8 +474,8 @@ bool Demuxer::seek(int64_t timestamp) {
 }
 
 bool Demuxer::openSelfDescribingPipe(const std::string& filename, double knownDuration) {
-    if (filename.rfind("pipe:", 0) != 0) {
-        LOG_ERROR("openSelfDescribingPipe requires pipe: URL");
+    if (!isPipeInput(filename)) {
+        LOG_ERROR("openSelfDescribingPipe requires a pipe URL or Windows named pipe");
         return false;
     }
     AVDictionary* options = configureNetworkOptions(filename);

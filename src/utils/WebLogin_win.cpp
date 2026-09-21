@@ -96,7 +96,7 @@ ComPtr<Interface> MakeCallback(REFIID iid, std::function<HRESULT(HRESULT, Arg*)>
 }
 
 // 模态退出原因
-enum class ModalResult { None, Cancel, Complete, Failed };
+enum class ModalResult { None, Cancel, Complete, UseExistingCookies, Failed };
 
 // UTF-8 ↔ UTF-16 转换辅助（WebView2 接口都用 LPCWSTR）
 std::wstring utf8ToWide(const std::string& s) {
@@ -200,6 +200,7 @@ NetscapeCookie convertCookie(ICoreWebView2Cookie* c) {
 struct LoginContext {
     HWND hwnd = nullptr;
     HWND completeBtn = nullptr;
+    HWND useExistingBtn = nullptr;
     HWND cancelBtn = nullptr;
 
     ComPtr<ICoreWebView2Controller> controller;
@@ -221,11 +222,18 @@ constexpr UINT WM_FP_QUIT_LOGIN = WM_USER + 1;
 // 控件 ID
 constexpr int kIdComplete = 1001;
 constexpr int kIdCancel = 1002;
+constexpr int kIdUseExisting = 1003;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* ctx = reinterpret_cast<LoginContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 
     switch (msg) {
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lp);
+        limits->ptMinTrackSize.x = 680;
+        limits->ptMinTrackSize.y = 400;
+        return 0;
+    }
     case WM_SIZE: {
         if (ctx) {
             RECT rc; GetClientRect(hwnd, &rc);
@@ -235,6 +243,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // 否则用户只能点窗口右上角红叉关闭，相当于取消，不会读到 cookie。
             if (ctx->completeBtn) MoveWindow(ctx->completeBtn, rc.right - 130, rc.bottom - btnH + 4, 120, 28, TRUE);
             if (ctx->cancelBtn)   MoveWindow(ctx->cancelBtn,   rc.right - 250, rc.bottom - btnH + 4, 100, 28, TRUE);
+            if (ctx->useExistingBtn) MoveWindow(ctx->useExistingBtn, 10, rc.bottom - btnH + 4, 360, 28, TRUE);
             // WebView 区域只在 controller 就绪后才有效
             if (ctx->controller) {
                 RECT webRc{ rc.left, rc.top, rc.right, rc.bottom - btnH };
@@ -251,8 +260,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
             return 0;
         }
+        if (id == kIdUseExisting) {
+            ctx->modalResult = ModalResult::UseExistingCookies;
+            PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
+            return 0;
+        }
         if (id == kIdComplete) {
-            // 防止重复点击
+            if (!ctx->webView) return 0;
+            // 防止读取期间选择其他继续分支。
+            EnableWindow(ctx->useExistingBtn, FALSE);
             EnableWindow(ctx->completeBtn, FALSE);
             SetWindowTextW(ctx->completeBtn, L"读取登录信息中…");
 
@@ -381,6 +397,15 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     ctx.completeBtn = CreateWindowExW(0, L"BUTTON", L"完成登录",
         WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
         0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdComplete, hInst, nullptr);
+    ctx.useExistingBtn = CreateWindowExW(0, L"BUTTON",
+        CookieStore::hasCookiesForUrl(pageUrl)
+            ? L"不登录，使用已有 Cookie 继续"
+            : L"不登录，直接继续（暂无可用 Cookie）",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdUseExisting, hInst, nullptr);
+    // 控件初始化完成即可继续，不必等待网页加载或登录。
+    EnableWindow(ctx.completeBtn, FALSE);
+    EnableWindow(ctx.useExistingBtn, FALSE);
     // 触发首次布局
     SendMessageW(hwnd, WM_SIZE, 0, 0);
 
@@ -445,6 +470,8 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                             rc.bottom -= 36;
                             controller->put_Bounds(rc);
 
+                            EnableWindow(ctx.completeBtn, TRUE);
+                            EnableWindow(ctx.useExistingBtn, TRUE);
                             wv->Navigate(ctx.startUrl.c_str());
                             return S_OK;
                         }
@@ -484,6 +511,10 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         outcome.cookies = std::move(ctx.cookies);
         LOG_INFO("WebLogin: 用户完成登录，读取 cookies "
                  + std::to_string(outcome.cookies.size()) + " 条 host=" + ctx.host);
+        break;
+    case ModalResult::UseExistingCookies:
+        outcome.result = WebLoginResult::UseExistingCookies;
+        LOG_INFO("WebLogin: 用户选择不登录，保留已有 Cookie 继续");
         break;
     case ModalResult::Cancel:
         outcome.result = WebLoginResult::Cancelled;

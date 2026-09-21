@@ -27,6 +27,7 @@
 static const NSInteger kWebLoginModalCancel   = 1001;
 static const NSInteger kWebLoginModalComplete = 1002;
 static const NSInteger kWebLoginModalFailed   = 1003;
+static const NSInteger kWebLoginModalUseExisting = 1004;
 
 // ───────────────────────────────────────────────
 // Objective-C 委托：处理按钮回调和窗口关闭事件
@@ -36,6 +37,7 @@ static const NSInteger kWebLoginModalFailed   = 1003;
 @property(nonatomic, strong) WKWebView* webView;
 @property(nonatomic, strong) NSTextField* statusLabel;  ///< 当前 URL 提示
 @property(nonatomic, strong) NSButton* completeButton;
+@property(nonatomic, strong) NSButton* useExistingButton;
 @property(nonatomic, assign) NSInteger pendingResponse;  ///< 异步 cookie 读取期间暂存的返回码
 @property(nonatomic, copy)   NSString* pageUrlString;
 @property(nonatomic, strong) NSMutableArray<NSHTTPCookie*>* readCookies;
@@ -45,6 +47,7 @@ static const NSInteger kWebLoginModalFailed   = 1003;
 
 - (void)onCompleteClicked:(id)sender {
     // 防止重复点击：禁用按钮
+    self.useExistingButton.enabled = NO;
     self.completeButton.enabled = NO;
     self.completeButton.title = @"读取登录信息中…";
 
@@ -57,6 +60,10 @@ static const NSInteger kWebLoginModalFailed   = 1003;
             [NSApp stopModalWithCode:kWebLoginModalComplete];
         });
     }];
+}
+
+- (void)onUseExistingClicked:(id)sender {
+    [NSApp stopModalWithCode:kWebLoginModalUseExisting];
 }
 
 - (void)onCancelClicked:(id)sender {
@@ -173,6 +180,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                                                           backing:NSBackingStoreBuffered
                                                             defer:NO];
         [window setTitle:@"FluxPlayer 登录"];
+        [window setContentMinSize:NSMakeSize(660, 360)];
         [window center];
 
         FPWebLoginController* ctrl = [[FPWebLoginController alloc] init];
@@ -220,6 +228,18 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         cancelBtn.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
         [content addSubview:cancelBtn];
 
+        // 不读取浏览器 Cookie，直接复用应用已有存储。
+        NSButton* useExistingBtn = [[NSButton alloc] initWithFrame:NSMakeRect(10, 10, 360, 32)];
+        useExistingBtn.bezelStyle = NSBezelStyleRounded;
+        useExistingBtn.title = CookieStore::hasCookiesForUrl(pageUrl)
+            ? @"不登录，使用已有 Cookie 继续"
+            : @"不登录，直接继续（暂无可用 Cookie）";
+        useExistingBtn.target = ctrl;
+        useExistingBtn.action = @selector(onUseExistingClicked:);
+        useExistingBtn.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+        [content addSubview:useExistingBtn];
+        ctrl.useExistingButton = useExistingBtn;
+
         // 完成登录
         NSButton* completeBtn = [[NSButton alloc] initWithFrame:NSMakeRect(winW - 130, 10, 120, 32)];
         completeBtn.bezelStyle = NSBezelStyleRounded;
@@ -258,6 +278,9 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
             outcome.result = WebLoginResult::Completed;
             LOG_INFO("WebLogin: 用户完成登录，读取 cookies "
                      + std::to_string(outcome.cookies.size()) + " 条 host=" + host);
+        } else if (response == kWebLoginModalUseExisting) {
+            outcome.result = WebLoginResult::UseExistingCookies;
+            LOG_INFO("WebLogin: 用户选择不登录，保留已有 Cookie 继续");
         } else if (response == kWebLoginModalFailed) {
             outcome.result = WebLoginResult::Failed;
             outcome.error = "登录窗口加载失败";

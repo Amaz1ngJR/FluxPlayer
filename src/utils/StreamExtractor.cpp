@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cctype>
 #include <algorithm>
 #include <thread>
 #include <chrono>
@@ -40,19 +41,12 @@ namespace FluxPlayer {
 
 using json = nlohmann::json;
 
-// 已知需要 yt-dlp 提取的平台域名
-static const std::vector<std::string> kKnownPlatforms = {
-    "bilibili.com", "youtube.com", "youtu.be",
-    "douyin.com", "iqiyi.com", "youku.com",
-    "v.qq.com", "mgtv.com", "weibo.com",
-    "twitter.com", "x.com", "instagram.com",
-    "tiktok.com", "nicovideo.jp",
-};
-
 // 直链媒体扩展名，无需 yt-dlp
 static const std::vector<std::string> kDirectExts = {
     ".mp4", ".mkv", ".avi", ".mov", ".flv", ".ts",
     ".m3u8", ".m3u", ".mpd", ".mp3", ".aac", ".flac",
+    ".webm", ".m4v", ".m4a", ".wav", ".ogg", ".ogv", ".opus",
+    ".wmv", ".wma", ".asf", ".mpeg", ".mpg", ".m2ts", ".mts", ".m4s",
 };
 
 // ─────────────────────────────────────────────
@@ -235,37 +229,24 @@ static std::string runCommand(const std::string& cmd, int timeoutSec = 30) {
 // ─────────────────────────────────────────────
 
 bool StreamExtractor::needsExtraction(const std::string& url) {
-    // 使用统一的网络URL判断
-    if (!isNetworkUrl(url)) {
-        // 不是网络URL，是本地文件，不需要提取
-        return false;
-    }
+    // 只有 HTTP(S) 才可能是网页；其他协议和本地文件交给播放器。
+    if (!isHttpUrl(url)) return false;
 
-    // RTSP/RTMP/RTP 直接播放，不需要提取
-    if (url.find("rtsp://") == 0 || url.find("rtmp://") == 0 || url.find("rtp://") == 0) {
-        return false;
+    // 仅检查 URL 路径后缀，不能把域名、查询参数里的 .mp4 等误当成直链。
+    const size_t authorityEnd = url.find_first_of("/?#", url.find("://") + 3);
+    std::string path;
+    if (authorityEnd != std::string::npos && url[authorityEnd] == '/') {
+        const size_t pathEnd = url.find_first_of("?#", authorityEnd);
+        path = url.substr(authorityEnd, pathEnd == std::string::npos
+            ? std::string::npos : pathEnd - authorityEnd);
     }
-
-    // 含已知直链扩展名则不需要提取
-    std::string lower = url;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     for (const auto& ext : kDirectExts) {
-        size_t pos = lower.find(ext);
-        if (pos != std::string::npos) {
-            // 扩展名后面是 ? 或 # 或结尾，才算直链
-            size_t after = pos + ext.size();
-            if (after >= lower.size() || lower[after] == '?' || lower[after] == '#')
-                return false;
-        }
+        if (path.size() >= ext.size() &&
+            path.compare(path.size() - ext.size(), ext.size(), ext) == 0)
+            return false;
     }
-
-    // 已知平台域名
-    for (const auto& domain : kKnownPlatforms) {
-        if (lower.find(domain) != std::string::npos) return true;
-    }
-
-    // 其他 http/https URL 且无媒体扩展名，也尝试提取
-    // 使用统一的网络URL判断（已经在开头过滤了本地文件）
     return true;
 }
 
@@ -403,6 +384,28 @@ std::vector<QualityOption> StreamExtractor::parseQualities(const std::string& js
     return result;
 }
 
+// 仅对网络/路由类错误尝试另一条线路；登录、私有视频、格式错误不靠换代理解决。
+static bool isNetworkFailure(const std::string& output) {
+    if (output.empty()) return true;
+    std::string lower = output;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const char* marker : {"login required", "login-required", "log in", "sign in",
+                               "sign-in", "private video", "premium", "members-only"}) {
+        if (lower.find(marker) != std::string::npos) return false;
+    }
+    for (const char* marker : {"timed out", "timeout", "failed to connect", "could not connect",
+                               "connection refused", "connection reset", "connection aborted",
+                               "network is unreachable", "unable to resolve", "could not resolve",
+                               "name resolution", "getaddrinfo failed", "remote end closed",
+                               "proxyerror", "ssl", "tls", "http error 403", "http error 429",
+                               "http error 502", "http error 503", "http error 504",
+                               "not available in your country", "geo-restricted"}) {
+        if (lower.find(marker) != std::string::npos) return true;
+    }
+    return false;
+}
+
 bool StreamExtractor::extract(const std::string& pageUrl,
                                const std::string& formatId,
                                ExtractedStream& out,
@@ -452,32 +455,37 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     std::string cookieArg = prepareCookieArgForUrl(pageUrl);
 
     const auto& cfg = Config::getInstance().get();
-    std::string proxyArg = (cfg.proxyEnabled && !cfg.httpProxy.empty())
-        ? " --proxy \"" + cfg.httpProxy + "\""
-        : "";
+    const bool proxyAvailable = cfg.proxyEnabled && !cfg.httpProxy.empty();
+    const std::string baseCmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
+        + " --socket-timeout 10 --retries 0 --extractor-retries 0"
+        + getImpersonateArg() + fmtPart + cookieArg;
+    auto request = [&](const std::string& proxy) {
+        // 空代理显式禁用环境变量/系统代理，确保这次真的是直连。
+        const std::string cmd = baseCmd + " --proxy \"" + proxy + "\""
+            + " \"" + pageUrl + "\" 2>&1";
+        LOG_INFO(std::string("StreamExtractor: ") + (proxy.empty() ? "直连" : "使用配置代理"));
+        return runCommand(cmd, 60);
+    };
+    auto isJsonObject = [](const std::string& output) {
+        return json::parse(output, nullptr, false).is_object();
+    };
 
-    std::string cmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
-                    + getImpersonateArg() + fmtPart + cookieArg + proxyArg
-                    + " \"" + pageUrl + "\" 2>&1";
-
-    LOG_INFO("StreamExtractor: " + cmd);
-    std::string jsonStr = runCommand(cmd, 60);  // 60 秒超时
-
-    // 若带 cookie 失败，自动降级为不带 cookie 重试（cookie 文件可能损坏或过期）
-    if ((jsonStr.empty() || jsonStr[0] != '{') && !cookieArg.empty()) {
-        LOG_WARN("StreamExtractor: cookie 方式失败，降级为无 cookie 重试。"
-                 "如需播放登录内容，请重新登录。原始输出: " + jsonStr.substr(0, 200));
-        std::string cmdNoCookie = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
-                        + getImpersonateArg() + fmtPart + proxyArg + " \"" + pageUrl + "\" 2>&1";
-        jsonStr = runCommand(cmdNoCookie, 60);
+    std::string jsonStr = request("");
+    if (!isJsonObject(jsonStr) && proxyAvailable && isNetworkFailure(jsonStr)) {
+        const std::string directError = jsonStr.empty() ? "未返回结果" : jsonStr.substr(0, 200);
+        LOG_WARN("StreamExtractor: 直连失败，保留 Cookie 尝试配置代理: " + directError);
+        jsonStr = request(cfg.httpProxy);
+        if (!isJsonObject(jsonStr)) {
+            error = "直连失败: " + directError + "；代理失败: "
+                + (jsonStr.empty() ? "未返回结果" : jsonStr.substr(0, 200));
+            return false;
+        }
     }
 
-    if (jsonStr.empty()) {
-        error = "yt-dlp 未返回结果（可能超时或 URL 无效）";
-        return false;
-    }
-    if (jsonStr.find("ERROR") != std::string::npos || jsonStr[0] != '{') {
-        error = jsonStr.substr(0, 200);
+    // 网络错误不是 Cookie 失效的证据，不再自动移除登录凭据重试。
+    if (!isJsonObject(jsonStr)) {
+        error = jsonStr.empty() ? "yt-dlp 未返回结果（可能超时或 URL 无效）"
+                                : jsonStr.substr(0, 200);
         return false;
     }
 

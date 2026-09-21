@@ -65,6 +65,9 @@ public:
      */
     bool readPacket(AVPacket* packet);
 
+    /// 最近一次 readPacket 的 FFmpeg 返回值，用于区分 EAGAIN、EOF 和永久错误。
+    int getLastReadError() const { return m_lastReadError; }
+
     // ==================== 流索引 ====================
 
     /**
@@ -207,6 +210,7 @@ private:
      */
     void logMediaInfo(const std::string& filename) const;
 
+    int m_lastReadError = 0;
     AVFormatContext* m_formatCtx;    ///< FFmpeg 格式上下文，管理容器级别的信息
     int m_videoStreamIndex;          ///< 视频流索引，-1 表示未找到
     int m_audioStreamIndex;          ///< 音频流索引，-1 表示未找到

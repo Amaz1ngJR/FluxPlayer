@@ -32,6 +32,7 @@
 #include "FluxPlayer/core/Player.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/WebLogin.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -133,8 +134,31 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
 
     if (ui_.shouldClose()) { result.windowClosed = true; return result; }
 
-    // 2) 网页 URL：在 worker 上跑 yt-dlp，主线程 pollEvents 防卡死
+    // 2) 网页 URL：先在主线程登录，再在 worker 上提取。已有 cookie 也不跳过窗口。
     if (needsExtract) {
+        LOG_INFO("OpeningScreen: 网页地址，打开登录窗口");
+        const auto login = WebLogin::showLoginDialog(mediaPath);
+        if (ui_.shouldClose()) { result.windowClosed = true; return result; }
+        if (login.result == WebLoginResult::Cancelled) {
+            result.errorMessage = "已取消网页登录";
+            return result;
+        }
+        if (login.result != WebLoginResult::Completed &&
+            login.result != WebLoginResult::UseExistingCookies) {
+            result.errorMessage = login.error.empty() ? "无法打开网页登录窗口" : login.error;
+            return result;
+        }
+        // 复用分支不读取或合并浏览器 Cookie，避免覆盖已有登录凭据。
+        if (login.result == WebLoginResult::Completed && !login.cookies.empty()) {
+            std::string cookieError;
+            if (!CookieStore::mergeCookies(login.cookies, &cookieError)) {
+                result.errorMessage = "保存登录 Cookie 失败: " + cookieError;
+                return result;
+            }
+        }
+        renderSplashFrame(mediaPath, "RESOLVING SOURCE...");
+        if (ui_.shouldClose()) { result.windowClosed = true; return result; }
+
         std::atomic<int> extractDone{0}; // 0=running, 1=ok, 2=fail
         ExtractedStream info;
         std::string extractError;

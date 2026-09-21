@@ -23,6 +23,7 @@ namespace FluxPlayer {
  */
 enum class WebLoginResult {
     Completed,    ///< 用户点击「完成登录」，cookies 字段含读取到的 cookie
+    UseExistingCookies, ///< 不读取浏览器 Cookie，使用已有存储继续（无 Cookie 时匿名继续）
     Cancelled,    ///< 用户取消或关闭窗口
     Unsupported,  ///< 当前平台/构建未启用内置登录
     Failed        ///< 浏览器控件初始化失败等错误
