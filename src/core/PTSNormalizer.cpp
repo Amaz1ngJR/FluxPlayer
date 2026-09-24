@@ -19,11 +19,31 @@ double sanitizeInterval(double interval, double fallback) {
         ? interval : fallback;
 }
 
+// ==================== 帧间隔自愈参数 ====================
+// 实测帧间隔与声明帧间隔的允许偏差：超出即认为容器/探测给出的帧率不可信。
+constexpr double kIntervalMismatchRatio = 0.25;
+// 连续多少个实测间隔都偏离，才切换到实测值（避免单帧抖动误判）。
+constexpr int kIntervalMismatchThreshold = 12;
+// 实测间隔的平滑系数，抑制单帧抖动。
+constexpr double kRawDeltaSmoothing = 0.2;
+// 连续跳变熔断阈值：超过即停止改写时间戳，避免在错误帧率假设上持续叠加修正。
+constexpr int kMaxConsecutiveJumps = 30;
+
 } // namespace
 
 bool PTSNormalizer::isValidPTS(double pts) {
     // AV_NOPTS_VALUE 转成 double 约为 -9.22e18；阈值同时排除其他损坏时间戳。
     return std::isfinite(pts) && pts > -1e15 && pts < 1e15;
+}
+
+void PTSNormalizer::setHasAudioStream(bool hasAudio) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hasAudioStream_ = hasAudio;
+}
+
+void PTSNormalizer::setHasVideoStream(bool hasVideo) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hasVideoStream_ = hasVideo;
 }
 
 void PTSNormalizer::reset() {
@@ -40,6 +60,12 @@ void PTSNormalizer::reset() {
     lastValidAudioPTS_ = 0.0;
     videoCorrection_ = 0.0;
     audioCorrection_ = 0.0;
+    hasLastRawVideoPTS_ = false;
+    lastRawVideoPTS_ = 0.0;
+    lastRawVideoDelta_ = 0.0;
+    intervalMismatchCount_ = 0;
+    consecutiveVideoJumps_ = 0;
+    effectiveVideoInterval_ = 0.0;
 }
 
 PTSNormalizer::Result PTSNormalizer::normalizeVideo(double rawPTS, double frameInterval) {
@@ -54,18 +80,63 @@ PTSNormalizer::Result PTSNormalizer::normalizeVideo(double rawPTS, double frameI
         LOG_INFO("Live stream: First video PTS = " + std::to_string(rawPTS));
     }
 
+    // ==================== 帧间隔自愈 ====================
+    // 容器不声明帧率时（FLV/RTMP），调用方的 frameInterval 来自 avg_frame_rate 估算，
+    // 可能差整数倍。错误的帧间隔会让正常抖动反复越过跳变阈值，从而每帧叠加一次
+    // videoCorrection_、每帧改写时间戳，表现为画面持续抖动。这里用原始 PTS 实测间隔，
+    // 连续偏离声明值即切换到实测值，让阈值重新落在合理位置。
+    if (valid && hasLastRawVideoPTS_) {
+        const double rawDelta = rawPTS - lastRawVideoPTS_;
+        // 只采信正向且幅度合理的间隔：倒退/跳变不作为帧间隔样本。
+        if (rawDelta > 0.001 && rawDelta < 1.0) {
+            lastRawVideoDelta_ = lastRawVideoDelta_ <= 0.0
+                ? rawDelta
+                : lastRawVideoDelta_ * (1.0 - kRawDeltaSmoothing) + rawDelta * kRawDeltaSmoothing;
+
+            const double declared = frameInterval;
+            const double ratio = std::abs(lastRawVideoDelta_ - declared) / declared;
+            if (ratio > kIntervalMismatchRatio) {
+                if (++intervalMismatchCount_ >= kIntervalMismatchThreshold) {
+                    // 连续偏离达到阈值：声明帧率不可信，改用实测间隔作为调度依据。
+                    if (effectiveVideoInterval_ <= 0.0 ||
+                        std::abs(effectiveVideoInterval_ - lastRawVideoDelta_) /
+                            effectiveVideoInterval_ > kIntervalMismatchRatio) {
+                        LOG_WARN("Live stream: declaring " + std::to_string(1.0 / declared) +
+                                 " fps but measured " + std::to_string(1.0 / lastRawVideoDelta_) +
+                                 " fps, switching to measured interval " +
+                                 std::to_string(lastRawVideoDelta_) + "s");
+                    }
+                    effectiveVideoInterval_ = lastRawVideoDelta_;
+                }
+            } else {
+                // 回到一致：清零计数，但保留已建立的实测间隔（它已被证明更准）。
+                intervalMismatchCount_ = 0;
+            }
+        }
+    }
+    if (valid) {
+        lastRawVideoPTS_ = rawPTS;
+        hasLastRawVideoPTS_ = true;
+    }
+    // 自愈后的间隔优先用于本帧的阈值与估算。
+    if (effectiveVideoInterval_ > 0.0) {
+        frameInterval = sanitizeInterval(effectiveVideoInterval_, frameInterval);
+    }
+
     // 不在只拿到一条流时输出临时时间轴；否则第二条流到达并修改 base 后，已排队帧会
     // 从 0 突然跳到两条首帧的差值。直播从两路都可解码的较晚时刻起播，因此取 max。
+    // 纯视频流（无音频轨）没有音频线程，只能以视频首帧为基准，否则永远等不到音频。
     if (!baseCalibrated_) {
-        if (!firstVideoReceived_ || !firstAudioReceived_) {
+        const bool ready = firstVideoReceived_ && (!hasAudioStream_ || firstAudioReceived_);
+        if (!ready) {
             result.drop = true;
             return result;
         }
-        basePTS_ = std::max(firstVideoPTS_, firstAudioPTS_);
+        basePTS_ = hasAudioStream_ ? std::max(firstVideoPTS_, firstAudioPTS_) : firstVideoPTS_;
         baseCalibrated_ = true;
         LOG_INFO("Live stream: Unified playable base PTS = " + std::to_string(basePTS_) +
                  " (video=" + std::to_string(firstVideoPTS_) +
-                 ", audio=" + std::to_string(firstAudioPTS_) + ")");
+                 ", audio=" + (hasAudioStream_ ? std::to_string(firstAudioPTS_) : "none") + ")");
     }
 
     if (!valid) {
@@ -102,8 +173,19 @@ PTSNormalizer::Result PTSNormalizer::normalizeVideo(double rawPTS, double frameI
 
     const double expected = lastValidVideoPTS_ + frameInterval;
     const double error = candidate - expected;
+    // 阈值下限取 0.25s：即便帧率声明错误导致 frameInterval*6 偏小，也不能让正常的
+    // 直播时间戳抖动（实测 0.28~0.36s）被判成跳变、每帧改写时间轴。
     const double jumpThreshold = std::max(0.25, frameInterval * 6.0);
     if (std::abs(error) > jumpThreshold) {
+        ++consecutiveVideoJumps_;
+        // 熔断保护：连续跳变说明帧率假设本身可能有问题，继续每帧叠加 correction 只会
+        // 让时间轴持续被改写。此时不再改写本帧时间戳，交由上面的帧间隔自愈收敛。
+        if (consecutiveVideoJumps_ > kMaxConsecutiveJumps) {
+            result.pts = lastValidVideoPTS_ + frameInterval;
+            result.estimated = true;
+            lastValidVideoPTS_ = result.pts;
+            return result;
+        }
         // 对时间戳域建立持久修正，而非只改当前帧；后续同一偏移域的 PTS 会自然连续。
         videoCorrection_ -= error;
         candidate = expected;
@@ -111,8 +193,11 @@ PTSNormalizer::Result PTSNormalizer::normalizeVideo(double rawPTS, double frameI
         LOG_WARN("Live stream: Video PTS discontinuity " + std::to_string(error) +
                  "s, smoothing to " + std::to_string(candidate));
     } else if (candidate <= lastValidVideoPTS_) {
+        consecutiveVideoJumps_ = 0;
         candidate = expected;
         result.estimated = true;
+    } else {
+        consecutiveVideoJumps_ = 0;
     }
 
     // 无论原始 PTS 是否存在，视频都不能长期落后连续音频时间轴。允许正常 A/V 抖动，
@@ -139,14 +224,15 @@ PTSNormalizer::Result PTSNormalizer::normalizeAudio(double rawPTS, double frameI
     }
 
     if (!baseCalibrated_) {
-        if (!firstVideoReceived_ || !firstAudioReceived_) {
+        const bool ready = firstAudioReceived_ && (!hasVideoStream_ || firstVideoReceived_);
+        if (!ready) {
             result.drop = true;
             return result;
         }
-        basePTS_ = std::max(firstVideoPTS_, firstAudioPTS_);
+        basePTS_ = hasVideoStream_ ? std::max(firstVideoPTS_, firstAudioPTS_) : firstAudioPTS_;
         baseCalibrated_ = true;
         LOG_INFO("Live stream: Unified playable base PTS = " + std::to_string(basePTS_) +
-                 " (video=" + std::to_string(firstVideoPTS_) +
+                 " (video=" + (hasVideoStream_ ? std::to_string(firstVideoPTS_) : "none") +
                  ", audio=" + std::to_string(firstAudioPTS_) + ")");
     }
 

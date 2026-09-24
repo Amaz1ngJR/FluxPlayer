@@ -6,6 +6,7 @@
  */
 
 #include "FluxPlayer/decoder/Demuxer.h"
+#include "FluxPlayer/utils/FrameRateUtils.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
@@ -399,15 +400,9 @@ int Demuxer::getHeight() const {
 }
 
 double Demuxer::getFrameRate() const {
-    AVStream* stream = getVideoStream();
-    if (!stream) {
-        return 0.0;
-    }
-    AVRational frameRate = stream->avg_frame_rate;
-    if (frameRate.den == 0) {
-        return 0.0;
-    }
-    return static_cast<double>(frameRate.num) / frameRate.den;
+    // 优先码流声明的 r_frame_rate（avg_frame_rate 是探测估算，对 FLV/RTMP 等
+    // 不声明帧率的容器常偏差整数倍，实测有 15fps 被估成 30fps 的案例）。
+    return FluxPlayer::selectFrameRate(getVideoStream());
 }
 
 int Demuxer::getBitrate() const {

@@ -37,6 +37,27 @@ public:
 
     PTSNormalizer() = default;
 
+    /**
+     * @brief 声明本次播放是否含音频流
+     *
+     * 纯视频流（无音频轨，如部分 RTSP 监控流）不会有音频解码线程调用 normalizeAudio，
+     * firstAudioReceived_ 永远为 false。此时若仍要求"音视频都到齐"才校准基准，
+     * 每一帧视频都会被丢弃，表现为 VQueue 恒为 0、持续 restart from latest IDR、永不显示画面。
+     *
+     * 必须在 reset() 之前设置；reset() 会保留该标志（它是流的属性，不是时间轴状态）。
+     *
+     * @param hasAudio true 表示有音频流（默认），false 表示纯视频
+     */
+    void setHasAudioStream(bool hasAudio);
+
+    /**
+     * @brief 声明本次播放是否含视频流
+     *
+     * 与 setHasAudioStream 对称：纯音频直播流没有视频解码线程，不应等待视频基准。
+     * 必须在 reset() 之前设置。
+     */
+    void setHasVideoStream(bool hasVideo);
+
     /** @brief 重置全部状态（play / seek 重新校准时调用） */
     void reset();
 
@@ -69,6 +90,8 @@ private:
     static bool isValidPTS(double pts);
 
     mutable std::mutex mutex_;
+    bool hasAudioStream_ = true;       ///< 本流是否含音频轨（纯视频流不等音频基准）
+    bool hasVideoStream_ = true;       ///< 本流是否含视频轨（纯音频流不等视频基准）
     bool firstVideoReceived_ = false;  ///< 是否已记录首个视频帧 PTS
     bool firstAudioReceived_ = false;  ///< 是否已记录首个音频帧 PTS
     double firstVideoPTS_ = 0.0;       ///< 首个视频帧原始 PTS
@@ -81,6 +104,18 @@ private:
     double lastValidAudioPTS_ = 0.0;
     double videoCorrection_ = 0.0;    ///< 视频原始 PTS 域到连续时间轴的持久修正
     double audioCorrection_ = 0.0;    ///< 音频原始 PTS 域到连续时间轴的持久修正
+
+    // ==================== 帧间隔自愈 ====================
+    // 容器（FLV/RTMP 等）不声明帧率时，调用方传入的 frameInterval 来自 avg_frame_rate
+    // 估算，可能差整数倍。错误的帧间隔会让正常抖动反复越过跳变阈值，从而每帧叠加一次
+    // videoCorrection_、每帧改写时间戳，表现为画面持续抖动。因此在连续触发后改用实测
+    // 原始间隔，避免在错误假设上持续修正。
+    bool hasLastRawVideoPTS_ = false;
+    double lastRawVideoPTS_ = 0.0;      ///< 上一有效帧的**原始** PTS（未加 base/correction）
+    double lastRawVideoDelta_ = 0.0;    ///< 最近一次实测原始帧间隔
+    int intervalMismatchCount_ = 0;     ///< 实测间隔与声明间隔不一致的连续次数
+    int consecutiveVideoJumps_ = 0;     ///< 连续跳变计数，稳定一帧即清零
+    double effectiveVideoInterval_ = 0.0; ///< 自愈后的实测帧间隔；0 表示尚未建立
 };
 
 } // namespace FluxPlayer

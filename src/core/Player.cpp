@@ -406,6 +406,12 @@ bool Player::open(const std::string& filePath) {
     if (isLiveStream_) {
         LOG_INFO("Detected live stream, enabling special handling");
         LOG_INFO("Live stream features: PTS normalization, no seek support");
+        // 纯视频流（无音频轨）不会有音频线程调用 normalizeAudio，纯音频流反之。
+        // 必须先声明本流的轨道构成，否则基准校准会永远等不到缺失的那一路，
+        // 表现为每帧都被丢弃、VQueue 恒为 0、持续 restart from latest IDR。
+        // 用 demuxer 的流索引判断（open 时已确定），不能依赖 hasAudioStream_（解码器初始化后才赋值）。
+        ptsNormalizer_->setHasVideoStream(demuxer_->getVideoStreamIndex() >= 0);
+        ptsNormalizer_->setHasAudioStream(demuxer_->getAudioStreamIndex() >= 0);
         // 重置实时流 PTS 归一化组合状态
         ptsNormalizer_->reset();
         // 启动预缓冲：等待队列填充到安全水位再开始渲染
@@ -599,6 +605,9 @@ bool Player::play() {
 
     // 重置实时流状态
     if (isLiveStream_) {
+        // 再次声明轨道构成：seek/重播路径可能改变可用流，且 demuxer 索引始终是最新真相。
+        ptsNormalizer_->setHasVideoStream(demuxer_->getVideoStreamIndex() >= 0);
+        ptsNormalizer_->setHasAudioStream(demuxer_->getAudioStreamIndex() >= 0);
         ptsNormalizer_->reset();
         lastEnqueuedVideoPTS_.store(0.0);
         sawFirstKeyframe_.store(false);

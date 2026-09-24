@@ -1,4 +1,5 @@
 #include "FluxPlayer/core/MediaInfo.h"
+#include "FluxPlayer/utils/FrameRateUtils.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <sstream>
 #include <iomanip>
@@ -477,12 +478,8 @@ StreamInfo MediaInfo::parseStreamInfo(AVStream* stream) const {
         info.width = codecParams->width;
         info.height = codecParams->height;
 
-        // 计算帧率
-        if (stream->avg_frame_rate.den && stream->avg_frame_rate.num) {
-            info.fps = av_q2d(stream->avg_frame_rate);
-        } else if (stream->r_frame_rate.den && stream->r_frame_rate.num) {
-            info.fps = av_q2d(stream->r_frame_rate);
-        }
+        // 计算帧率：与 Demuxer::getFrameRate 共用同一口径，避免面板显示与播放调度不一致
+        info.fps = FluxPlayer::selectFrameRate(stream);
 
         // 获取 GOP size（关键帧间隔）
         // 尝试通过分析流中的关键帧索引来计算实际 GOP
