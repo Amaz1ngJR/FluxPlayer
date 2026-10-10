@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <fstream>
 #include <iostream>
@@ -49,8 +50,8 @@ public:
     void setLogLevel(LogLevel level);
 
     /**
-     * @brief 启用文件输出
-     * @param filename 日志文件路径
+     * @brief 启用按本地日期和大小轮转的文件输出（保留30天，最多30个切片）
+     * @param filename 日志基础路径；空则使用应用缓存目录，日期和切片序号自动插入扩展名前
      */
     void enableFileOutput(const std::string& filename);
 
@@ -124,7 +125,15 @@ private:
      * @brief 获取当前时间字符串
      * @return 格式化的时间字符串
      */
-    std::string getCurrentTime();
+    std::string getCurrentTime(std::time_t now);
+
+    // 以下文件轮转状态和辅助函数均由 m_mutex 保护。
+    bool rotateLogFile(const std::string& date);
+    void cleanLogFiles(std::time_t now);
+    std::string m_logBasePath;
+    std::string m_logCurrentPath;
+    std::string m_logDate;
+    uintmax_t m_logBytes = 0;
 
     /**
      * @brief 将日志级别转换为字符串

@@ -402,6 +402,21 @@ void ImGui_ImplGlfw_WindowFocusCallback(GLFWwindow* window, int focused)
     io.AddFocusEvent(focused != 0);
 }
 
+// FluxPlayer extension: all ImGui/Lua coordinates are DIPs on Windows.
+// macOS already reports window/cursor coordinates in points (Retina is framebuffer-only).
+static ImVec2 ImGui_ImplGlfw_GetWindowScale(GLFWwindow* window)
+{
+    ImVec2 scale(1.0f, 1.0f);
+#ifdef _WIN32
+    glfwGetWindowContentScale(window, &scale.x, &scale.y);
+    if (!(scale.x > 0.0f && scale.x < FLT_MAX)) scale.x = 1.0f;
+    if (!(scale.y > 0.0f && scale.y < FLT_MAX)) scale.y = 1.0f;
+#else
+    (void)window;
+#endif
+    return scale;
+}
+
 void ImGui_ImplGlfw_CursorPosCallback(GLFWwindow* window, double x, double y)
 {
     ImGui_ImplGlfw_Data* bd = ImGui_ImplGlfw_GetBackendData();
@@ -409,7 +424,9 @@ void ImGui_ImplGlfw_CursorPosCallback(GLFWwindow* window, double x, double y)
         bd->PrevUserCallbackCursorPos(window, x, y);
 
     ImGuiIO& io = ImGui::GetIO();
-    io.AddMousePosEvent((float)x, (float)y);
+    const ImVec2 scale = ImGui_ImplGlfw_GetWindowScale(window);
+    io.AddMousePosEvent((float)x / scale.x, (float)y / scale.y);
+    // Cache native coordinates so a DPI change while outside the window is safe.
     bd->LastValidMousePos = ImVec2((float)x, (float)y);
 }
 
@@ -422,14 +439,16 @@ void ImGui_ImplGlfw_CursorEnterCallback(GLFWwindow* window, int entered)
         bd->PrevUserCallbackCursorEnter(window, entered);
 
     ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 scale = ImGui_ImplGlfw_GetWindowScale(window);
     if (entered)
     {
         bd->MouseWindow = window;
-        io.AddMousePosEvent(bd->LastValidMousePos.x, bd->LastValidMousePos.y);
+        io.AddMousePosEvent(bd->LastValidMousePos.x / scale.x, bd->LastValidMousePos.y / scale.y);
     }
     else if (!entered && bd->MouseWindow == window)
     {
-        bd->LastValidMousePos = io.MousePos;
+        if (ImGui::IsMousePosValid(&io.MousePos))
+            bd->LastValidMousePos = ImVec2(io.MousePos.x * scale.x, io.MousePos.y * scale.y);
         bd->MouseWindow = nullptr;
         io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
@@ -687,8 +706,9 @@ static void ImGui_ImplGlfw_UpdateMouseData()
         if (is_window_focused)
         {
             // (Optional) Set OS mouse position from Dear ImGui if requested (rarely used, only when ImGuiConfigFlags_NavEnableSetMousePos is enabled by user)
+            const ImVec2 scale = ImGui_ImplGlfw_GetWindowScale(window);
             if (io.WantSetMousePos)
-                glfwSetCursorPos(window, (double)io.MousePos.x, (double)io.MousePos.y);
+                glfwSetCursorPos(window, (double)io.MousePos.x * scale.x, (double)io.MousePos.y * scale.y);
 
             // (Optional) Fallback to provide mouse position when focused (ImGui_ImplGlfw_CursorPosCallback already provides this when hovered or captured)
             if (bd->MouseWindow == nullptr)
@@ -696,7 +716,7 @@ static void ImGui_ImplGlfw_UpdateMouseData()
                 double mouse_x, mouse_y;
                 glfwGetCursorPos(window, &mouse_x, &mouse_y);
                 bd->LastValidMousePos = ImVec2((float)mouse_x, (float)mouse_y);
-                io.AddMousePosEvent((float)mouse_x, (float)mouse_y);
+                io.AddMousePosEvent((float)mouse_x / scale.x, (float)mouse_y / scale.y);
             }
         }
     }
@@ -792,9 +812,20 @@ void ImGui_ImplGlfw_NewFrame()
     int display_w, display_h;
     glfwGetWindowSize(bd->Window, &w, &h);
     glfwGetFramebufferSize(bd->Window, &display_w, &display_h);
-    io.DisplaySize = ImVec2((float)w, (float)h);
+    const ImVec2 scale = ImGui_ImplGlfw_GetWindowScale(bd->Window);
+    io.DisplaySize = ImVec2((float)w / scale.x, (float)h / scale.y);
     if (w > 0 && h > 0)
-        io.DisplayFramebufferScale = ImVec2((float)display_w / (float)w, (float)display_h / (float)h);
+        io.DisplayFramebufferScale = ImVec2((float)display_w / io.DisplaySize.x, (float)display_h / io.DisplaySize.y);
+
+    // A monitor/DPI change can occur without a cursor event. Refresh its logical position.
+    // Cursor callbacks remain authoritative for drag events and mouse leave/enter ordering.
+    if (bd->MouseWindow == bd->Window)
+    {
+        double x, y;
+        glfwGetCursorPos(bd->Window, &x, &y);
+        bd->LastValidMousePos = ImVec2((float)x, (float)y);
+        io.AddMousePosEvent((float)x / scale.x, (float)y / scale.y);
+    }
 
     // Setup time step
     // (Accept glfwGetTime() not returning a monotonically increasing value. Seems to happens on disconnecting peripherals and probably on VMs and Emscripten, see #6491, #6189, #6114, #3644)

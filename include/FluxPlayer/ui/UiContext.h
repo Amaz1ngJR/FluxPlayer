@@ -40,8 +40,8 @@ public:
     /**
      * @brief 创建窗口并初始化 ImGui（GLFW + OpenGL3 后端 + 字体 atlas）
      *
-     * @param width  初始窗口宽度（像素）
-     * @param height 初始窗口高度（像素）
+     * @param width  初始窗口宽度（逻辑 UI 单位，Windows 按 DPI 放大）
+     * @param height 初始窗口高度（逻辑 UI 单位）
      * @param title  窗口标题
      * @return true 成功，false 任意一步失败
      */
@@ -74,6 +74,10 @@ public:
     ImFont* monoFont() const { return monoFont_; }
     /// Register in the current atlas before backend initialization (also for direct playback).
     static ImFont* loadMonoFont();
+
+    /// Start a frame in logical UI coordinates; refresh font rasterization on DPI changes.
+    /// Also used by the direct-playback Controller that owns its own ImGui context.
+    static void beginFrame();
 
     /// 标记是否已成功初始化
     bool initialized() const { return initialized_; }

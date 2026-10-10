@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.8.7"
+local version = "0.8.8"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -22,6 +22,11 @@ end
 -- Windows MinGW 环境下，确保所有 target 使用正确的工具链
 if is_plat("windows") then
     set_toolchains("mingw")
+    -- xmake 2.9.x 的编译缓存会生成 __cpp_*.cpp 预处理文件，并在编译结束后
+    -- 立即删除。Windows 上文件被短暂占用时，缓存模块的 os.rm() 会直接让
+    -- 构建失败。关闭该缓存路径，直接编译源文件；对象文件的增量构建仍保留。
+    -- 项目 policy 优先于已有 .xmake 配置中的 ccache=true，旧工作区也能生效。
+    set_policy("build.ccache", false)
 end
 
 -- ========================

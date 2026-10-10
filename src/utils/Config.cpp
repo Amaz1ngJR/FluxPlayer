@@ -165,7 +165,7 @@ bool Config::load() {
                 else if (key == "logLevel") settings_.logLevel = value;
                 else if (key == "tcpLogPort") settings_.tcpLogPort = std::stoi(value);
                 else if (key == "logFileEnabled") settings_.logFileEnabled = (value == "true" || value == "1");
-                else if (key == "logFilePath") { if (!value.empty()) settings_.logFilePath = value; }
+                else if (key == "logFilePath") settings_.logFilePath = value.empty() ? getAppDataDir() + "/fluxplayer.log" : value;
                 else if (key == "windowWidth") settings_.windowWidth = std::stoi(value);
                 else if (key == "windowHeight") settings_.windowHeight = std::stoi(value);
                 else if (key == "uiVisible") settings_.uiVisible = (value == "true" || value == "1");
@@ -254,7 +254,8 @@ bool Config::save() {
     file << "tcpLogPort=" << settings_.tcpLogPort << "\n";
     file << "# logFileEnabled: 是否将日志写入文件 (true / false)\n";
     file << "logFileEnabled=" << (settings_.logFileEnabled ? "true" : "false") << "\n";
-    file << "# logFilePath: 日志文件路径（留空则使用默认路径）\n";
+    file << "# logFilePath: 日志基础路径（留空则使用默认路径），自动添加日期和切片序号\n";
+    file << "# 按天及128 MiB轮转，保留最近30天且最多30个文件\n";
     file << "logFilePath=" << settings_.logFilePath << "\n\n";
     file << "[Window]\n";
     file << "windowWidth=" << settings_.windowWidth << "\n";

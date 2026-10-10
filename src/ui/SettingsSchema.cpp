@@ -315,7 +315,7 @@ bool logFileEnabled_write(const std::string& value) {
     // 文件日志开关切换后必须立刻生效，否则用户以为开了却没写文件
     if (enabled) {
         const std::string path = Config::getInstance().get().logFilePath;
-        Logger::getInstance().enableFileOutput(path.empty() ? "FluxPlayer.log" : path);
+        Logger::getInstance().enableFileOutput(path);
     } else {
         Logger::getInstance().disableFileOutput();
     }
@@ -326,7 +326,7 @@ bool logFileEnabled_write(const std::string& value) {
 std::string logFilePath_read() { return Config::getInstance().get().logFilePath; }
 bool logFilePath_write(const std::string& value) {
     Config::getInstance().getMutable().logFilePath = value;
-    if (Config::getInstance().get().logFileEnabled && !value.empty()) {
+    if (Config::getInstance().get().logFileEnabled) {
         Logger::getInstance().enableFileOutput(value);
     }
     persist();
@@ -422,7 +422,7 @@ const SettingEntry kSettings[] = {
                           logLevel_read, logLevel_write, nullptr,
                           kLogLevelOptions, sizeof(kLogLevelOptions)/sizeof(kLogLevelOptions[0]), 0.40},
     {"logFileEnabled",    "Write log to file",     SettingType::Boolean, "logging", "LOGGING", 0, 0, 0, false, logFileEnabled_read, logFileEnabled_write, nullptr},
-    {"logFilePath",       "Log File Path",         SettingType::Text,    "logging", "LOGGING", 0, 0, 0, false, logFilePath_read, logFilePath_write, "Empty = default app data dir.",
+    {"logFilePath",       "Log File Path",         SettingType::Text,    "logging", "LOGGING", 0, 0, 0, false, logFilePath_read, logFilePath_write, "Base path; date/index added automatically. Empty = app cache dir.",
                           nullptr, 0, 0.62, PathKind::File, "*.log", "Select Log File"},
     {"tcpLogPort",        "TCP Log Port",          SettingType::Integer, "logging", "LOGGING", 9999, 1, 65535, true, tcpLogPort_read, tcpLogPort_write, "Requires restart.",
                           nullptr, 0, 0.62},

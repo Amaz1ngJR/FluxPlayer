@@ -18,6 +18,8 @@
 #include <imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <vector>
 
@@ -73,7 +75,7 @@ bool UiContext::init(int width, int height, const std::string& title) {
 
     // 创建窗口（拥有所有权）
     window_ = std::make_unique<Window>(width, height, title);
-    if (!window_->init()) {
+    if (!window_->init(true)) {
         LOG_ERROR("UiContext: failed to create window");
         window_.reset();
         return false;
@@ -122,6 +124,31 @@ bool UiContext::init(int width, int height, const std::string& title) {
     initialized_ = true;
     LOG_INFO("UiContext initialized: " + std::to_string(width) + "x" + std::to_string(height));
     return true;
+}
+
+void UiContext::beginFrame() {
+    // GLFW supplies logical display/mouse coordinates and the matching framebuffer scale.
+    ImGui_ImplGlfw_NewFrame();
+    ImGuiIO& io = ImGui::GetIO();
+    const float density = (std::max)(1.0f, (std::max)(io.DisplayFramebufferScale.x,
+                                                   io.DisplayFramebufferScale.y));
+    bool rebuild = false;
+    for (auto& config : io.Fonts->ConfigData) {
+        if (std::fabs(config.RasterizerDensity - density) > 0.01f) {
+            config.RasterizerDensity = density;
+            rebuild = true;
+        }
+    }
+    if (rebuild) {
+        // Build in place: Clear() would delete fonts still borrowed by Lua backends/screens.
+        // RasterizerDensity improves pixel resolution WITHOUT changing logical font metrics.
+        ImGui_ImplOpenGL3_DestroyFontsTexture();
+        io.Fonts->Build();
+        ImGui_ImplOpenGL3_CreateFontsTexture();
+        LOG_INFO("UI font rasterization density: " + std::to_string(density));
+    }
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
 }
 
 void UiContext::destroy() {

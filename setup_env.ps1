@@ -3,9 +3,9 @@
 #Invoke-WebRequest `
 #  -Uri "https://github.com/xmake-io/xmake/releases/download/v2.9.9/xmake-bundle-v2.9.9.win64.exe" `
 #  -OutFile "C:\Xmake\xmake.exe"
-# 使用方式：在 PowerShell 中运行 D:\tools\setup_env.ps1
+# 使用方式：在项目目录的 PowerShell 中运行 .\setup_env.ps1
 # 首次使用需执行：Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-# 清掉这个损坏缓存目录: Remove-Item -Recurse -Force "$env:TEMP\.xmake0\2.9.9+dev.a6af349ad"Remove-Item -Recurse -Force "$env:TEMP\.xmake0\2.9.9+dev.a6af349ad"
+# bundle 版依赖 TEMP 下的运行脚本缓存；启动失败时保留原始输出，按提示排查。
 
 
 $mingw_path = "C:\msys64\mingw64\bin"
@@ -21,11 +21,11 @@ if (Test-Path $mingw_path) {
 }
 
 # 添加 xmake 到 PATH
-if (Test-Path $xmake_path) {
+if (Test-Path -LiteralPath (Join-Path $xmake_path 'xmake.exe') -PathType Leaf) {
     $env:PATH = "$xmake_path;" + $env:PATH
     Write-Host "Added xmake to PATH: $xmake_path" -ForegroundColor Green
 } else {
-    Write-Error "xmake path not found: $xmake_path"
+    Write-Error "xmake.exe not found in: $xmake_path"
     exit 1
 }
 
@@ -41,8 +41,25 @@ if ($LASTEXITCODE -ne 0) { Write-Error "g++ not found!"; exit 1 }
 Write-Host $gpp_version[0] -ForegroundColor Green
 
 Write-Host "Checking xmake..." -ForegroundColor Cyan
-$xmake_version = xmake --version 2>&1
-if ($LASTEXITCODE -ne 0) { Write-Error "xmake not found!"; exit 1 }
+$xmake_exe = Join-Path $xmake_path 'xmake.exe'
+# 用明确的可执行文件路径排除 PATH 中同名程序干扰。存在但启动失败与找不到程序
+# 是两类问题，必须先打印原始错误，不能把非零退出码统一解释为 not found。
+$xmake_version = @(& $xmake_exe --version 2>&1)
+$xmake_exit_code = $LASTEXITCODE
+if ($xmake_exit_code -ne 0) {
+    Write-Host "xmake startup failed: $xmake_exe (exit code $xmake_exit_code)" -ForegroundColor Red
+    $xmake_version | ForEach-Object { Write-Host ([string]$_) -ForegroundColor Red }
+    if (($xmake_version -join "`n") -match 'not found main script:') {
+        Write-Host 'The bundled xmake runtime cache is incomplete. Close other xmake processes, rename the affected version directory under $env:TEMP\.xmake0, then retry.' -ForegroundColor Yellow
+        Write-Host 'For a persistent setup, install the full xmake 2.9.x distribution instead of relying on the single-file bundle cache.' -ForegroundColor Yellow
+    }
+    # 不自动删除用户临时目录：具体损坏版本由上面的原始错误给出，避免误清理其他版本。
+    exit 1
+}
+if ($xmake_version.Count -eq 0) {
+    Write-Error "xmake returned no version output: $xmake_exe"
+    exit 1
+}
 Write-Host $xmake_version[0] -ForegroundColor Green
 if ($xmake_version[0] -notmatch "xmake v2\.9\.") {
     Write-Error "FluxPlayer currently requires xmake 2.9.x. xmake 3.x can fail with: cannot import module: private.check.checkers.cuda.devlink"
@@ -57,7 +74,7 @@ Write-Host "All tools are ready!" -ForegroundColor Green
 # 也能覆盖旧版 .xmake 配置中遗留的 build 路径，确保缓存和对象文件进入 build\windows。
 Write-Host "Configuring xmake with MinGW toolchain..." -ForegroundColor Cyan
 New-Item -Path ".xmake\windows\x64" -ItemType Directory -Force | Out-Null
-xmake f -p windows -o build/windows --toolchain=mingw --mingw="C:\msys64\mingw64" --cross="x86_64-w64-mingw32-" -y
+& $xmake_exe f -p windows -o build/windows --toolchain=mingw --mingw="C:\msys64\mingw64" --cross="x86_64-w64-mingw32-" -y
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "xmake configuration succeeded!" -ForegroundColor Green

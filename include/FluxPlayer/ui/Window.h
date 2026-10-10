@@ -45,7 +45,8 @@ public:
      * GLAD 加载 -> 注册回调 -> 启用 VSync。
      * @return 成功返回 true，失败返回 false
      */
-    bool init();
+    /// scaleToMonitor: interpret initial size as DIPs and resize with Windows DPI.
+    bool init(bool scaleToMonitor = false);
 
     /** @brief 销毁窗口并终止 GLFW 库 */
     void destroy();
@@ -108,9 +109,11 @@ public:
      * @brief 根据主显示器尺寸限制窗口大小，并返回最终尺寸
      * @param requestedWidth 请求宽度
      * @param requestedHeight 请求高度
+     * @param logicalSize true 时 Windows 按主显示器 DPI 换算可用尺寸（GUI 初始窗口）
      * @return 适配后的窗口尺寸
      */
-    static std::pair<int, int> clampToPrimaryMonitor(int requestedWidth, int requestedHeight);
+    static std::pair<int, int> clampToPrimaryMonitor(int requestedWidth, int requestedHeight,
+                                                    bool logicalSize = false);
 
 private:
     /** @brief GLFW 键盘事件的静态回调包装，通过用户指针转发到 Window 实例 */

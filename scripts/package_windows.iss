@@ -40,6 +40,10 @@ Source: "..\dist\staging\resources\*";    DestDir: "{app}\resources"; Flags: ign
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件
 Type: files;          Name: "{app}\imgui.ini"
+; WebView2 默认在 EXE 旁创建用户数据目录，其中包含网页登录缓存和浏览器配置。
+; 这些文件由运行时生成，不在安装文件清单中，必须显式登记递归清理。
+; 只删除本程序的固定目录，不能用 {app}\* 清空整个安装目录。
+Type: filesandordirs; Name: "{app}\FluxPlayer.exe.WebView2"
 
 [Icons]
 ; 开始菜单快捷方式（IconFilename 显式指向 exe 内嵌图标，避免依赖默认解析）
@@ -61,8 +65,9 @@ procedure KillRunningProcess();
 var
   ResultCode: Integer;
 begin
-  // 卸载前强制终止正在运行的 FluxPlayer 进程，避免文件被占用导致残留
-  Exec('taskkill.exe', '/F /IM FluxPlayer.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // 同时终止播放器的子进程树，释放 WebView2 数据目录中的文件句柄。
+  // 不按 msedgewebview2.exe 全局结束进程，以免影响其他应用的浏览器控件。
+  Exec('taskkill.exe', '/F /T /IM FluxPlayer.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

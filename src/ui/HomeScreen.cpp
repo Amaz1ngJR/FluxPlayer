@@ -91,9 +91,7 @@ HomeScreenResult HomeScreen::run() {
             errorMessage_.clear();
         }
 
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
+        UiContext::beginFrame();
         renderUI();
 
         if (fileSelected_ || mergeRequested_ || settingsRequested_) {

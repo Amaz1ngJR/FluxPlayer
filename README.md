@@ -20,7 +20,7 @@
 - 🌐 支持网络流播放（RTSP、RTMP、HTTP、HLS）
 - 🖥️ OpenGL YUV→RGB GPU 渲染，自适应 BT.601/BT.709/BT.2020 色彩空间 + TV/PC 量化范围
 - 🔊 跨平台音频输出（macOS AudioToolbox / Windows WinMM / Linux ALSA）
-- 🎛️ Lua 皮肤驱动的控制界面（播放控制、进度条、音量、媒体信息、统计面板、设置面板）
+- 🎛️ Lua 皮肤驱动的控制界面（播放控制、进度条、音量、媒体信息、统计面板、设置面板）；默认 `cyberpunk-neon` 设置面板按窗口尺寸统一缩放字号、布局和点击区域，全屏与退出全屏保持一致
 - 📂 支持文件拖放打开
 - ⏱️ 音视频同步（自适应主时钟：有音频用音频时钟、无音频退回外部时钟），音频时钟回调间隙实时插值消除阶梯跳变
 - 🚀 FFmpeg 多线程解码；软件 YUV420P 帧跳过不必要的 sws_scale 后直接上传 OpenGL
@@ -481,6 +481,19 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 初始化脚本会把 xmake 构建根目录配置为 `build/windows`；主程序和运行时依赖仍按
 `xmake.lua` 的约定输出到共享的 `build/bin`。
 
+如果检测 xmake 时出现 `not found main script: .../.xmake0/.../core/_xmake_main.lua`，
+说明 `xmake.exe` 已找到，但单文件 bundle 的临时运行脚本缓存不完整，并非 PATH 问题。
+关闭其他 xmake 进程后，将报错所指的版本缓存目录重命名，再运行初始化脚本让 bundle
+重新解出缓存。例如报错版本为 `2.9.9+dev.a6af349ad` 时：
+
+```powershell
+Rename-Item -LiteralPath "$env:TEMP\.xmake0\2.9.9+dev.a6af349ad" -NewName "2.9.9+dev.a6af349ad.backup-$(Get-Date -Format yyyyMMddHHmmss)"
+.\setup_env.ps1
+```
+
+若经常复发，检查临时目录清理和安全软件记录，优先使用完整安装版 xmake 2.9.x，
+让运行脚本随安装目录保存。初始化脚本会保留真实启动错误，不再统一报告为“找不到 xmake”。
+
 ### Linux
 
 ```bash
@@ -642,6 +655,9 @@ magick convert source/pic.png -define icon:auto-resize="256,128,64,48,32,16" sou
 ```
 
 脚本流程：图标处理（优先用 `source\pic.ico`，否则用 ImageMagick 从 `source\pic.png` 转换）→ cmake Release 构建 → Inno Setup 打包（含桌面快捷方式选项）。
+
+卸载时会关闭播放器及其子进程，并删除安装目录中运行时生成的 `imgui.ini` 和
+`FluxPlayer.exe.WebView2` 网页登录数据目录。配置、日志和录制文件仍由卸载提示决定是否删除。
 
 如需指定 Inno Setup 路径：
 
@@ -854,7 +870,8 @@ tcpLogPort=9999
 # logFileEnabled: 是否将日志写入文件 (true / false)
 # 默认：false
 logFileEnabled=false
-# logFilePath: 日志文件路径（留空则使用默认路径）
+# logFilePath: 日志基础路径（留空则使用平台默认路径）
+# 实际文件：fluxplayer-YYYY-MM-DD.0.log，按天/128 MiB轮转，保留30天且最多30个文件
 #   macOS:   ~/Library/Caches/FluxPlayer/fluxplayer.log
 #   Windows: %LOCALAPPDATA%\FluxPlayer\fluxplayer.log
 #   Linux:   ~/.cache/FluxPlayer/fluxplayer.log
@@ -983,15 +1000,23 @@ nc <播放器IP> 9999
 logFileEnabled=true
 ```
 
-日志文件默认保存在平台缓存目录下：
+日志文件默认保存在平台缓存目录下（日期为本地日期，序号从 0 开始）：
 
-| 平台 | 日志文件路径 |
+| 平台 | 实际日志文件路径 |
 |------|------------|
-| macOS | `~/Library/Caches/FluxPlayer/fluxplayer.log` |
-| Windows | `%LOCALAPPDATA%\FluxPlayer\fluxplayer.log` |
-| Linux | `~/.cache/FluxPlayer/fluxplayer.log` |
+| macOS | `~/Library/Caches/FluxPlayer/fluxplayer-YYYY-MM-DD.0.log` |
+| Windows | `%LOCALAPPDATA%\FluxPlayer\fluxplayer-YYYY-MM-DD.0.log` |
+| Linux | `~/.cache/FluxPlayer/fluxplayer-YYYY-MM-DD.0.log` |
 
-可通过 `logFilePath` 自定义路径。文件日志为纯文本格式（不含终端颜色码），以追加模式写入。
+`logFilePath` 仍配置基础路径，例如 `/logs/player.log` 会生成 `/logs/player-YYYY-MM-DD.0.log`，无需手工填写日期。父目录自动创建，文件为纯文本（不含终端颜色码）。
+
+- **按天轮转**：跨天后的第一条日志写入新日期文件。
+- **按大小切片**：单文件上限为 128 MiB，写入前超过上限则增加序号，如 `.1.log`、`.2.log`；单条超大日志保持完整，不拆分。
+- **自动清理**：启用文件日志及轮转时，保留今天及前 29 天的日志，同时最多保留 30 个切片；超过限制按日期和序号删除最旧文件。
+- **重启继续追加**：优先使用当天最新的未满切片，不覆盖已有日志。
+- **安全范围**：只清理同目录、同基础文件名及扩展名、日期和序号有效的切片，不删除无关文件、目录或符号链接。旧版 `fluxplayer.log` 原样保留，需自行归档或删除。
+
+这些限制为内置默认策略，当前不新增配置项。
 
 ### Windows 控制台日志
 

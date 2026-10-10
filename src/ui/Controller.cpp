@@ -237,9 +237,7 @@ void Controller::processInput() {
     }
 
     // ImGui 新帧
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
+    UiContext::beginFrame();
 
     // 利用 ImGui 已有的鼠标状态检测活动（零额外开销）
     if (!forceVisible_) {

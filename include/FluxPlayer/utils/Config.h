@@ -13,7 +13,7 @@ public:
         std::string logLevel = "INFO";
         int tcpLogPort = 9999;
         bool logFileEnabled = false;       ///< 是否启用文件日志
-        std::string logFilePath;           ///< 日志文件路径（空则使用默认路径）
+        std::string logFilePath;           ///< 日志基础路径（空则使用默认路径，自动添加日期和切片序号）
         int windowWidth = 960;
         int windowHeight = 600;
         bool uiVisible = true;

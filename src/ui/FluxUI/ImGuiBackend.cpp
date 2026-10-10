@@ -25,6 +25,33 @@ const SkinSnapshot& skinForCommands() {
     return snapshot ? *snapshot : fallback;
 }
 
+// 原生控件必须消费皮肤提交的字号和高度；仅改变 bounds 不会改变 ImGui 的命中尺寸。
+class ScopedWidgetMetrics {
+public:
+    explicit ScopedWidgetMetrics(const DrawCommand& cmd, bool checkbox = false) {
+        const float baseSize = ImGui::GetFontSize();
+        const ImFont* font = ImGui::GetFont();
+        originalScale_ = baseSize / (font->FontSize * font->Scale * ImGui::GetIO().FontGlobalScale);
+        const ImVec2 padding = ImGui::GetStyle().FramePadding;
+        const float ratio = checkbox && cmd.bounds.height > 0.0f
+            ? cmd.bounds.height / ImGui::GetFrameHeight()
+            : (cmd.fontSize > 0.0f ? cmd.fontSize / baseSize : 1.0f);
+        const float fontSize = baseSize * ratio;
+        ImGui::SetWindowFontScale(originalScale_ * ratio);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+            {padding.x * ratio, cmd.bounds.height > 0.0f
+                ? std::max(0.0f, (cmd.bounds.height - fontSize) * 0.5f) : padding.y * ratio});
+        const ImVec2 spacing = ImGui::GetStyle().ItemSpacing;
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {spacing.x * ratio, spacing.y * ratio});
+    }
+    ~ScopedWidgetMetrics() {
+        ImGui::PopStyleVar(2);
+        ImGui::SetWindowFontScale(originalScale_);
+    }
+private:
+    float originalScale_;
+};
+
 ImU32 colorOf(const SkinColor& c) { return static_cast<ImU32>(c.imu32); }
 
 SkinColor mixColor(const SkinColor& a, const SkinColor& b, float t) {
@@ -229,11 +256,9 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
             break;
         }
         case DrawType::Input: {
+            ScopedWidgetMetrics metrics(cmd);
             ImGui::SetCursorScreenPos(min);
             ImGui::SetNextItemWidth(cmd.bounds.width);
-            const float baseFontSize = ImGui::GetFontSize();
-            const float inputFontSize = cmd.fontSize > 0.0f ? cmd.fontSize : baseFontSize;
-            const float frameHeight = cmd.bounds.height > 0.0f ? cmd.bounds.height : inputFontSize + 12.0f;
             const ImU32 frameColor = colorOf(cmd.color2);
             const ImU32 borderColor = colorOf(cmd.borderColor);
             drawList_->AddRectFilled(min, max, frameColor, cmd.radius);
@@ -241,11 +266,6 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
             ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
             ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, cmd.radius);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                {std::max(4.0f, ImGui::GetStyle().FramePadding.x),
-                 std::max(0.0f, (frameHeight - inputFontSize) * 0.5f - 1.0f)});
-            ImGui::PushFont(ImGui::GetFont());
-            ImGui::SetWindowFontScale(inputFontSize / baseFontSize);
             const ImVec2 inputPos = {min.x, min.y};
             ImGui::SetCursorScreenPos(inputPos);
             // 缓冲区由后端持有，但值可能被别处改写（如 Browse 目录选择框直接写 Config，
@@ -279,9 +299,7 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
             }
             // 记录本帧哪个输入框处于编辑态，供下一帧判断是否接受外部新值
             editingInputId_ = ImGui::IsItemActive() ? cmd.id : std::string();
-            ImGui::SetWindowFontScale(1.0f);
-            ImGui::PopFont();
-            ImGui::PopStyleVar(2);
+            ImGui::PopStyleVar();
             ImGui::PopStyleColor(2);
             break;
         }
@@ -318,6 +336,7 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
             break;
         }
         case DrawType::Checkbox: {
+            ScopedWidgetMetrics metrics(cmd, true);
             ImGui::SetCursorScreenPos(min);
             bool checked = cmd.checked;
             if (ImGui::Checkbox((cmd.text + "##flux_checkbox_" + cmd.id).c_str(), &checked)) {
@@ -331,6 +350,7 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
             break;
         }
         case DrawType::Combo: {
+            ScopedWidgetMetrics metrics(cmd);
             ImGui::SetCursorScreenPos(min);
             ImGui::SetNextItemWidth(std::max(1.0f, cmd.bounds.width));
             // 预览字符串取自 options 里与 value 匹配的那一项，找不到就用 value 原文
@@ -373,6 +393,7 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
             break;
         }
         case DrawType::NumberInput: {
+            ScopedWidgetMetrics metrics(cmd);
             ImGui::SetCursorScreenPos(min);
             ImGui::SetNextItemWidth(std::max(1.0f, cmd.bounds.width));
             const ImU32 frameColor = colorOf(cmd.color2);

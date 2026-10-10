@@ -384,7 +384,7 @@ int main(int argc, char* argv[]) {
 
         // ── GUI 模式：共享 UiContext ──
         UiContext ui;
-        auto [w, h] = Window::clampToPrimaryMonitor(cfg.windowWidth, cfg.windowHeight);
+        auto [w, h] = Window::clampToPrimaryMonitor(cfg.windowWidth, cfg.windowHeight, true);
         if (!ui.init(w, h, "FluxPlayer")) {
             LOG_ERROR("Failed to initialize shared UiContext");
             rc = -1;
@@ -425,9 +425,7 @@ int main(int argc, char* argv[]) {
                 while (!ui.shouldClose() && settingsCtrl.isSettingsDialogOpen()) {
                     ui.window()->pollEvents();
 
-                    ImGui_ImplOpenGL3_NewFrame();
-                    ImGui_ImplGlfw_NewFrame();
-                    ImGui::NewFrame();
+                    UiContext::beginFrame();
 
                     settingsCtrl.render();
 

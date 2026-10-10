@@ -61,9 +61,7 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
 
     glfwPollEvents();
 
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
+    UiContext::beginFrame();
 
     auto snap = SkinManager::instance().current();
     if (!snap) return;

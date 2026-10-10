@@ -17,7 +17,10 @@ tcpLogPort=9999
 # logFileEnabled: 是否将日志写入文件 (true / false)
 # 默认：false
 logFileEnabled=false
-# logFilePath: 日志文件路径（留空则使用默认路径）
+# logFilePath: 日志基础路径（留空则使用以下平台默认路径）
+# 实际文件自动添加本地日期和切片序号：fluxplayer-YYYY-MM-DD.0.log
+# 跨天或单文件达到128 MiB时轮转，保留最近30天且最多30个文件，自动删除最旧切片
+# 旧版无日期文件不会自动删除；自定义路径的父目录自动创建
 #   macOS:   ~/Library/Caches/FluxPlayer/fluxplayer.log
 #   Windows: %LOCALAPPDATA%\FluxPlayer\fluxplayer.log
 #   Linux:   ~/.cache/FluxPlayer/fluxplayer.log

@@ -1174,11 +1174,18 @@ skin.surfaces.settings.render = function()
     local n=function(v) return tonumber(v) or 0 end
     local cfg=skin.surfaces.settings
 
-    -- 面板几何：按设计稿比例缩放并居中（与 main 的 dialogW/H 计算一致）
-    local panelW=math.min(cfg.maxWidth,width*cfg.widthRatio)
-    local panelH=math.min(cfg.maxHeight,height*cfg.heightRatio)
-    local px=(width-panelW)/2
-    local py=(height-panelH)/2
+    -- 与主页共用 1440×900 设计基准；布局和滚动状态保留设计单位，只在提交控件时缩放。
+    local scale=math.min(width/designW,height/designH)
+    if scale<=0 then return ui.container { layout="absolute",width=width,height=height } end
+    local S=function(v) return v*scale end
+    local layoutW,layoutH=width/scale,height/scale
+    -- 面板上限是设计尺寸，不再限制全屏后的实际尺寸；宽高比不同的窗口仍保持居中。
+    local panelW=math.min(cfg.maxWidth,layoutW*cfg.widthRatio)
+    local panelH=math.min(cfg.maxHeight,layoutH*cfg.heightRatio)
+    local px=(layoutW-panelW)/2
+    local py=(layoutH-panelH)/2
+    -- 滚轮命中在设计坐标中判断，不修改 ui.getInput() 返回的原始输入。
+    local inputX,inputY=input.x/scale,input.y/scale
 
     -- 四页导航（与 main 的 SettingsPage 枚举一一对应）
     -- 五页。旧版把播放/字幕/网络都塞进 GENERAL，内容高 772px 超出视口 444px，
@@ -1200,11 +1207,19 @@ skin.surfaces.settings.render = function()
         appearance="Change the shell without interrupting playback.",
     }
 
-    local c=canvas(width,height,function(v) return v end,function(v) return v end,
-        function(v) return v end)
+    local c=canvas(width,height,S,S,S)
+    -- 原生输入控件的字号、圆角也在同一边界缩放，避免只放大外框。
+    local add=c.add
+    function c.add(kind,x,y,w,h,props)
+        if props and (kind=="input" or kind=="numberInput" or kind=="combo") then
+            if props.size then props.size=S(props.size) end
+            if props.rounding then props.rounding=S(props.rounding) end
+        end
+        add(kind,x,y,w,h,props)
+    end
 
-    -- 遮罩：只暗化视频，不压在面板上
-    c.rect(0,0,width,height,"bgVoid",cfg.overlayAlpha)
+    -- 遮罩覆盖实际窗口，传入的宽高需先换回设计单位。
+    c.rect(0,0,layoutW,layoutH,"bgVoid",cfg.overlayAlpha)
 
     -- 面板本体
     c.rect(px,py,panelW,panelH,"bgPanel",cfg.panelAlpha,false,6)
@@ -1294,8 +1309,8 @@ skin.surfaces.settings.render = function()
     local offset=math.min(n(state.get(scrollKey)),maxScroll)
 
     if input.wheel and input.wheel~=0 then
-        local inside=(input.x>=contentX and input.x<=contentX+contentW and
-                      input.y>=listY and input.y<=listY+listH)
+        local inside=(inputX>=contentX and inputX<=contentX+contentW and
+                      inputY>=listY and inputY<=listY+listH)
         if inside then
             offset=math.max(0,math.min(maxScroll,offset-input.wheel*30))
             state.set(scrollKey,tostring(offset))

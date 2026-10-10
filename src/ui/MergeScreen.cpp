@@ -197,9 +197,7 @@ MergeScreenResult MergeScreen::run() {
         pollMerger();   // 驱动 phase 切换
         pollPreview();  // 取预览结果 + 上传纹理（UI 线程）
 
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
+        UiContext::beginFrame();
 
         renderLuaUI();
 

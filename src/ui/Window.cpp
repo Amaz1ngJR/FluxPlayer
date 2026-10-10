@@ -35,7 +35,8 @@ Window::~Window() {
     destroy();
 }
 
-std::pair<int, int> Window::clampToPrimaryMonitor(int requestedWidth, int requestedHeight) {
+std::pair<int, int> Window::clampToPrimaryMonitor(int requestedWidth, int requestedHeight,
+                                                bool logicalSize) {
     if (!glfwInit()) {
         return {requestedWidth, requestedHeight};
     }
@@ -50,8 +51,16 @@ std::pair<int, int> Window::clampToPrimaryMonitor(int requestedWidth, int reques
         return {requestedWidth, requestedHeight};
     }
 
-    const int maxWidth = std::max(640, static_cast<int>(mode->width * 0.8));
-    const int maxHeight = std::max(480, static_cast<int>(mode->height * 0.8));
+    float xscale = 1.0f, yscale = 1.0f;
+#ifdef _WIN32
+    if (logicalSize) glfwGetMonitorContentScale(monitor, &xscale, &yscale);
+    if (!(xscale > 0.0f)) xscale = 1.0f;
+    if (!(yscale > 0.0f)) yscale = 1.0f;
+#else
+    (void)logicalSize;
+#endif
+    const int maxWidth = std::max(640, static_cast<int>(mode->width * 0.8 / xscale));
+    const int maxHeight = std::max(480, static_cast<int>(mode->height * 0.8 / yscale));
     const int width = std::clamp(requestedWidth, 640, maxWidth);
     const int height = std::clamp(requestedHeight, 480, maxHeight);
     return {width, height};
@@ -68,7 +77,7 @@ std::pair<int, int> Window::clampToPrimaryMonitor(int requestedWidth, int reques
  * 4. 初始化 GLAD（加载 OpenGL 函数指针）
  * 5. 设置事件回调
  */
-bool Window::init() {
+bool Window::init(bool scaleToMonitor) {
     LOG_INFO("Initializing window system...");
 
     // 步骤1：初始化 GLFW 库
@@ -83,6 +92,11 @@ bool Window::init() {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef _WIN32
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, scaleToMonitor ? GLFW_TRUE : GLFW_FALSE);
+#else
+    (void)scaleToMonitor;  // macOS window coordinates already use points.
+#endif
 
 #ifdef __APPLE__
     // macOS 需要设置 FORWARD_COMPAT 标志
@@ -100,6 +114,10 @@ bool Window::init() {
         return false;
     }
     LOG_DEBUG("GLFW window created successfully");
+
+    // getWidth/getHeight and resize callbacks are framebuffer pixels for video rendering,
+    // not logical UI units. GLFW may have enlarged the initial client area for DPI/Retina.
+    glfwGetFramebufferSize(m_window, &m_width, &m_height);
 
     // 将窗口的 OpenGL 上下文设置为当前线程的上下文
     glfwMakeContextCurrent(m_window);
