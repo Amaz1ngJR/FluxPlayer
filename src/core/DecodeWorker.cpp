@@ -105,13 +105,25 @@ void DecodeWorker::runVideo() {
 
         // 取尽解码器当前可输出的所有帧
         while (videoDecoder_->receiveFrame(rawFrame)) {
+            // stop/flush 后不再归一化或入队，避免停止时才出现“首帧/预缓冲完成”。
+            if (shouldQuit_.load() || videoPktQueue_->serial() != serial) {
+                rawFrame.unreference();
+                break;
+            }
+            // 在归一化与显示格式准备前丢弃旧输出；压缩包已完整送入解码器，保留 GOP 参考关系。
+            sourcePTS_ = rawFrame.getPTS();
+            if (dropLiveFrame(sourcePTS_)) {
+                rawFrame.unreference();
+                continue;
+            }
             if (!normalizeVideoPTS(rawFrame)) {
                 continue;  // 无效帧已在 normalize 内丢弃
             }
             if (!enqueueVideoFrame(rawFrame, serial)) {
-                // serial 变化或 abort：放弃当前帧，回到循环顶部处理 flush
+                // 停止或 serial 改变时退出取帧循环；直播丢弃则继续取尽输出，避免下一包因 EAGAIN 未被接收。
                 rawFrame.unreference();
-                break;
+                if (shouldQuit_.load() || videoPktQueue_->serial() != serial) break;
+                continue;
             }
             checkPrebufferComplete();
         }
@@ -176,10 +188,20 @@ void DecodeWorker::runAudio() {
         av_packet_unref(packet);
 
         while (audioDecoder_->receiveFrame(rawFrame)) {
+            if (shouldQuit_.load() || audioPktQueue_->serial() != serial) {
+                rawFrame.unreference();
+                break;
+            }
             AVFrame* avFrame = rawFrame.getAVFrame();
             if (!avFrame || avFrame->nb_samples <= 0) {
                 LOG_WARN("Received invalid audio frame, nb_samples: " +
                          std::to_string(avFrame ? avFrame->nb_samples : 0));
+                rawFrame.unreference();
+                continue;
+            }
+            // 音频按相同预算跳过旧解码输出，避免无意义的重采样、格式转换和入队。
+            sourcePTS_ = rawFrame.getPTS();
+            if (dropLiveFrame(sourcePTS_)) {
                 rawFrame.unreference();
                 continue;
             }
@@ -189,7 +211,8 @@ void DecodeWorker::runAudio() {
             bool audioEnqueued = false;
             if (!enqueueAudioFrame(rawFrame, serial, &audioEnqueued)) {
                 rawFrame.unreference();
-                break;
+                if (shouldQuit_.load() || audioPktQueue_->serial() != serial) break;
+                continue;
             }
             // 只有目标帧完成格式转换并真正入队后才能恢复设备；目标前丢弃帧返回 true
             // 但 enqueued=false，不能过早解除门控重现 underrun/AClock 回跳。
@@ -217,18 +240,48 @@ void DecodeWorker::runAudio() {
 
 // 辅助方法（从 Player 迁移）
 
+bool DecodeWorker::dropLiveFrame(double sourcePTS) {
+    // 起播预缓冲先建立真实时间轴；否则有效首帧被追赶丢弃，无 PTS 帧又无法估算，
+    // 两路 normalizer 与视频预缓冲会一直等不到启动条件。点播不启用追赶。
+    if (!player_->isLiveStream_ || player_->prebuffering_.load()) return false;
+    // 缺失时间戳不代表追赶结束，也不能用它输出“恢复”汇总日志。
+    if (!std::isfinite(sourcePTS) || sourcePTS <= -1e15 || sourcePTS >= 1e15) return false;
+    auto& tracker = kind_ == StreamKind::Video
+        ? player_->liveVideoLatency_ : player_->liveAudioLatency_;
+    if (tracker.shouldDrop(sourcePTS)) {
+        ++liveDropped_;
+        if (kind_ == StreamKind::Video) player_->droppedFrames_.fetch_add(1);
+        return true;
+    }
+    if (liveDropped_ > 0) {
+        LOG_INFO("Live catch-up: " + std::string(kind_ == StreamKind::Video ? "video" : "audio") +
+                 " skipped " + std::to_string(liveDropped_) +
+                 " decoded frames, source PTS=" + std::to_string(sourcePTS));
+        liveDropped_ = 0;
+    }
+    return false;
+}
+
 void DecodeWorker::checkPrebufferComplete() {
     auto& prebuffering_ = player_->prebuffering_;
     if (!prebuffering_.load()) {
         return;
     }
 
-    size_t buffered = player_->queueManager_->videoFrameQueue() ? player_->queueManager_->videoFrameQueue()->size() : player_->queueManager_->audioFrameQueue()->size();
+    // 有视频时仅视频生产者完成预缓冲；纯音频时由音频生产者完成。
+    // 避免两线程重复重置时钟，且必须在解除渲染/音频门控前发布新时钟基准。
+    if (player_->shouldQuit_.load() ||
+        (player_->hasVideoStream_ && kind_ != StreamKind::Video)) {
+        return;
+    }
+    auto& queue = player_->hasVideoStream_
+        ? player_->queueManager_->videoFrameQueue()
+        : player_->queueManager_->audioFrameQueue();
+    const size_t buffered = queue ? queue->size() : 0;
     const size_t threshold = player_->isLiveStream_ ? 2 : 5;
     if (buffered >= threshold) {
-        prebuffering_.store(false);
-        // external clock 在 prebuffering 期间一直在跑，重置让视频从 0 开始同步
         if (player_->clockController_) player_->clockController_->avSync()->resetExternalClock();
+        prebuffering_.store(false, std::memory_order_release);
         LOG_INFO("Prebuffering complete (" + std::to_string(buffered) + " frames buffered)");
     }
 }
@@ -277,12 +330,16 @@ Frame* DecodeWorker::waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQu
     // 处理 serial 变化（flush），形成死锁。轮询 tryPeekWritable，并在以下情况放弃：
     //   - shouldQuit_：stop/quit
     //   - pktQueue serial 变化：发生了 seek/flush，应回到循环顶部重新对齐
+    //   - 当前直播帧已落后：放弃输出，继续解码后续压缩包以追赶最新媒体进度
     constexpr int kPollMs = 5;
     for (;;) {
-        Frame* w = frameQueue->tryPeekWritable();
-        if (w) return w;
+        // 等待期间 demux 仍可能推进最新进度，每次轮询都复查当前帧是否已过时。
+        // 使用保存的源 PTS，不能拿归一化后的时间戳与源时间域比较。
+        if (dropLiveFrame(sourcePTS_)) return nullptr;
         if (player_->shouldQuit_.load()) return nullptr;
         if (pktQueue && pktQueue->serial() != serial) return nullptr;
+        Frame* w = frameQueue->tryPeekWritable();
+        if (w) return w;
         std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
     }
 }
@@ -368,8 +425,8 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
     }
 
     // 不需要丢弃的帧：获取可写槽 -> 转换 -> 提交
-    // 先将 rawFrame 数据移到队列槽位，立即释放解码器内部 buffer 引用
-    // 避免等待期间解码器 buffer pool 无法回收导致内存膨胀
+    // 有空位时直接准备显示帧；队列满时暂存 AVFrame 引用并可中断地等待。
+    // move_ref 只转移引用所有权，不会释放底层 buffer/surface；放弃当前帧时必须释放暂存引用。
     Frame* writable = videoQueue_->tryPeekWritable();
     if (writable) {
         // 快速路径：队列有空位，直接写入
@@ -388,16 +445,16 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         }
         rawFrame.unreference();
     } else {
-        // 慢速路径：队列满，先移走 rawFrame 数据释放解码器 buffer
+        // 慢速路径：队列满，将当前帧引用移到临时对象，保留显示准备所需的数据。
         AVFrame* tempFrame = av_frame_alloc();
         av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
-        // rawFrame 现在为空，解码器 buffer 引用已转移到 tempFrame
+        // rawFrame 现在为空，底层 buffer 引用由 tempFrame 持有。
 
-        // 可中断等待：serial 变化（seek/flush）或 abort 时放弃当前帧
+        // 可中断等待：直播帧过时、serial 变化（seek/flush）或停止时放弃当前帧。
         writable = waitWritableSlot(videoQueue_.get(), videoPktQueue_.get(), serial);
         if (!writable) {
             av_frame_free(&tempFrame);
-            return false;  // 放弃当前帧，回到循环顶部处理 flush / 退出
+            return false;  // 调用方区分直播丢弃与停止/flush，决定继续取帧或退出。
         }
         if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
             writable->setPTS(framePTS);
@@ -489,7 +546,7 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued
     // 音频队列由平台音频线程实时消费，阻塞时间极短；同样先尝试非阻塞
     Frame* audioWritable = audioQueue_->tryPeekWritable();
     if (!audioWritable) {
-        // 队列满：先释放 rawFrame，再可中断等待
+        // 队列满：暂存当前帧引用，等待中若直播帧已过时则释放引用，不再进行音频转换。
         double savedPTS = rawFrame.getPTS();
         const bool savedEstimated = rawFrame.isPTSEstimated();
         AVFrame* tempAudio = av_frame_alloc();

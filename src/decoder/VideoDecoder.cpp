@@ -126,6 +126,10 @@ bool VideoDecoder::init(AVCodecParameters* codecParams, AVRational timeBase) {
         return false;
     }
 
+    // 声明输入包时间基，使 FFmpeg 的 best_effort_timestamp 与流时间基一致，
+    // 下游才能正确换算成秒，并与 demux 发布的源进度比较。
+    m_codecCtx->pkt_timebase = timeBase;
+
     // 步骤3.5：尝试硬件加速（失败不影响后续软件解码）
     bool hwAccelConfigured = false;
     if (Config::getInstance().get().hwaccel) {
@@ -287,10 +291,15 @@ bool VideoDecoder::receiveFrame(Frame& frame) {
     // 计算 PTS（Presentation Time Stamp，显示时间戳）
     // best_effort_timestamp 内部按 pts → dts → 推断的优先级取值，能减少 NOPTS 概率
     AVFrame* avFrame = frame.getAVFrame();
+    // Frame 对象循环复用，每帧重新标记，不能继承上一帧缺失 PTS 时的估算状态。
+    frame.setPTSEstimated(false);
     if (avFrame->best_effort_timestamp != AV_NOPTS_VALUE) {
         const double pts = avFrame->best_effort_timestamp * av_q2d(m_timeBase);
         frame.setPTS(pts);
         LOG_DEBUG("Frame received, PTS: " + std::to_string(pts) + "s");
+    } else if (avFrame->pts != AV_NOPTS_VALUE) {
+        // 有些解码路径只保留帧 PTS；它仍是显示时间，优先于用于解码顺序的 DTS。
+        frame.setPTS(avFrame->pts * av_q2d(m_timeBase));
     } else if (avFrame->pkt_dts != AV_NOPTS_VALUE) {
         // 部分 RTSP/RTMP 解码器不回填 best_effort_timestamp，但保留输入 packet DTS。
         const double dts = avFrame->pkt_dts * av_q2d(m_timeBase);

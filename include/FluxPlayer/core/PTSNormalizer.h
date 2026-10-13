@@ -9,7 +9,8 @@
  * 归一化规则
  * - 首帧分别记录；两路均到达后取较晚首帧作为“统一可播放基准”，丢弃更早单路数据
  * - 无效 PTS 按稳定帧间隔延续
- * - 原始 PTS 域发生前跳/倒退时更新持久 correction，将其平滑映射到连续时间轴
+ * - 原始 PTS 前跳保持真实间隔（允许直播追赶）；倒退时修正时间戳域
+ * - 不以解码音频进度或设备欠载静音改写视频时间戳
  */
 
 #pragma once
@@ -77,14 +78,6 @@ public:
      */
     Result normalizeAudio(double rawPTS, double frameInterval);
 
-    /**
-     * @brief 直播音频欠载时推进内部连续时间轴。
-     *
-     * 音频设备输出静音期间 Player 仍按真实 buffer 时长推进 AClock；Normalizer 必须同步
-     * 推进 lastValidAudioPTS，否则音频恢复时会被判成数秒前跳，再次触发追赶/卡顿。
-     */
-    void advanceAudioTimeline(double durationSeconds);
-
 private:
     /** @brief PTS 是否有效（排除 AV_NOPTS_VALUE 及异常大值） */
     static bool isValidPTS(double pts);
@@ -105,17 +98,7 @@ private:
     double videoCorrection_ = 0.0;    ///< 视频原始 PTS 域到连续时间轴的持久修正
     double audioCorrection_ = 0.0;    ///< 音频原始 PTS 域到连续时间轴的持久修正
 
-    // ==================== 帧间隔自愈 ====================
-    // 容器（FLV/RTMP 等）不声明帧率时，调用方传入的 frameInterval 来自 avg_frame_rate
-    // 估算，可能差整数倍。错误的帧间隔会让正常抖动反复越过跳变阈值，从而每帧叠加一次
-    // videoCorrection_、每帧改写时间戳，表现为画面持续抖动。因此在连续触发后改用实测
-    // 原始间隔，避免在错误假设上持续修正。
-    bool hasLastRawVideoPTS_ = false;
-    double lastRawVideoPTS_ = 0.0;      ///< 上一有效帧的**原始** PTS（未加 base/correction）
-    double lastRawVideoDelta_ = 0.0;    ///< 最近一次实测原始帧间隔
-    int intervalMismatchCount_ = 0;     ///< 实测间隔与声明间隔不一致的连续次数
     int consecutiveVideoJumps_ = 0;     ///< 连续跳变计数，稳定一帧即清零
-    double effectiveVideoInterval_ = 0.0; ///< 自愈后的实测帧间隔；0 表示尚未建立
 };
 
 } // namespace FluxPlayer

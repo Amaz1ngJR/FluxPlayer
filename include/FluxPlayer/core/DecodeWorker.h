@@ -52,6 +52,11 @@ private:
     bool enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued);
     Frame* waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial);
 
+    // 当前帧归一化前的源 PTS（秒），仅本解码线程访问；等待队列空位时仍以它判断积压。
+    double sourcePTS_ = 0.0;
+    int liveDropped_ = 0;  // 本轮追赶跳过的解码输出数，用于恢复时汇总日志。
+    bool dropLiveFrame(double sourcePTS);
+
     Player* player_;
     StreamKind kind_;
     std::unique_ptr<std::thread> thread_;

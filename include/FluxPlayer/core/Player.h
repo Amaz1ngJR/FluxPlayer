@@ -9,6 +9,7 @@
 
 #include "FluxPlayer/utils/StreamExtractor.h"  // ExtractedStream（DASH 流 seek 重启复用）
 #include "FluxPlayer/core/PlayerState.h"        // PlayerState 枚举
+#include "FluxPlayer/core/LiveLatencyTracker.h"
 
 // 前向声明 FFmpeg 类型，避免头文件引入平台 SDK
 struct AVFrame;
@@ -729,6 +730,11 @@ private:
 
     /** @brief seek 失败或取消时结束 UI 对齐保持，回到正常主时钟。 */
     void cancelSeekAlignment();
+
+    // 源时间域中的音视频最新进度，在启动工作线程前重置。
+    // 不可与归一化后的 AClock/VClock 比较，两者时间原点不同。
+    LiveLatencyTracker liveVideoLatency_;
+    LiveLatencyTracker liveAudioLatency_;
 
     // 统计信息
     std::atomic<int> droppedFrames_;

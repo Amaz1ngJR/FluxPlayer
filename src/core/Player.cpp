@@ -596,6 +596,8 @@ bool Player::play() {
     audioUnderrunCount_.store(0);  // 重置欠载计数器
     audioPausedForSeek_.store(false);
     allowAudioClockRebase_.store(false);
+    audioCatchupTargetPTS_.store(-1.0);  // 新播放不能继续追逐上一次的音频目标。
+    pendingAudioOffset_.store(0);
     cancelSeekAlignment();
 
     // 重置码率统计
@@ -609,6 +611,9 @@ bool Player::play() {
         ptsNormalizer_->setHasVideoStream(demuxer_->getVideoStreamIndex() >= 0);
         ptsNormalizer_->setHasAudioStream(demuxer_->getAudioStreamIndex() >= 0);
         ptsNormalizer_->reset();
+        // 在工作线程启动前重置源进度与追赶状态，避免重播/重新打开后沿用旧流水位。
+        liveVideoLatency_.reset();
+        liveAudioLatency_.reset();
         lastEnqueuedVideoPTS_.store(0.0);
         sawFirstKeyframe_.store(false);
         // 启动预缓冲：等待队列填充到安全水位再开始渲染
@@ -854,19 +859,28 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 double masterClock = clockController_->avSync()->getMasterClock();
                 double rate = playbackRate_.load();
 
-                // 直播以音频主时钟调度，网络恢复后可能积压多帧。若每个 VSync 只消费一帧，
-                // 画面会长时间落后；若全部都渲染则看起来快进。丢弃明显落后帧，只渲染
-                // 接近当前主时钟的最后一帧，恢复实时但不展示快进过程。
+                // 直播追赶只跳过中间画面：先增持本轮最新候选的独立 AVFrame 引用再消费，
+                // 即使浅队列被追空或达到工作量上限，也提交这张新画面而不是复用旧纹理。
                 if (isLiveStream_ && nextPTS < masterClock - 0.25 &&
                     droppedThisTick < kMaxLiveCatchupDropsPerTick) {
-                    // 丢弃积压帧后同步推进 VClock；否则状态日志会永久停在旧值，且后续
-                    // 调度无法区分“正在追赶”和“视频时间轴已停滞”。
-                    clockController_->avSync()->updateVideoClock(nextPTS);
-                    droppedFrames_.fetch_add(1);
+                    if (frame) {
+                        droppedFrames_.fetch_add(1);
+                    }
+                    selectedFrame.refFrom(leasedFrame);
+                    frame = &selectedFrame;
                     queueManager_->videoFrameQueue()->consume();
                     ++droppedThisTick;
                     if (droppedThisTick >= kMaxLiveCatchupDropsPerTick) break;
                     continue;
+                }
+
+                // 纯视频直播使用外部时钟：跳过旧输出后，将时钟重定位到新内容，
+                // 避免仍等满已丢弃的数秒。存在音频输出时保持音频主时钟，不在这里强行改写。
+                // 此处调整的是播放时钟，不修改帧 PTS。
+                if (isLiveStream_ && !audioOutput_ &&
+                    nextPTS > masterClock + LiveLatencyTracker::kMaxBacklog) {
+                    clockController_->avSync()->seekTo(nextPTS);
+                    masterClock = nextPTS;
                 }
 
                 // 下一帧还没到显示时间：保持当前画面，等待主时钟追上。
@@ -919,6 +933,9 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                     continue;
                 }
 
+                if (frame) {
+                    droppedFrames_.fetch_add(1);
+                }
                 selectedFrame.refFrom(leasedFrame);
                 frame = &selectedFrame;
                 queueManager_->videoFrameQueue()->consume();
@@ -1695,9 +1712,10 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         return 0;
     }
 
-    // AudioQueue/WASAPI 在 pause 刚生效时可能仍有一个已排队回调。DASH seek 冷启动期
-    // 直接交付静音且不读取 frame queue、不推进 AClock，也不计入 underrun。
-    if (audioPausedForSeek_.load(std::memory_order_acquire)) {
+    // seek 门控或直播起播预缓冲期间只交付静音：不消费队列、不推进 AClock，
+    // 避免首帧尚未建立时主时钟先跑走，起播后把真实音视频误判为过期。
+    if (audioPausedForSeek_.load(std::memory_order_acquire) ||
+        (isLiveStream_ && prebuffering_.load())) {
         std::memset(buffer, 0, bufferSize);
         return bufferSize;
     }
@@ -1883,14 +1901,13 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
 
         // 直播音频短暂断粮时，设备仍持续播放静音 buffer。若 AClock 完全停住，视频会
         // 堵在浅队列里，音频恢复并一次跳到新 PTS 后视频才集中追赶，表现为“卡住后快进”。
-        // 仅直播且尚未 EOF 时按设备实际输出时长连续推进；新音频到来后 normalizer 已将
-        // 时间戳连续化，不会产生大幅回跳。
+        // 仅直播且尚未 EOF 时按设备实际输出时长推进播放时钟。
+        // 这不是收到的媒体进度，不能回写 PTS 归一化器或源媒体最新进度。
         // 仅在整份设备 buffer 都没有真实音频时合成推进；部分填充已经用真实样本 PTS
         // 计算 consumedMediaDuration，再按整 buffer 推进会重复计时，让 AClock 持续快于视频。
         if (isLiveStream_ && inputFilled == 0 && !audioDrainedEof_.load()) {
             currentAudioPTS = previousAudioPTS + outputDuration * rate;
             shouldUpdateClock = true;
-            if (ptsNormalizer_) ptsNormalizer_->advanceAudioTimeline(outputDuration * rate);
         }
 
         // 4x/8x/16x 下音频队列短暂打空是常态。此时设备仍按墙钟输出

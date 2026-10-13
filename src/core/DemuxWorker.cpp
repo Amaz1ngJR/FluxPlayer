@@ -392,15 +392,30 @@ void DemuxWorker::run() {
                 }
             }
 
-            // 起播阶段以首个视频 IDR 为共同边界：IDR 之前的视频无法解码，对应的旧音频
-            // 也不应入队。日志中 audio=-10.634、video=-7.432 的 3.2s 差值正来自这段旧音频。
-            // 丢弃后，音视频各自以 IDR 附近首帧归零，避免起播后追赶或突然快进。
-            if (isLiveStream_ && !sawFirstKeyframe_.load() && packet->stream_index != videoIdx) {
+            // 起播阶段以首个视频关键帧为门控边界，之前的单路音频不入队。
+            // 纯音频直播没有视频关键帧，必须跳过该门控，否则音频包会被永久丢弃。
+            if (isLiveStream_ && videoIdx >= 0 && !sawFirstKeyframe_.load() &&
+                packet->stream_index != videoIdx) {
                 av_packet_unref(packet);
                 continue;
             }
 
             player_->totalBytesRead_.fetch_add(packet->size);
+
+            // 在包所有权转移到队列前发布最新源进度，并按该轨道 time_base 换算成秒。
+            // 优先 DTS，避免 B 帧 PTS 重排导致进度反复倒退；无 DTS 时回退到 PTS。
+            // 解码端以源帧 PTS 比较，因此该差值是追赶参考，不是精确的播放端或端到端延迟。
+            if (isLiveStream_) {
+                const int64_t ts = packet->dts != AV_NOPTS_VALUE ? packet->dts : packet->pts;
+                AVStream* stream = packet->stream_index == videoIdx ? demuxer_->getVideoStream()
+                                 : packet->stream_index == audioIdx ? demuxer_->getAudioStream()
+                                 : nullptr;
+                if (stream && ts != AV_NOPTS_VALUE) {
+                    auto& tracker = packet->stream_index == videoIdx
+                        ? player_->liveVideoLatency_ : player_->liveAudioLatency_;
+                    tracker.observe(ts * av_q2d(stream->time_base));
+                }
+            }
 
             if (videoPktQueue_ && packet->stream_index == videoIdx) {
                 // 实时流起播追赶：丢弃首个关键帧之前的视频包。服务端 PLAY 后常推 GOP
@@ -415,13 +430,8 @@ void DemuxWorker::run() {
                         continue;
                     }
                 }
-                // 实时流 prebuffer 期间若再次收到 IDR，重置到新 IDR 起播：flush 视频 packet
-                // 队列（serial++），video decode 线程据此 flush 解码器与帧队列从新 IDR 重启。
-                else if (isLiveStream_ && prebuffering_.load() &&
-                         (packet->flags & AV_PKT_FLAG_KEY)) {
-                    videoPktQueue_->flush();
-                    LOG_INFO("Live stream: newer keyframe arrived during prebuffer, restart from latest IDR");
-                }
+                // 首关键帧之后保留所有压缩包，由 decode 侧跳过旧输出；不能仅因预缓冲
+                // 又收到关键帧就单独刷新视频队列，否则音视频会从不同起点恢复。
                 // 录像：写入视频 packet（无锁，录制器归 demux 线程单线程访问）
                 if (recordingService_) {
                     recordingService_->writeVideoPacket(packet, packet->stream_index);
