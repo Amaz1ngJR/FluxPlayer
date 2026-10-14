@@ -1,0 +1,79 @@
+FluxPlayer legacy HEVC FLV read compatibility for Windows FFmpeg
+Base: 5a1f107b4c78318f318897900acad1b6c6aa3f9d (n7.1.3-43-g5a1f107b4c)
+
+Add private codec-id 12 without changing upstream Enhanced FLV hvc1 handling.
+Legacy tags contain a packet-type byte and signed 24-bit CTS for sequence,
+coded and end packets. Skip end/unknown packets instead of decoding them.
+Upstream files retain their LGPL-2.1-or-later license.
+
+--- a/libavformat/flv.h
++++ b/libavformat/flv.h
+@@ -116,6 +116,7 @@
+     FLV_CODECID_H264    = 7,
+     FLV_CODECID_REALH263= 8,
+     FLV_CODECID_MPEG4   = 9,
++    FLV_CODECID_HEVC    = 12,
+ };
+ 
+ enum {
+--- a/libavformat/flvdec.c
++++ b/libavformat/flvdec.c
+@@ -334,6 +334,7 @@
+         return 1;
+ 
+     switch (flv_codecid) {
++    case FLV_CODECID_HEVC:
+     case MKBETAG('h', 'v', 'c', '1'):
+         return vpar->codec_id == AV_CODEC_ID_HEVC;
+     case MKBETAG('a', 'v', '0', '1'):
+@@ -366,6 +367,7 @@
+     enum AVCodecID old_codec_id = vstream->codecpar->codec_id;
+ 
+     switch (flv_codecid) {
++    case FLV_CODECID_HEVC:
+     case MKBETAG('h', 'v', 'c', '1'):
+         par->codec_id = AV_CODEC_ID_HEVC;
+         vstreami->need_parsing = AVSTREAM_PARSE_HEADERS;
+@@ -1447,6 +1449,11 @@
+         int type = 0;
+         if (enhanced_flv && stream_type == FLV_STREAM_TYPE_VIDEO) {
+             type = flags & 0x0F;
+         } else {
++            if (st->codecpar->codec_id == AV_CODEC_ID_HEVC && size < 4) {
++                /* Legacy packet type + CTS must fit inside this tag. */
++                ret = AVERROR_INVALIDDATA;
++                goto leave;
++            }
+             type = avio_r8(s->pb);
+             size--;
+@@ -1464,8 +1471,15 @@
+         }
+ 
+         if (st->codecpar->codec_id == AV_CODEC_ID_H264 || st->codecpar->codec_id == AV_CODEC_ID_MPEG4 ||
+-            (st->codecpar->codec_id == AV_CODEC_ID_HEVC && type == PacketTypeCodedFrames)) {
++            (st->codecpar->codec_id == AV_CODEC_ID_HEVC &&
++             (!enhanced_flv || type == PacketTypeCodedFrames))) {
++            int32_t cts;
+             // sign extension
+-            int32_t cts = (avio_rb24(s->pb) + 0xff800000) ^ 0xff800000;
++            if (size < 3) {
++                ret = AVERROR_INVALIDDATA;
++                goto leave;
++            }
++            cts = (avio_rb24(s->pb) + 0xff800000) ^ 0xff800000;
+             pts = av_sat_add64(dts, cts);
+             if (cts < 0) { // dts might be wrong
+@@ -1480,6 +1488,13 @@
+             }
+             size -= 3;
+         }
++        if (!enhanced_flv && st->codecpar->codec_id == AV_CODEC_ID_HEVC &&
++            type != PacketTypeSequenceStart && type != PacketTypeCodedFrames) {
++            /* Legacy EOS and private unknown tags are not coded video. */
++            ret = FFERROR_REDO;
++            goto leave;
++        }
++
+         if (type == 0 && (!st->codecpar->extradata || st->codecpar->codec_id == AV_CODEC_ID_AAC ||
+             st->codecpar->codec_id == AV_CODEC_ID_H264 || st->codecpar->codec_id == AV_CODEC_ID_HEVC ||
+             st->codecpar->codec_id == AV_CODEC_ID_AV1 || st->codecpar->codec_id == AV_CODEC_ID_VP9)) {

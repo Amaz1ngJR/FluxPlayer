@@ -457,16 +457,26 @@ end note
 
 FFmpeg 4.x 已集成在 `third_party/ffmpeg-macos/` 中，无需额外安装。
 
+项目的 FFmpeg 4.4.6 已加入 FLV 兼容补丁：支持旧式 H.265 codec-id 12、Enhanced FLV 的 H.265 / AV1 / VP9 视频，以及 codec-id 13 的私有 Opus 单/双声道音频。原有解码器与 VideoToolbox 能力保留。构建与验证脚本集中在 `scripts/ffmpeg/`，补丁文件为 `scripts/ffmpeg/patches/ffmpeg-4.4.6-flv-compat.patch`。重建时会生成 `third_party/ffmpeg-macos/build-info.json`，记录构建来源与库校验值。
+
 如需重新生成（开发者）：
 
 ```bash
 brew install ffmpeg@4
-python3 scripts/bundle_ffmpeg_macos.py
+bash scripts/ffmpeg/build_ffmpeg_macos.sh
 ```
+
+此脚本校验官方源码、应用项目补丁，再更新项目内动态库；直接收集原始 Homebrew 库会丢失补丁。当目标目录的 `build-info.json` 中包含补丁记录时，收集脚本默认禁止用未打补丁的库覆盖；删除该记录文件会失去此项保护。
+
+也可离线复用已有 FFmpeg Git 仓库：`bash scripts/ffmpeg/build_ffmpeg_macos.sh --source-dir /path/to/ffmpeg`。脚本只导出官方 `n4.4.6` 标签，不修改该仓库。更新后使用 `xmake -r` 或 `cmake --build build/cmake --clean-first --parallel` 重新链接并同步运行库。回归验证：`python3 scripts/ffmpeg/verify_ffmpeg_macos.py`，测试明确加载项目库。上述命令均在项目根目录执行。
 
 ### Windows
 
-FFmpeg 7.x 已集成在 `third_party/ffmpeg/` 中，无需额外安装。
+项目 Windows FFmpeg 已集成在 `third_party/ffmpeg/` 中，版本标识为 `n7.1.3-43-g5a1f107b4c-20260331`（头文件与 DLL 一致），无需额外安装。
+
+上游原生支持 Enhanced FLV 的 `hvc1` H.265，但不原生支持旧式私有 FLV 的 HEVC codec-id 12。项目为对应源码新增 `scripts/ffmpeg/patches/ffmpeg-7.1-legacy-hevc.patch` 与 Windows 构建入口；验证统一使用 `scripts/ffmpeg/verify_ffmpeg_windows.py`，由 Python 编译小型 C 探针，在隔离目录加载项目 DLL 与候选补丁 DLL，对比实际解码帧、时间戳与像素摘要，不依赖系统 `ffmpeg.exe` / `ffprobe.exe`。详见[FFmpeg 封装兼容补丁](docs/硬件加速解码技术文档.md#ffmpeg-封装兼容补丁)。
+
+**当前已完成源码补丁与本机源码回归，尚未构建、替换或运行 Windows DLL，现有 DLL 的 codec-id 12 支持仍未确认。** 此差异来自 FFmpeg 版本与封装格式，不是操作系统差异。Windows 补丁只扩展旧式 HEVC FLV 读取，不添加私有 Opus codec-id 13。
 
 使用 xmake 构建时，需要 MinGW-w64 编译器，运行 `setup_env.ps1` 初始化构建环境：
 
@@ -809,7 +819,7 @@ https://www.youtube.com/watch?v=...
 | MKV | .mkv / .mka | ✅ 已支持 | 支持多轨道、字幕 |
 | AVI | .avi | ✅ 已支持 | 经典 Windows 格式 |
 | MOV | .mov | ✅ 已支持 | Apple QuickTime |
-| FLV | .flv | ✅ 已支持 | Flash Video / RTMP 录制 |
+| FLV | .flv | ✅ 已支持 | 标准 FLV；macOS 增加旧式 H.265、Enhanced FLV H.265/AV1/VP9 及私有 Opus |
 | WebM | .webm | ✅ 已支持 | VP8/VP9 + Opus/Vorbis |
 | MPEG-TS | .ts / .mts | ✅ 已支持 | 广播传输流 |
 | 3GP | .3gp | ✅ 已支持 | 移动端视频 |
