@@ -10,6 +10,7 @@
 #include "FluxPlayer/utils/StreamExtractor.h"  // ExtractedStream（DASH 流 seek 重启复用）
 #include "FluxPlayer/core/PlayerState.h"        // PlayerState 枚举
 #include "FluxPlayer/core/LiveLatencyTracker.h"
+#include "FluxPlayer/core/FrameQueue.h"
 
 // 前向声明 FFmpeg 类型，避免头文件引入平台 SDK
 struct AVFrame;
@@ -26,6 +27,7 @@ class AudioDecoder;
 class AVSync;
 class Frame;
 class FrameQueue;
+class MediaInfo;
 class PacketQueue;
 class PTSNormalizer;
 class AudioOutput;
@@ -135,13 +137,32 @@ public:
      */
     void setPreExtractedInfo(const std::string& pageUrl, const ExtractedStream& info);
 
+    /** OpeningScreen 主线程 begin，后台只准备输入，join 后主线程 open 安装。 */
+    bool beginOpenPreparation();
+    bool prepareOpenInput(const std::string& path, std::string& error);
+    void cancelOpenPreparation();
+
+    /** @brief 画质切换完成快照；仅在主线程投递/查询，不作为后台共享状态。 */
+    struct QualitySwitchStatus {
+        uint64_t requestId = 0;
+        bool pending = false;
+        bool success = false;
+        std::string formatId;
+        std::string error;
+    };
+
     /**
-     * @brief 切换画质（仅网页视频有效）
-     * @param formatId  yt-dlp format_id
-     * @param seekTime  切换后 seek 到的时间（秒），保持播放位置
-     * @return 成功返回 true
+     * @brief 主线程请求切换网页画质；返回 true 仅表示接单。
+     * @param formatId 提取器提供的画质 ID
+     * @param seekTime 非负、有限的目标秒数
+     * @note 后台准备支持 latest-wins；完成快照只在主线程安装后发布。
      */
     bool switchQuality(const std::string& formatId, double seekTime);
+
+    /** @brief 主线程读取最近请求/完成快照，pending=false 时 success/error 才是结果。 */
+    const QualitySwitchStatus& getQualitySwitchStatus() const { return qualitySwitch_; }
+    /** @brief 成功安装时、Worker 启动前获取的只读媒体信息；仅主线程访问。 */
+    const MediaInfo* getQualityMediaInfo() const { return qualityMediaInfo_.get(); }
 
     /**
      * 开始播放
@@ -368,7 +389,7 @@ public:
      * 用于 OpeningScreen 等异步 UI 判断 BUFFER FIRST FRAME 步骤完成。
      * 纯音频流目前不会触发，调用方需结合 PlayerState=PLAYING 兜底。
      *
-     * @param callback 在解码线程上触发；UI 侧应通过原子标记或消息队列同步。
+     * @param callback 仅主线程命令泵触发；过期 serial 的首帧通知被丢弃。
      */
     void setFirstFrameCallback(std::function<void()> callback) {
         firstFrameCallback_ = callback;
@@ -420,7 +441,23 @@ private:
     void resumeInternal();
     void stopInternal();
     void setPlaybackSpeedInternal(double speed);
-    void switchQualityInternal(const std::string& formatId, double seekTime);
+    void switchQualityInternal(const std::string& formatId, double seekTime, uint64_t requestId);
+    bool installQualityStream(const ExtractedStream& info, double seekTime, bool wasPlaying,
+                              std::unique_ptr<DashMerger> merger, std::unique_ptr<Demuxer> demuxer);
+    std::atomic<int> failedDashSeekSerial_{-1}; ///< demux 发布，主线程按当前 serial 消费错误。
+    QualitySwitchStatus qualitySwitch_; ///< 主线程独占；ID 在 close/open 后也不归零。
+    struct QualityCandidate; ///< 仅准备输入，不触碰 Player 活跃资源、GL 或设备。
+    std::unique_ptr<QualityCandidate> qualityCandidate_;
+    std::unique_ptr<DashMerger> preparedOpenMerger_;
+    std::unique_ptr<Demuxer> preparedOpenInput_;
+    std::string preparedOpenPath_; ///< 仅准备线程写，join 后主线程消费。
+    std::atomic<uint64_t> qualityPrepareGeneration_{0}; ///< 寿命覆盖所有候选 merger。
+    void pollQualityCandidate();
+    void cancelQualityCandidate(bool wait);
+    bool pausedForQualityInstall_ = false; ///< 安装事务持有期间，Pause/Resume 只更新意图，不直接操作设备。
+    bool qualityInstallWantsPlaying_ = false; ///< 控制线程拥有的最新安装恢复意图。
+    void resetQualityPlayback(const ExtractedStream& info, double seekTime); ///< Worker 启动前重置会话状态。
+    std::unique_ptr<MediaInfo> qualityMediaInfo_; ///< 避免 UI 与 demux 并发解析输入上下文。
     void startVideoRecordingInternal();
     void stopVideoRecordingInternal();
     void startAudioRecordingInternal();
@@ -494,6 +531,8 @@ private:
      * 触发错误
      */
     void triggerError(const std::string& errorMsg);
+    /** 主线程消费录制错误；不执行命令，关闭封口后也可调用。 */
+    void notifyRecordingErrors();
 
     /**
      * 清理资源
@@ -504,6 +543,11 @@ private:
      * 初始化窗口和渲染器
      */
     bool initWindowAndRenderer();
+    bool initRenderer(); ///< 复用当前 GL 上下文，重建与新解码器匹配的互操作。
+    bool initAudioOutput(); ///< Worker 启动前确定播放拓扑；有视频时禁音降级，纯音频失败。
+    bool disableAudioPlayback(); ///< 仅在设备及所有 Worker 停止时拆除音频播放分支。
+    bool activateAudioOutput(); ///< 主线程启动/恢复设备，失败时停止并回收活跃使用者。
+    bool handleAudioOutputFailure(); ///< 停止旧使用者后仅保留视频；纯音频报错。
 
     /**
      * 初始化解码器
@@ -523,6 +567,7 @@ private:
     // 播放器状态（收口到 StateManager）
     std::unique_ptr<StateManager> stateManager_;
     std::atomic<bool> shouldQuit_;
+    std::atomic<int> inputReadFailure_{0}; ///< Worker 发布 FFmpeg 错误码，主线程通知错误而非正常完成。
     std::atomic<bool> userStopped_{false}; ///< 用户主动 Stop，循环播放不重启
     std::atomic<bool> decodingFinished_;  ///< demux 线程已读完所有数据（解码线程可能仍在 drain，队列可能仍有剩余帧）
     std::atomic<double> lastRenderedPTS_;  // 最后实际渲染的帧的 PTS
@@ -589,7 +634,11 @@ private:
     // 帧本身保留在 audioQueue_ 中（不 next()），下次 peek() 返回同一帧。
     // 平台音频线程读写；audio decode 线程 seek flush 时也会清零，故用原子量，
     // 且回调内对其做边界保护，避免 flush 后旧偏移越界访问新帧。
+    std::vector<double> audioCoverageStarts_, audioCoverageEnds_; ///< 启动前分配，回调只写。
+    size_t audioCoverageCount_ = 0; ///< audioCallbackMutex_ 保护，当前填充块的有效帧数。
+    size_t audioSubmittedFrames_ = 0; ///< 同锁保护，含 ALSA 分段提交，EOF 等待未提交尾部。
     std::atomic<size_t> pendingAudioOffset_;     // 当前队头帧已消费的字节偏移
+    FrameQueue::ReadToken pendingAudioToken_;   ///< 仅音频回调读写，偏移随元素身份失效。
 
     // 音频追赶目标。变速切换时，视频队列可能已经显示到较新的 PTS，
     // 但音频 frame/packet 队列里还压着旧速率下缓存的较早音频帧。
@@ -645,8 +694,9 @@ private:
     std::unique_ptr<SubtitleManager> subtitleManager_;
 
     bool audioOnly_{false};     ///< 纯音频模式（无视频流时为 true）
-    bool hasVideoStream_{false}; ///< 当前媒体是否含视频流（EOF 判定用）
-    bool hasAudioStream_{false}; ///< 当前媒体是否含音频流（EOF 判定用）
+    bool hasVideoStream_{false}; ///< 启用的视频播放分支（EOF/Seek/直播等待用）
+    bool hasAudioStream_{false}; ///< 启用的音频播放分支；源音轨另查 Demuxer，不能据此禁用录制。
+    // 上述拓扑在 Worker 启动前确定，运行期间只读；必须 join 后才能修改。
     bool isImageMode_{false};    ///< 静态图片模式（无 worker 线程，单帧永驻）
 
     /// 纯音频模式：提取封面图并上传到渲染器
@@ -707,7 +757,11 @@ private:
      * @brief 解除 seek 音频门控，并按 PlayerState 决定是否恢复设备。
      * @return true 表示本次调用确实解除门控
      */
+    std::atomic<bool> audioResumePending_{false}; ///< Worker 发布恢复意图，由主线程调用平台设备。
     bool releaseAudioSeekGate();
+    bool releaseAudioSeekGateLocked(); // 调用方已持 audioCallbackMutex_
+    bool isAudioPlaybackDrainedLocked() const; // 同锁检查解码、软件 PCM 和设备覆盖
+    void checkSeekProgress(); // 控制线程区分实际对齐、音轨耗尽与定位超时
 
     // seek A/V 对齐状态独立于 decodingToTarget。视频可能先结束精确丢帧，音频设备也可能
     // 已恢复但 AClock 尚未被首个回调提交；UI 仅在两路均 ready 后重新采用 AClock。
@@ -749,6 +803,7 @@ private:
     std::function<void()> playbackFinishedCallback_;
     std::function<void()> renderCallback_;
     std::function<void()> firstFrameCallback_;        ///< 首帧推入队列后触发一次
+    std::atomic<int> firstFrameSerial_{-1}; ///< 解码发布、主线程验证当前输入 serial 后回调。
     std::atomic<bool>     firstFrameSignaled_{false}; ///< 防止 firstFrameCallback_ 重复触发
 };
 

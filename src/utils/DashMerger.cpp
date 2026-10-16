@@ -28,6 +28,8 @@ extern "C" {
 #include <windows.h>
 #else
 #include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
 #endif
 
 namespace FluxPlayer {
@@ -42,18 +44,33 @@ namespace FluxPlayer {
 #define AVIO_WRITE_BUF_TYPE uint8_t*
 #endif
 
+// 管道等待与远端 I/O 使用相同取消身份，不依赖跨线程 close 解除阻塞。
+struct PipeCancellation {
+    std::atomic<bool>* running;
+    const std::atomic<uint64_t>* generation;
+    uint64_t expected;
+    const std::atomic<bool>* useGeneration;
+    const std::atomic<bool>* stop;
+    bool cancelled() const {
+        return !running->load(std::memory_order_acquire) ||
+            (stop && stop->load(std::memory_order_acquire)) ||
+            (useGeneration->load(std::memory_order_acquire) && generation &&
+             generation->load(std::memory_order_acquire) != expected);
+    }
+};
+
 #ifdef _WIN32
 struct PipeWriteCtx {
     HANDLE handle;
     HANDLE event;
-    std::atomic<bool>* running;
+    PipeCancellation cancel;
 };
 
 static int pipeWritePacket(void* opaque, AVIO_WRITE_BUF_TYPE buf, int buf_size) {
     auto* ctx = static_cast<PipeWriteCtx*>(opaque);
     int total = 0;
     while (total < buf_size) {
-        if (!ctx->running->load()) return AVERROR_EXIT;
+        if (ctx->cancel.cancelled()) return AVERROR_EXIT;
         DWORD written = 0;
         OVERLAPPED ov = {};
         ov.hEvent = ctx->event;
@@ -61,14 +78,14 @@ static int pipeWritePacket(void* opaque, AVIO_WRITE_BUF_TYPE buf, int buf_size) 
         if (!WriteFile(ctx->handle, buf + total, static_cast<DWORD>(buf_size - total), &written, &ov)) {
             if (GetLastError() != ERROR_IO_PENDING) return AVERROR(EIO);
             while (WaitForSingleObject(ov.hEvent, 50) == WAIT_TIMEOUT) {
-                if (!ctx->running->load()) {
+                if (ctx->cancel.cancelled()) {
                     CancelIoEx(ctx->handle, &ov);
                     break;
                 }
             }
             // 即使取消，也必须等 I/O 完成后才能释放栈上的 OVERLAPPED 和缓冲区。
             if (!GetOverlappedResult(ctx->handle, &ov, &written, TRUE))
-                return ctx->running->load() ? AVERROR(EIO) : AVERROR_EXIT;
+                return ctx->cancel.cancelled() ? AVERROR_EXIT : AVERROR(EIO);
         }
         if (written == 0) return AVERROR(EIO);
         total += static_cast<int>(written);
@@ -80,15 +97,24 @@ static DWORD WINAPI flushPipe(void* handle) {
     return FlushFileBuffers(static_cast<HANDLE>(handle)) ? ERROR_SUCCESS : GetLastError();
 }
 #else
-struct PipeWriteCtx { int fd; };
+struct PipeWriteCtx { int fd; PipeCancellation cancel; };
 
 static int pipeWritePacket(void* opaque, AVIO_WRITE_BUF_TYPE buf, int buf_size) {
     auto* ctx = static_cast<PipeWriteCtx*>(opaque);
     int total = 0;
     while (total < buf_size) {
+        if (ctx->cancel.cancelled()) return AVERROR_EXIT;
         const auto written = write(ctx->fd, buf + total, buf_size - total);
         if (written < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                pollfd descriptor{ctx->fd, POLLOUT, 0};
+                const int result = poll(&descriptor, 1, 50);
+                if (result < 0 && errno != EINTR) return AVERROR(errno);
+                if (result > 0 && (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)))
+                    return AVERROR(EPIPE);
+                continue;
+            }
             return AVERROR(errno);
         }
         if (written == 0) return AVERROR(EIO);
@@ -177,18 +203,39 @@ bool DashMerger::start(const std::string& videoUrl,
         LOG_ERROR("DashMerger: pipe() 失败");
         return false;
     }
+    const int flags = fcntl(pipefd[1], F_GETFL);
+    if (flags < 0 || fcntl(pipefd[1], F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        LOG_ERROR("DashMerger: 无法设置可取消管道写端");
+        return false;
+    }
     readFd_  = pipefd[0];
     writeFd_ = pipefd[1];
 #endif
 
     running_.store(true);
     ready_.store(false);
+    completedSuccessfully_.store(false, std::memory_order_release);
     cancelOnGeneration_.store(cancelGeneration != nullptr, std::memory_order_release);
 
-    thread_ = std::thread(&DashMerger::mergeLoop, this,
-                          videoUrl, audioUrl, headers, startSeconds,
-                          cancelGeneration, expectedGeneration, externalStop,
-                          useConfiguredProxy);
+    try {
+        thread_ = std::thread(&DashMerger::mergeLoop, this,
+                              videoUrl, audioUrl, headers, startSeconds,
+                              cancelGeneration, expectedGeneration, externalStop,
+                              useConfiguredProxy);
+    } catch (const std::exception& error) {
+        running_.store(false);
+#ifdef _WIN32
+        CloseHandle(pipeHandle_); pipeHandle_ = nullptr;
+        CloseHandle(stopEvent_); stopEvent_ = nullptr;
+#else
+        close(readFd_); readFd_ = -1;
+        close(writeFd_); writeFd_ = -1;
+#endif
+        LOG_ERROR("DashMerger: 无法启动线程: " + std::string(error.what()));
+        return false;
+    }
     LOG_INFO("DashMerger: 启动, startSeconds=" + std::to_string(startSeconds));
     return true;
 }
@@ -221,16 +268,8 @@ void DashMerger::stop() {
     if (stopEvent_) SetEvent(stopEvent_);
     // 管道由合并线程关闭。写入/连接等待会检查 running_ 并取消自己的 I/O，
     // 避免此处 CloseHandle 与 OVERLAPPED 完成回调、cleanup 并发访问同一句柄。
-#else
-    // 关闭 pipe 写端：让 mergeLoop 内阻塞中的 write/读端 EOF 立即返回。
-    // 注意：close 后 fd 编号可能被内核立刻复用为另一个 socket；mergeLoop
-    // 若再 write 到这个 fd，可能写到无关 socket 并触发 SIGPIPE（已在 main
-    // 中屏蔽 SIGPIPE，避免进程被杀）。
-    if (writeFd_ >= 0) {
-        close(writeFd_);
-        writeFd_ = -1;
-    }
 #endif
+    // POSIX 写端 nonblocking + poll 检查取消，由 mergeLoop 独占关闭。
     if (thread_.joinable()) thread_.join();
 #ifdef _WIN32
     if (stopEvent_) {
@@ -238,10 +277,8 @@ void DashMerger::stop() {
         stopEvent_ = nullptr;
     }
 #else
-    // readFd_ 不在此处 close：所有权已通过 "pipe:N" URL 转移给 Demuxer
-    // 内部的 AVFormatContext，由 avformat_close_input 关闭。
-    // 若 DashMerger 也 close 同一 fd，第二次 close 会作用到已被内核
-    // 复用的无关 fd（macOS 上 .app 启动时尤其容易发生），导致不可预测崩溃。
+    // getPipeUrl() 转交所有权时已把 readFd_ 置 -1；准备失败、尚未转交时仍需回收。
+    if (readFd_ >= 0) close(readFd_);
     readFd_ = -1;
 #endif
     LOG_INFO("DashMerger: 已停止");
@@ -294,7 +331,8 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         wctx = nullptr;
 #ifdef _WIN32
         if (pipeHandle_) {
-            DisconnectNamedPipe(pipeHandle_);
+            // 不复用实例，无需强制断开客户端；正常完成已在下方等待尾部排空。
+            // 只关闭写端，让读端观察管道结束；失败/取消也由本线程关闭句柄。
             CloseHandle(pipeHandle_);
             pipeHandle_ = nullptr;
         }
@@ -426,18 +464,32 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         audioOk.store(false);
         videoRetryable.store(false);
         audioRetryable.store(false);
-        std::thread videoOpener([&]() {
+        try {
+            std::thread videoOpener([&]() {
+                try {
+                    bool retryable = false;
+                    videoOk.store(openInput(&videoCtx, videoUrl, &videoIntCtx, "视频", useProxy, retryable));
+                    videoRetryable.store(retryable);
+                } catch (const std::exception& error) {
+                    LOG_ERROR("DashMerger: 视频打开任务失败: " + std::string(error.what()));
+                    running_.store(false);
+                }
+            });
+            // 第二路在当前工作线程执行，避免创建第二线程失败时析构 joinable 线程。
             bool retryable = false;
-            videoOk.store(openInput(&videoCtx, videoUrl, &videoIntCtx, "视频", useProxy, retryable));
-            videoRetryable.store(retryable);
-        });
-        std::thread audioOpener([&]() {
-            bool retryable = false;
-            audioOk.store(openInput(&audioCtx, audioUrl, &audioIntCtx, "音频", useProxy, retryable));
-            audioRetryable.store(retryable);
-        });
-        videoOpener.join();
-        audioOpener.join();
+            try {
+                audioOk.store(openInput(&audioCtx, audioUrl, &audioIntCtx, "音频", useProxy, retryable));
+                audioRetryable.store(retryable);
+            } catch (...) {
+                running_.store(false);
+                videoOpener.join();
+                throw;
+            }
+            videoOpener.join();
+        } catch (const std::exception& error) {
+            LOG_ERROR("DashMerger: 打开任务失败: " + std::string(error.what()));
+            running_.store(false);
+        }
     };
 
     LOG_INFO("DashMerger: 并行打开视频/音频流，首选直连");
@@ -490,14 +542,16 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         audioIntCtx.deadline = seekDeadline;
         std::atomic<int> videoSeekRet{AVERROR_UNKNOWN};
         std::atomic<int> audioSeekRet{AVERROR_UNKNOWN};
-        std::thread videoSeeker([&]() {
-            videoSeekRet.store(av_seek_frame(videoCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD));
-        });
-        std::thread audioSeeker([&]() {
+        try {
+            std::thread videoSeeker([&]() {
+                videoSeekRet.store(av_seek_frame(videoCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD));
+            });
             audioSeekRet.store(av_seek_frame(audioCtx, -1, seekTs, AVSEEK_FLAG_BACKWARD));
-        });
-        videoSeeker.join();
-        audioSeeker.join();
+            videoSeeker.join();
+        } catch (const std::exception& error) {
+            LOG_ERROR("DashMerger: 定位任务失败: " + std::string(error.what()));
+            cleanup(); running_.store(false); return;
+        }
         LOG_INFO("DashMerger: 两路 Range seek 阶段耗时 " + std::to_string(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - seekStart).count()) + "ms");
@@ -535,13 +589,15 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
     }
 
 #ifdef _WIN32
-    wctx = new PipeWriteCtx{pipeHandle_, CreateEvent(nullptr, TRUE, FALSE, nullptr), &running_};
+    wctx = new PipeWriteCtx{pipeHandle_, CreateEvent(nullptr, TRUE, FALSE, nullptr),
+        {&running_, cancelGeneration, expectedGeneration, &cancelOnGeneration_, externalStop}};
     if (!wctx->event) {
         LOG_ERROR("DashMerger: 创建写入事件失败");
         cleanup(); running_.store(false); return;
     }
 #else
-    wctx = new PipeWriteCtx{writeFd_};
+    wctx = new PipeWriteCtx{writeFd_,
+        {&running_, cancelGeneration, expectedGeneration, &cancelOnGeneration_, externalStop}};
 #endif
     const int ioBufSize = 32768;
     auto* ioBuf = (uint8_t*)av_malloc(ioBufSize);
@@ -725,6 +781,8 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         }
     }
 #endif
+    // 必须先发布结果再关闭写端；读端看到 EOF 时即可区分正常完成与合并失败。
+    completedSuccessfully_.store(!cancelled() && !failed, std::memory_order_release);
     if (cancelled()) LOG_INFO("DashMerger: 合并已取消");
     else if (failed) LOG_ERROR("DashMerger: 合并失败");
     else LOG_INFO("DashMerger: 合并完成");

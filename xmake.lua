@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.9.0"
+local version = "0.9.1"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -169,8 +169,8 @@ target("imgui_local")
     add_files("third_party/imgui/backends/imgui_impl_glfw.cpp")
     add_files("third_party/imgui/backends/imgui_impl_opengl3.cpp")
 
-    -- add_deps：声明依赖关系，会自动传递头文件路径和链接库
-    add_deps("glfw_local", "glad_local")
+    -- 与 CMake PUBLIC 依赖一致，向使用 ImGui 的目标传递 GLFW/GLAD 头文件和链接库。
+    add_deps("glfw_local", "glad_local", {public = true})
 
 -- ========================
 -- 5. FluxPlayer 主程序
@@ -223,8 +223,8 @@ target("FluxPlayer")
         remove_files("src/utils/WebLogin_win.cpp")
     end
 
-    -- 声明依赖的静态库（会自动传递头文件路径）
-    add_deps("glfw_local", "glad_local", "imgui_local", "tinyfiledialogs_local", "lua_local")
+    -- GLFW/GLAD 仅通过 imgui_local 传递，依赖图保证先链接使用者再链接提供符号的静态库。
+    add_deps("imgui_local", "tinyfiledialogs_local", "lua_local")
 
     -- 传递版本号宏到代码（引用开头定义的 version 变量）
     add_defines("FLUXPLAYER_VERSION=\"" .. version .. "\"")

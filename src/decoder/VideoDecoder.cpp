@@ -219,15 +219,16 @@ void VideoDecoder::close() {
 bool VideoDecoder::sendPacket(AVPacket* packet) {
     if (!m_codecCtx) {
         LOG_ERROR("Codec context is null");
+        lastResult_ = AVERROR(EINVAL);
         return false;
     }
 
-    int ret = avcodec_send_packet(m_codecCtx, packet);
+    int ret = lastResult_ = avcodec_send_packet(m_codecCtx, packet);
     if (ret < 0) {
         if (ret == AVERROR(EAGAIN)) {
             // 解码器缓冲区已满，需要先调用 receiveFrame() 取出帧
             LOG_DEBUG("Decoder buffer full, need to receive frames first");
-            return true;
+            return false;
         } else if (ret == AVERROR_EOF) {
             LOG_INFO("Decoder reached EOF");
             return false;
@@ -246,7 +247,8 @@ bool VideoDecoder::sendPacket(AVPacket* packet) {
                     reinitAsSoftware();
                     // 降级后重新发送当前包
                     if (m_codecCtx) {
-                        avcodec_send_packet(m_codecCtx, packet);
+                        lastResult_ = avcodec_send_packet(m_codecCtx, packet);
+                        return lastResult_ >= 0;
                     }
                 }
             }
@@ -267,11 +269,12 @@ bool VideoDecoder::sendPacket(AVPacket* packet) {
 bool VideoDecoder::receiveFrame(Frame& frame) {
     if (!m_codecCtx) {
         LOG_ERROR("Codec context is null");
+        lastResult_ = AVERROR(EINVAL);
         return false;
     }
 
     // 从解码器获取一帧解码后的数据
-    int ret = avcodec_receive_frame(m_codecCtx, frame.getAVFrame());
+    int ret = lastResult_ = avcodec_receive_frame(m_codecCtx, frame.getAVFrame());
     if (ret < 0) {
         if (ret == AVERROR(EAGAIN)) {
             // 需要发送更多数据包才能获取帧

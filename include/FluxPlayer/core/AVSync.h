@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <vector>
 
 namespace FluxPlayer {
 
@@ -56,6 +57,10 @@ public:
      * @param pts 音频帧的 PTS（秒）
      */
     void updateAudioClock(double pts);
+    /** 启动前预分配覆盖环；提交成功后登记实际 PCM，静音不生成媒体覆盖。 */
+    void prepareAudioCoverage(size_t capacity);
+    void submitAudioCoverage(const double* starts, const double* ends, size_t count,
+                             int sampleRate, double delay);
 
     /**
      * 更新视频时钟
@@ -69,15 +74,14 @@ public:
      */
     double getAudioClock() const;
 
+    /** 是否仍有未播放的有效 PCM 覆盖；按暂停锚点判断，供 EOF 排空使用。 */
+    bool hasPendingAudioCoverage() const;
+
     /**
-     * 获取最近一次提交的音频时钟基准，不叠加两次回调之间的墙钟插值。
-     *
-     * 音频设备回调在合成欠载时钟时使用该值作为累计起点；若改用
-     * getAudioClock()，其中已经包含的 elapsed * playbackRate 会与本次
-     * bufferDuration * playbackRate 重复计算，16x 会被错误推进到接近 32x。
-     * 普通 UI 和同步调度仍应使用 getAudioClock() 获取连续时钟。
+     * 获取最近结算的有效覆盖尾端或 Seek 设置的基准，供门控超时回退使用。
+     * 不包含尚未播放的已提交 PCM；UI 和同步调度使用 getAudioClock()。
      */
-    double getAudioClockBase() const { return audioClock_.load(); }
+    double getAudioClockBase() const;
 
     /**
      * 获取视频时钟
@@ -197,6 +201,18 @@ private:
     // 时钟类型（setClockType 写 / getMasterClock 读，跨线程 → 原子标量）
     std::atomic<ClockType> clockType_;
 
+    struct AudioCoverage {
+        double start = 0.0, end = 0.0;
+        int64_t beginNs = 0, endNs = 0;
+    };
+    // 组合快照，固定容量环；所有读写同锁，回调不扩容、不日志。
+    mutable std::mutex audioClockMutex_;
+    std::vector<AudioCoverage> audioCoverage_;
+    size_t audioHead_ = 0, audioCount_ = 0;
+    bool audioClockPaused_ = false;
+    int64_t audioPauseNs_ = 0;
+    double audioClockAtLocked(int64_t now) const;
+
     // 时钟值（PTS）
     std::atomic<double> audioClock_;
     std::atomic<double> videoClock_;
@@ -221,7 +237,6 @@ private:
     // 暂停状态（isPaused / computeFrameDelay / shouldDropFrame 等非 external-clock 组合
     // 计算路径使用；external clock 的暂停判定走 extClockPaused_）
     std::atomic<bool> paused_;
-    std::atomic<double> pauseStartTime_;  // 暂停开始时的主时钟值（pause 写 / resume 读）
 
     // 统计信息
     std::atomic<double> averageFrameDelay_;

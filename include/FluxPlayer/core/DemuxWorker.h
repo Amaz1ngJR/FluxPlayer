@@ -78,29 +78,14 @@ private:
      * DASH 流 seek：停止旧 merger，用 -ss 参数重启。
      * @return true 表示本次目标已成功打开；false 表示被更新的 seek 抢占或重启失败。
      */
-    bool restartDashMerger(double seekTime);
-
-    /**
-     * @brief 统一清理一次失败/被抢占的 DASH 重启尝试。
-     *
-     * 顺序固定为先关闭 Demuxer 读端，再停止 merger 写端，避免 pipe 两端并发关闭时
-     * FFmpeg 仍在读写已失效 fd。该函数只在 demux 线程调用。
-     */
-    /**
-     * @brief 将候选 DASH 管线以事务方式提交为当前播放源。
-     *
-     * 在候选 pipe 已经能被 Demuxer 打开后才替换 Player 中的旧管线；失败时旧流保持
-     * 完整，不会出现 demuxer_ 为空导致崩溃。
-     */
-    void commitDashPipeline(std::unique_ptr<DashMerger> merger,
-                            std::unique_ptr<Demuxer> demuxer);
+    bool restartDashMerger(double seekTime, uint64_t generation);
 
     /**
      * @brief 原子取走当前最新 seek 目标。
      *
      * 连续拖动时只保留最后一个目标，避免为中间位置反复冷启动两路 HTTP 连接。
      */
-    bool takePendingSeek(double& targetPTS);
+    bool takePendingSeek(double& targetPTS, uint64_t* generation = nullptr);
 
     /**
      * 背压控制：packet 队列过满时等待

@@ -2,23 +2,9 @@
  * @file OpeningScreen.cpp
  * @brief Opening 过渡界面实现
  *
- * 设计：Player::open 是一连串同步操作，其中只有 yt-dlp 提取真正耗时（10–30 秒）；
- * 其它步骤（demuxer、解码器、GLRenderer、AudioOutput）都在毫秒级。
- *
- * 关键约束：GLFW OpenGL ctx 在 macOS 上对线程敏感——把 ctx make-current 在
- * worker、创建 GLRenderer 后再回到主线程，即使 GL 标准允许，实际跑起来
- * 容易触发 NSAppKit 的隐式假设（seek 时偶发崩溃）。所以 GL 一律留主线程。
- *
- * 解决方案：
- *   1) 主线程渲染一帧 splash「RESOLVING SOURCE...」
- *   2) worker 线程同步跑 StreamExtractor::extract（只是 popen yt-dlp，不碰 GL）
- *   3) 主线程在 worker 期间循环 glfwPollEvents（macOS 不会标记窗口未响应）
- *   4) worker 完成后，主线程把 ExtractedStream 通过 setPreExtractedInfo 注入 Player
- *   5) 主线程同步调用 player.open(pageUrl, externalWindow)：Player 检测到
- *      预提取信息存在，跳过自身的 extract，直接进入 demuxer/解码器/GL
- *
- * 对于不需要 yt-dlp 的 URL（本地文件、RTSP/RTMP 直链等），跳过 worker 阶段，
- * 直接同步打开。
+ * 提取、DASH 合并及 Demuxer 打开/探测在后台执行，主线程持续绘制并响应关闭。
+ * GLFW/OpenGL、解码器和设备安装始终留在主线程。关闭先发布取消，join 后再释放候选。
+ * Player::open 仍保留同步入口供 CLI 使用；共享窗口入口消费后台准备好的输入。
  */
 
 #include "FluxPlayer/ui/OpeningScreen.h"
@@ -158,11 +144,12 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
         if (ui_.shouldClose()) { result.windowClosed = true; return result; }
 
         std::atomic<int> extractDone{0}; // 0=running, 1=ok, 2=fail
+        std::atomic<bool> extractCancelled{false};
         ExtractedStream info;
         std::string extractError;
-        std::thread worker([&info, &extractError, &extractDone, &mediaPath]() {
+        std::thread worker([&info, &extractError, &extractDone, &extractCancelled, &mediaPath]() {
             std::string err;
-            bool ok = StreamExtractor::extract(mediaPath, "", info, err);
+            bool ok = StreamExtractor::extract(mediaPath, "", info, err, &extractCancelled);
             if (!ok) extractError = err.empty() ? "yt-dlp 失败" : err;
             extractDone.store(ok ? 1 : 2, std::memory_order_release);
         });
@@ -182,6 +169,9 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
+        if (glfwWindowShouldClose(w->getGLFWWindow())) {
+            extractCancelled.store(true, std::memory_order_release);
+        }
         worker.join();
 
         if (glfwWindowShouldClose(w->getGLFWWindow())) {
@@ -198,7 +188,36 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
         if (ui_.shouldClose()) { result.windowClosed = true; return result; }
     }
 
-    // 3) 主线程同步打开：demuxer / 解码器 / GLRenderer / AudioOutput（毫秒级）
+    // 3) 打开/探测也可能阻塞网络；后台准备期间主线程继续绘制和响应关闭。
+    // 图片解码仍走原有主线程入口，没有 Demuxer 候选。
+    {
+        if (!player_.beginOpenPreparation()) {
+            result.errorMessage = "播放器当前不能准备新输入";
+            return result;
+        }
+        std::atomic<bool> done{false};
+        bool prepared = false;
+        std::string error;
+        std::thread worker;
+        try {
+            worker = std::thread([&] {
+                prepared = player_.prepareOpenInput(mediaPath, error);
+                done.store(true, std::memory_order_release);
+            });
+        } catch (const std::exception& failure) {
+            result.errorMessage = failure.what();
+            return result;
+        }
+        while (!done.load(std::memory_order_acquire)) {
+            renderSplashFrame(mediaPath, "OPENING MEDIA STREAM...");
+            if (ui_.shouldClose()) { player_.cancelOpenPreparation(); break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        worker.join();
+        if (ui_.shouldClose()) { result.windowClosed = true; return result; }
+        if (!prepared) { result.errorMessage = error; return result; }
+    }
+    // 4) 主线程安装：解码器、GLRenderer 和 AudioOutput 不迁移到后台。
     bool ok = player_.open(mediaPath, w);
     if (!ok) {
         if (result.errorMessage.empty())

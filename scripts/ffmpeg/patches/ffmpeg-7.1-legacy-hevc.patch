@@ -46,7 +46,7 @@ Upstream files retain their LGPL-2.1-or-later license.
 +            }
              type = avio_r8(s->pb);
              size--;
-@@ -1464,8 +1471,15 @@
+@@ -1464,8 +1471,14 @@
          }
  
          if (st->codecpar->codec_id == AV_CODEC_ID_H264 || st->codecpar->codec_id == AV_CODEC_ID_MPEG4 ||

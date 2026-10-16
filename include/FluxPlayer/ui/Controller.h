@@ -224,6 +224,7 @@ private:
     float qualityMenuPosY_ = 0.0f;
     std::vector<QualityItem> qualities_;   ///< 当前可用画质列表
     std::string currentQualityLabel_;      ///< 当前画质标签（空则不显示按钮）
+    uint64_t completedQualityRequest_ = 0; ///< 主线程最后处理的画质完成身份。
     std::string currentPageUrl_;           ///< 网页 URL，仅供画质切换
     std::string currentSourceUrl_;         ///< 用户打开的原始网络来源，供通用下载使用
 

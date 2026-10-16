@@ -40,12 +40,13 @@ public:
     // ===== 生命周期管理 =====
 
     /**
-     * 启动所有已创建的队列（重置 abort 标志，serial 归零）
+     * 启动前推进 packet serial、清空帧队列并同步期望代际，随后重置 abort。
+     * 调用前必须已回收旧 Worker。
      */
     void startAll();
 
     /**
-     * abort 所有队列，唤醒阻塞的 get/peekWritable（join 线程前调用）
+     * abort 所有队列，唤醒 get/帧提交等待（join 线程前调用）
      */
     void abortAll();
 
@@ -55,7 +56,7 @@ public:
     void flushAll();
 
     /**
-     * 仅 flush packet 队列（seek 时用，bump serial）
+     * 推进 packet serial 并同步清空帧队列，避免包帧代际不匹配。
      */
     void flushPacketQueues();
 

@@ -24,10 +24,10 @@ void ClockController::startSeekToTarget(double targetPTS) {
 }
 
 bool ClockController::isSeekTimedOut(double timeoutSec) const {
-    if (!decodingToTarget_.load()) {
-        return false;
-    }
-    double elapsed = static_cast<double>(steadyNowNs() - seekTargetStartNs_.load()) / 1e9;
+    // 计时窗口独立于视频的精确解码标志：视频到达目标后音频仍可能缺包。
+    const int64_t start = seekTargetStartNs_.load();
+    if (start == 0) return false;
+    double elapsed = static_cast<double>(steadyNowNs() - start) / 1e9;
     return elapsed > timeoutSec;
 }
 

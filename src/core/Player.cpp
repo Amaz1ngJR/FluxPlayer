@@ -56,6 +56,27 @@ extern "C" {
 
 namespace FluxPlayer {
 
+// done release/acquire 发布结果；只有 join 后主线程才接管资源。
+// cancel 的存储地址不随 unique_ptr 移动，候选必须先关读端再 join 写端。
+struct Player::QualityCandidate {
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> done{false};
+    uint64_t requestId = 0;
+    double seekTime = 0.0;
+    bool success = false;
+    ExtractedStream info;
+    std::string error;
+    std::unique_ptr<DashMerger> merger;
+    std::unique_ptr<Demuxer> input;
+    std::thread worker;
+    ~QualityCandidate() {
+        cancel.store(true);
+        if (worker.joinable()) worker.join();
+        input.reset();
+        merger.reset();
+    }
+};
+
 namespace {
 
 // 音频追赶容差 kAudioCatchupToleranceSec 定义在 core/TimeUtils.h，
@@ -213,6 +234,52 @@ Player::~Player() {
     LOG_INFO("Player destroyed");
 }
 
+bool Player::beginOpenPreparation() {
+    if (getState() != PlayerState::IDLE && getState() != PlayerState::STOPPED) return false;
+    if (demuxWorker_ || videoDecodeWorker_ || audioDecodeWorker_) return false;
+    shouldQuit_.store(true);
+    preparedOpenInput_.reset();
+    preparedOpenMerger_.reset();
+    preparedOpenPath_.clear();
+    shouldQuit_.store(false);
+    return true;
+}
+
+void Player::cancelOpenPreparation() {
+    shouldQuit_.store(true, std::memory_order_release);
+}
+
+bool Player::prepareOpenInput(const std::string& path, std::string& error) {
+    if (isImageFile(path)) return true; // 单帧图片无输入候选，仍由主线程安装。
+    // 不改播放状态，不调用外部回调，不创建 GL/设备。调用者必须 join 后再 open/close。
+    std::unique_ptr<DashMerger> merger;
+    std::unique_ptr<Demuxer> input;
+    try {
+        input = std::make_unique<Demuxer>(&shouldQuit_);
+        const bool extracted = hasPreExtracted_ && preExtractedPageUrl_ == path;
+        const auto& info = preExtractedInfo_;
+        std::string url = extracted ? info.videoUrl : path;
+        if (extracted && info.isDash) {
+            merger = std::make_unique<DashMerger>();
+            if (!merger->start(info.videoUrl, info.audioUrl, info.headers, 0.0,
+                    nullptr, 0, &shouldQuit_) || !merger->waitReady()) {
+                error = "DASH 输入准备失败"; return false;
+            }
+            url = merger->getPipeUrl();
+        }
+        const bool ok = merger ? input->openSelfDescribingPipe(url, info.duration)
+            : input->open(url, extracted ? info.headers : "", extracted ? info.duration : 0.0);
+        if (!ok || shouldQuit_.load()) { error = "输入打开或探测失败/已取消"; return false; }
+        preparedOpenPath_ = path;
+        preparedOpenMerger_ = std::move(merger);
+        preparedOpenInput_ = std::move(input);
+        return true;
+    } catch (const std::exception& failure) {
+        error = failure.what();
+        return false;
+    }
+}
+
 bool Player::open(const std::string& filePath) {
     LOG_INFO("Opening file: " + filePath);
 
@@ -220,6 +287,9 @@ bool Player::open(const std::string& filePath) {
         LOG_ERROR("Cannot open file: player is busy");
         return false;
     }
+
+    // 上一次会话的 Worker 必须已回收；新 open 才能解除稳定停止标志。
+    shouldQuit_.store(false);
 
     // 原始来源必须在任何提取/重定向之前保存：下载入口依赖它重新建立独立任务。
     // 只有通过状态校验后才发布，避免一次失败的重复 open 覆盖正在播放媒体的来源。
@@ -254,7 +324,7 @@ bool Player::open(const std::string& filePath) {
             LOG_INFO("Player::open: 使用预先提取的流信息（来自 OpeningScreen）");
         } else {
             std::string error;
-            if (!StreamExtractor::extract(filePath, "", info, error)) {
+            if (!StreamExtractor::extract(filePath, "", info, error, &shouldQuit_)) {
                 triggerError("流提取失败: " + error);
                 setState(PlayerState::ERRORED);
                 return false;
@@ -332,7 +402,10 @@ bool Player::open(const std::string& filePath) {
 
         knownDuration = info.duration;
 
-        if (info.isDash) {
+        if (info.isDash && preparedOpenInput_ && preparedOpenPath_ == filePath) {
+            // 打开/探测已经在后台完成，主线程只移交所有权。
+            lastExtractedInfo_ = info;
+        } else if (info.isDash) {
             // DASH 分离流：启动合并器，Demuxer 读取管道
             dashMerger_ = std::make_unique<DashMerger>();
             const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
@@ -373,12 +446,16 @@ bool Player::open(const std::string& filePath) {
     liveReopenDuration_ = knownDuration;
 
     // 创建并打开解复用器
-    demuxer_ = std::make_unique<Demuxer>();
-    LOG_INFO("Player::open: 开始打开 demuxer, actualPath=" + actualPath);
-    bool opened = httpHeaders.empty() && knownDuration == 0.0
-        ? demuxer_->open(actualPath)
-        : demuxer_->open(actualPath, httpHeaders, knownDuration);
-    LOG_INFO("Player::open: demuxer 打开结果=" + std::string(opened ? "成功" : "失败"));
+    bool opened = false;
+    if (preparedOpenInput_ && preparedOpenPath_ == filePath) {
+        demuxer_ = std::move(preparedOpenInput_);
+        dashMerger_ = std::move(preparedOpenMerger_);
+        preparedOpenPath_.clear();
+        opened = true;
+    } else {
+        demuxer_ = std::make_unique<Demuxer>(&shouldQuit_);
+        opened = demuxer_->open(actualPath, httpHeaders, knownDuration);
+    }
 
     if (!opened) {
         triggerError("Failed to open file: " + filePath);
@@ -387,13 +464,13 @@ bool Player::open(const std::string& filePath) {
     }
 
     // 纯音频模式检测：无视频流但有音频流时进入音频-only 模式
-    if (demuxer_->getVideoStreamIndex() < 0) {
+    audioOnly_ = demuxer_->getVideoStreamIndex() < 0;
+    if (audioOnly_) {
         if (demuxer_->getAudioStreamIndex() < 0) {
             triggerError("No audio or video stream found in file");
             setState(PlayerState::ERRORED);
             return false;
         }
-        audioOnly_ = true;
         LOG_INFO("Audio-only mode: no video stream detected");
     }
 
@@ -406,12 +483,7 @@ bool Player::open(const std::string& filePath) {
     if (isLiveStream_) {
         LOG_INFO("Detected live stream, enabling special handling");
         LOG_INFO("Live stream features: PTS normalization, no seek support");
-        // 纯视频流（无音频轨）不会有音频线程调用 normalizeAudio，纯音频流反之。
-        // 必须先声明本流的轨道构成，否则基准校准会永远等不到缺失的那一路，
-        // 表现为每帧都被丢弃、VQueue 恒为 0、持续 restart from latest IDR。
-        // 用 demuxer 的流索引判断（open 时已确定），不能依赖 hasAudioStream_（解码器初始化后才赋值）。
-        ptsNormalizer_->setHasVideoStream(demuxer_->getVideoStreamIndex() >= 0);
-        ptsNormalizer_->setHasAudioStream(demuxer_->getAudioStreamIndex() >= 0);
+        // 直播起点等待在 Worker 启动前按最终播放拓扑配置，不能按源音轨等待。
         // 重置实时流 PTS 归一化组合状态
         ptsNormalizer_->reset();
         // 启动预缓冲：等待队列填充到安全水位再开始渲染
@@ -453,6 +525,13 @@ bool Player::open(const std::string& filePath) {
         return false;
     }
 
+    // 先确定可播放分支，纯音频输出失败不再继续创建渲染资源。
+    if (!initAudioOutput()) {
+        triggerError("Audio-only input cannot play: no usable audio decoder/output");
+        setState(PlayerState::ERRORED);
+        return false;
+    }
+
     // 初始化窗口和渲染器
     if (!initWindowAndRenderer()) {
         triggerError("Failed to initialize window and renderer");
@@ -464,44 +543,6 @@ bool Player::open(const std::string& filePath) {
     if (audioOnly_) {
         loadCoverImage();
     }
-
-    // 初始化音频输出（如果有音频流）
-    // 主时钟选择：
-    //   有音频且输出初始化成功 → AUDIO_CLOCK，由音频回调按真实采样率推进，视频追随，最稳
-    //   无音频或音频输出失败   → EXTERNAL_CLOCK，由墙钟自动推进
-    // 不能用 VIDEO_CLOCK：videoClock_ 仅在帧渲染时推进，而 renderVideoFrame 又用
-    // "PTS <= masterClock" 判断是否取帧，会自循环卡在首帧
-    ClockType clockType = ClockType::EXTERNAL_CLOCK;
-    if (audioDecoder_) {
-        audioOutput_ = std::make_unique<AudioOutput>();
-        AudioOutput::AudioFormat audioFormat;
-        audioFormat.sampleRate = audioDecoder_->getSampleRate();
-        audioFormat.channels = audioDecoder_->getChannels();
-        audioFormat.bitsPerSample = 16;  // 固定使用 16-bit PCM
-
-        // 保存音频参数
-        audioSampleRate_ = audioFormat.sampleRate;
-        audioChannels_ = audioFormat.channels;
-        audioBufferDelay_ = 0.0;  // 不再手动计算，AudioOutput会自动管理
-
-        // 使用 lambda 绑定音频回调
-        auto audioCallback = [this](uint8_t* buffer, size_t bufferSize) -> size_t {
-            return this->audioOutputCallback(buffer, bufferSize);
-        };
-
-        if (audioOutput_->init(audioFormat, audioCallback)) {
-            LOG_INFO("Audio output initialized successfully");
-            audioOutput_->setVolume(volume_.load());  // 应用配置的音量
-            clockType = ClockType::AUDIO_CLOCK;       //优先用音频时钟做主时钟
-        } else {
-            LOG_WARN("Failed to initialize audio output, audio will be disabled");
-            audioOutput_.reset();
-            // clockType 保持 EXTERNAL_CLOCK
-        }
-    }
-
-    // 根据是否有音频设置时钟类型（ClockController 已初始化为 EXTERNAL_CLOCK，有音频时切到 AUDIO_CLOCK）
-    clockController_->avSync()->setClockType(clockType);
 
     // 同步画质列表到 Controller（网页视频专用）
     if (controller_ && !lastPageUrl_.empty() && !lastExtractedInfo_.qualities.empty()) {
@@ -578,13 +619,9 @@ bool Player::play() {
     LOG_INFO("Starting playback");
 
     if (stateManager_->current() == PlayerState::PAUSED) {
-        // 从暂停恢复
-        clockController_->avSync()->resume();
-        if (audioOutput_) {
-            audioOutput_->resume();
-        }
-        setState(PlayerState::PLAYING);
-        return true;
+        // 从暂停恢复，包含暂停中安装的新音频设备。
+        resumeInternal();
+        return stateManager_->current() == PlayerState::PLAYING;
     }
 
     // 重置同步器和播放时间
@@ -607,9 +644,9 @@ bool Player::play() {
 
     // 重置实时流状态
     if (isLiveStream_) {
-        // 再次声明轨道构成：seek/重播路径可能改变可用流，且 demuxer 索引始终是最新真相。
-        ptsNormalizer_->setHasVideoStream(demuxer_->getVideoStreamIndex() >= 0);
-        ptsNormalizer_->setHasAudioStream(demuxer_->getAudioStreamIndex() >= 0);
+        // 起点等待按实际启用的播放分支配置，不等待已降级的源音轨。
+        ptsNormalizer_->setHasVideoStream(hasVideoStream_);
+        ptsNormalizer_->setHasAudioStream(hasAudioStream_);
         ptsNormalizer_->reset();
         // 在工作线程启动前重置源进度与追赶状态，避免重播/重新打开后沿用旧流水位。
         liveVideoLatency_.reset();
@@ -621,20 +658,27 @@ bool Player::play() {
         LOG_INFO("Live stream: Reset PTS normalization state, prebuffering enabled");
     }
 
-    // 启动队列与 demux + video/audio decode 线程
+    // Worker 尚未运行；设备预填充只能交付静音，不能消费旧队列或推进音频时钟。
     shouldQuit_.store(false);
-    startWorkerThreads();
-
-    // 启动音频输出
-    if (audioOutput_) {
-        audioOutput_->start();
+    audioPausedForSeek_.store(hasAudioStream_, std::memory_order_release);
+    if (audioOutput_ && !audioOutput_->start()) {
+        if (!disableAudioPlayback()) {
+            shouldQuit_.store(true);
+            setState(PlayerState::ERRORED);
+            triggerError("Audio-only input: output device failed to start");
+            return false;
+        }
+        ptsNormalizer_->setHasAudioStream(false);
     }
+    startWorkerThreads();
+    audioPausedForSeek_.store(false, std::memory_order_release);
 
     setState(PlayerState::PLAYING);
     return true;
 }
 
 void Player::pause() {
+    if (pausedForQualityInstall_) { qualityInstallWantsPlaying_ = false; return; }
     // pause 接入控制线程
     if (stateManager_->current() != PlayerState::PLAYING) {
         return;
@@ -643,6 +687,7 @@ void Player::pause() {
 }
 
 void Player::resume() {
+    if (pausedForQualityInstall_) { qualityInstallWantsPlaying_ = true; return; }
     // resume 接入控制线程
     if (stateManager_->current() != PlayerState::PAUSED) {
         return;
@@ -679,6 +724,7 @@ void Player::close() {
 
     stop();
     cleanup();
+    notifyRecordingErrors();
     setState(PlayerState::IDLE);
 }
 
@@ -707,6 +753,14 @@ void Player::run() {
             // 在 renderCallback_()（UI）之前执行，本帧 UI 投递的命令在下一帧开头落地，
             // 延迟最多一帧（~16ms）用户无感，换来「命令执行绝不与 UI 回调交错」的强保证。
             pumpCommands();
+            // 命令可能在新管线安装失败后释放渲染器，不再进入本帧渲染。
+            if (shouldQuit_.load()) break;
+            // 安装期间设备归事务所有；Worker 不再直接 resume 平台设备。
+            if (!pausedForQualityInstall_ && isPlaying() && audioOutput_ &&
+                !audioPausedForSeek_.load(std::memory_order_acquire)) {
+                const bool needsActivation = !audioOutput_->isPlaying() || audioResumePending_.exchange(false);
+                if (needsActivation && !activateAudioOutput()) break;
+            }
 
             // 解码完成后，等帧队列消费完再退出（处理字幕流比视频流短等情况）。
             // 按已启用的流组合判断：不存在的流视为已完成；存在的流需 decode 线程
@@ -716,9 +770,12 @@ void Player::run() {
             bool videoDone = !hasVideoStream_ ||
                 (videoDrainedEof_.load() &&
                  (!queueManager_->videoFrameQueue() || queueManager_->videoFrameQueue()->numReadable() == 0));
-            bool audioDone = !hasAudioStream_ ||
-                (audioDrainedEof_.load() &&
-                 (!queueManager_->audioFrameQueue() || queueManager_->audioFrameQueue()->numReadable() == 0));
+            bool audioDone = !hasAudioStream_;
+            if (hasAudioStream_) {
+                // 与填充/提交同锁：队列清空不等于设备已经播完，ALSA 还可能持有未提交尾部。
+                std::lock_guard<std::mutex> lock(audioCallbackMutex_);
+                audioDone = isAudioPlaybackDrainedLocked();
+            }
             // 图片模式无 worker 线程，demuxFinished_ 永远不会置位，不能走此退出路径
             if (!isImageMode_ && demuxFinished_.load() && videoDone && audioDone) {
                 shouldQuit_.store(true);
@@ -806,8 +863,14 @@ void Player::run() {
 
         LOG_INFO("Exiting main loop");
 
-        // 触发播放完成回调
-        if (playbackFinishedCallback_) {
+        // 读超时/永久错误不能触发正常完成或自动循环，回调留在主线程。
+        const int inputError = inputReadFailure_.exchange(0);
+        if (inputError != 0) {
+            setState(PlayerState::ERRORED);
+            char errorText[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(inputError, errorText, sizeof(errorText));
+            triggerError("Input read failed: " + std::string(errorText));
+        } else if (getState() != PlayerState::ERRORED && playbackFinishedCallback_) {
             playbackFinishedCallback_();
         }
 
@@ -816,6 +879,7 @@ void Player::run() {
             // 非循环：可能是自然 EOF、ESC 或窗口关闭。统一停止音频输出并回收 worker，
             // 使 run() 返回时不再有后台线程访问 Player 的队列和时钟。
             shutdownWorkersAfterRun();
+            notifyRecordingErrors();
             shouldLoop = false;
         }
     }
@@ -854,7 +918,8 @@ void Player::renderVideoFrame(double& lastFrameTime) {
             // 基于主时钟决定是否取下一帧（VSync 驱动渲染循环，不再 sleep）
             // peekRef 取独立引用看 PTS，不消费；到显示时间才 consume() 推进 keep-last。
             int droppedThisTick = 0;
-            while (queueManager_->videoFrameQueue()->peekRef(leasedFrame)) {
+            FrameQueue::ReadToken videoToken;
+            while (queueManager_->videoFrameQueue()->peekRef(leasedFrame, videoToken)) {
                 double nextPTS = leasedFrame.getPTS();
                 double masterClock = clockController_->avSync()->getMasterClock();
                 double rate = playbackRate_.load();
@@ -866,9 +931,9 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                     if (frame) {
                         droppedFrames_.fetch_add(1);
                     }
-                    selectedFrame.refFrom(leasedFrame);
+                    if (!queueManager_->videoFrameQueue()->consume(videoToken)) continue;
+                    selectedFrame.swap(leasedFrame);
                     frame = &selectedFrame;
-                    queueManager_->videoFrameQueue()->consume();
                     ++droppedThisTick;
                     if (droppedThisTick >= kMaxLiveCatchupDropsPerTick) break;
                     continue;
@@ -904,14 +969,14 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                     if (frame) {
                         droppedFrames_.fetch_add(1);
                     }
-                    selectedFrame.refFrom(leasedFrame);
+                    if (!queueManager_->videoFrameQueue()->consume(videoToken)) continue;
+                    selectedFrame.swap(leasedFrame);
                     frame = &selectedFrame;
                     if (!isLiveStream_ && duration_ > 0.0 && std::isfinite(nextPTS)) {
                         nextPTS = std::max(0.0, std::min(nextPTS, duration_));
                     }
                     clockController_->avSync()->updateVideoClock(nextPTS);
                     lastFrameTime = nextPTS;
-                    queueManager_->videoFrameQueue()->consume();
                     ++droppedThisTick;
                     if (droppedThisTick >= kMaxHighSpeedFrameDropsPerTick) {
                         break;
@@ -925,10 +990,10 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 }
 
                 if (dropFrame && droppedThisTick < kMaxHighSpeedFrameDropsPerTick) {
+                    if (!queueManager_->videoFrameQueue()->consume(videoToken)) continue;
                     droppedFrames_.fetch_add(1);
                     clockController_->avSync()->updateVideoClock(nextPTS);
                     lastFrameTime = nextPTS;
-                    queueManager_->videoFrameQueue()->consume();
                     ++droppedThisTick;
                     continue;
                 }
@@ -936,9 +1001,9 @@ void Player::renderVideoFrame(double& lastFrameTime) {
                 if (frame) {
                     droppedFrames_.fetch_add(1);
                 }
-                selectedFrame.refFrom(leasedFrame);
+                if (!queueManager_->videoFrameQueue()->consume(videoToken)) continue;
+                selectedFrame.swap(leasedFrame);
                 frame = &selectedFrame;
-                queueManager_->videoFrameQueue()->consume();
                 break;
             }
         }
@@ -1069,6 +1134,8 @@ void Player::updatePlaybackStats(double currentTime, double& lastPrint, size_t& 
  * @return true 表示已重启应继续外层循环，false 表示不循环应退出
  */
 bool Player::handleLoopRestart() {
+    // 新画质安装失败时不允许循环重播已被释放的输入。
+    if (getState() == PlayerState::ERRORED || !demuxer_ || !renderer_) return false;
     // 检查是否需要循环播放
     if (loopPlayback_.load() && duration_ > 0.0 && !isLiveStream_ && !userStopped_.load() && !window_->shouldClose()) {
         LOG_INFO("Loop playback enabled, restarting...");
@@ -1078,7 +1145,14 @@ bool Player::handleLoopRestart() {
         joinWorkerThreads(/*abortQueues=*/true);
 
         // seek demuxer 到开头。线程均已 join，此处由主线程独占访问 demuxer/解码器，安全。
-        demuxer_->seek(0);
+        // 旧 I/O 已退出后才解除停止状态，避免新一轮 Seek 被旧会话取消。
+        shouldQuit_.store(false);
+        if (!demuxer_->seek(0)) {
+            shouldQuit_.store(true);
+            setState(PlayerState::ERRORED);
+            triggerError("Loop restart: failed to seek input");
+            return false;
+        }
         if (videoDecoder_) videoDecoder_->flush();
         if (audioDecoder_) audioDecoder_->flush();
         // 字幕同步重置
@@ -1102,6 +1176,7 @@ bool Player::handleLoopRestart() {
 
 void Player::quit() {
     LOG_INFO("Quit requested");
+    cancelQualityCandidate(false);
     shouldQuit_.store(true);
 
     // 仅在 Player 拥有窗口时才让窗口 shouldClose=true（CLI 模式行为不变）。
@@ -1124,7 +1199,8 @@ double Player::getCurrentTime() const {
     // 视频尚未对齐时固定在用户目标，直到音视频两路均 ready 才恢复音频主时钟。
     const bool demuxReady = seekDemuxReady_.load(std::memory_order_acquire);
     const bool videoAligned = seekVideoAligned_.load(std::memory_order_acquire);
-    const bool audioAligned = seekAudioAligned_.load(std::memory_order_acquire);
+    const bool audioAligned = seekAudioAligned_.load(std::memory_order_acquire) ||
+        (clockController_ && clockController_->avSync()->getClockType() == ClockType::EXTERNAL_CLOCK);
     if (!demuxReady || !videoAligned || !audioAligned) {
         const double uiPTS = videoAligned ? lastRenderedPTS_.load()
                                           : seekUiTargetPTS_.load(std::memory_order_relaxed);
@@ -1133,12 +1209,15 @@ double Player::getCurrentTime() const {
     if (audioPausedForSeek_.load(std::memory_order_acquire)) {
         return clampToDuration(lastRenderedPTS_.load());
     }
-    if (audioOutput_ && clockController_) {
+    if (audioOutput_ && clockController_ &&
+        clockController_->avSync()->getClockType() == ClockType::AUDIO_CLOCK) {
         const double audioPTS = clampToDuration(clockController_->avSync()->getAudioClock());
         const double videoPTS = clampToDuration(lastRenderedPTS_.load());
         // 最后一道安全网：VOD 后退 seek 若平台音频设备仍短暂报告 seek 前时钟，不能让 UI
         // 跨数秒跳回旧位置。正常播放 A/V 差应远小于 1s，超过阈值时以实际画面为准。
-        if (!isLiveStream_ && std::isfinite(audioPTS) && std::isfinite(videoPTS) &&
+        // 仅 A/V 媒体使用画面位置兜底；纯音频没有视频时钟，比较会在播放超过 1s 后
+        // 把进度错误退回 0，并使后续相对 Seek 使用错误起点。
+        if (hasVideoStream_ && !isLiveStream_ && std::isfinite(audioPTS) && std::isfinite(videoPTS) &&
             std::abs(audioPTS - videoPTS) > 1.0) {
             return videoPTS;
         }
@@ -1204,7 +1283,8 @@ void Player::setBrightness(float brightness) {
 }
 
 void Player::setVolume(float volume) {
-    volume_.store(std::max(0.0f, std::min(1.0f, volume)));
+    if (!std::isfinite(volume)) return;
+    volume_.store(std::clamp(volume, 0.0f, 1.0f));
     Config::getInstance().getMutable().volume = volume_.load();
     Config::getInstance().save();
     if (audioOutput_) {
@@ -1232,6 +1312,11 @@ void Player::setPlaybackSpeed(double speed) {
 }
 
 void Player::startWorkerThreads() {
+    firstFrameSerial_.store(-1);
+    firstFrameSignaled_.store(false);
+    failedDashSeekSerial_.store(-1);
+    audioResumePending_.store(false);
+    inputReadFailure_.store(0);
     // 重置结束/停泊标志：不存在的流标记为已 drained，避免 EOF 判定等待未启动的线程
     demuxFinished_.store(false);
     decodingFinished_.store(false);
@@ -1256,11 +1341,20 @@ void Player::startWorkerThreads() {
 }
 
 void Player::joinWorkerThreads(bool abortQueues) {
+    const auto joinStart = std::chrono::steady_clock::now();
+    const bool hadWorkers = demuxWorker_ || videoDecodeWorker_ || audioDecodeWorker_;
+    // 中断回调读取 Player 的稳定原子成员，不跨线程访问可能由 demux 替换的输入。
+    shouldQuit_.store(true, std::memory_order_release);
     // demux 可能正阻塞在 DASH 两路 HTTP open/read；先改变 generation，FFmpeg 的
     // interrupt_callback 才能在队列 abort 之后及时退出，避免 stop/join 再等待 15 秒。
+    // 已安装的候选 merger 不借用旧 shouldQuit_，由拥有者显式中断。
+    {
+        std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
+        if (dashMerger_) dashMerger_->requestStop();
+    }
     if (demuxWorker_) demuxWorker_->cancelPendingDashIo();
     if (abortQueues) {
-        // 唤醒阻塞的线程：packet 队列 get、frame 队列 peekWritable 全部解除等待（QueueManager 聚合）
+        // 唤醒 packet get 与 frame 提交等待（QueueManager 聚合）。
         queueManager_->abortAll();
     }
 
@@ -1271,6 +1365,11 @@ void Player::joinWorkerThreads(bool abortQueues) {
     demuxWorker_.reset();
     videoDecodeWorker_.reset();
     audioDecodeWorker_.reset();
+    if (hadWorkers) {
+        LOG_INFO("Worker cancellation/join elapsed=" + std::to_string(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - joinStart).count()) + "ms");
+    }
 
     // 清空所有队列（QueueManager 聚合）
     queueManager_->flushAll();
@@ -1278,6 +1377,7 @@ void Player::joinWorkerThreads(bool abortQueues) {
 }
 
 void Player::shutdownWorkersAfterRun() {
+    cancelQualityCandidate(true);
     // 音频输出线程通过回调持续消费 audioFrameQueue_。必须先停止音频设备并等待其线程
     // 退出，再 abort/flush 队列；否则回收 worker 的同时音频回调仍会访问空队列，不但会
     // 连续打印 underrun，还会让退出阶段存在不必要的并发访问。stop() 是幂等的，随后
@@ -1319,13 +1419,16 @@ void Player::triggerError(const std::string& errorMsg) {
 
 void Player::cleanup() {
     LOG_INFO("Cleaning up player resources");
+    cancelQualityCandidate(true);
 
     // 停止所有线程。generation 必须保持单调，只能递增，不能在复用 Player 时归零；
     // 归零可能恰好等于旧 DashMerger 快照，让其 interrupt_callback 漏掉取消。
     shouldQuit_.store(true);
+    preparedOpenInput_.reset();
+    preparedOpenMerger_.reset();
+    preparedOpenPath_.clear();
 
-    // 停止录制（RecordingService 析构时自动处理，此处无需显式停止）
-    // recordingService_ 会在后续 reset() 时自动析构并停止录制
+    // 录制由 demux 退出路径封口；join 后再兜底处理未启动 Worker 的情况。
 
     // close() 也可能在 run() 之外调用。先停止音频回调线程，再回收其所消费的帧队列，
     // 保证 cleanup 的独立调用路径与 run() 正常退出路径拥有相同的线程关闭顺序。
@@ -1336,6 +1439,7 @@ void Player::cleanup() {
 
     // abort 队列唤醒阻塞线程，join demux + video/audio decode 三线程并清空队列
     joinWorkerThreads(/*abortQueues=*/true);
+    if (recordingService_) recordingService_->finishForStreamReplacement();
 
     // GLRenderer 的硬件互操作对象必须在创建它的 OpenGL 上下文仍然有效且当前时
     // 注销 WGL/CGL 资源。共享窗口模式中 Controller/其他页面可能切换过上下文，
@@ -1371,12 +1475,22 @@ void Player::cleanup() {
         speedSwrContext_ = nullptr;
     }
     demuxer_.reset();
+    // merger 的中断回调借用 Player 原子状态，必须在成员开始析构前 join。
+    dashMerger_.reset();
 
     // 清空帧队列（audioOutput_ 已停止，时钟 seek 状态归零，clockController_ 保留供复用）
     if (queueManager_->videoFrameQueue()) queueManager_->videoFrameQueue()->flush();
     if (queueManager_->audioFrameQueue()) queueManager_->audioFrameQueue()->flush();
     if (clockController_) clockController_->resetSeekState();
 
+    // 关闭使未执行的画质请求失效，递增身份但不回退序号。
+    ++qualitySwitch_.requestId;
+    qualitySwitch_.pending = false;
+    qualitySwitch_.success = false;
+    qualitySwitch_.formatId.clear();
+    qualitySwitch_.error.clear();
+    qualityMediaInfo_.reset();
+    failedDashSeekSerial_.store(-1);
     filePath_.clear();
     currentSourceUrl_.clear();
     currentSourceIsNetwork_ = false;
@@ -1595,7 +1709,13 @@ bool Player::initWindowAndRenderer() {
         }
     });
 
-    // 创建渲染器
+    return initRenderer();
+}
+
+bool Player::initRenderer() {
+    glfwMakeContextCurrent(window_->getGLFWWindow());
+    // 创建渲染器；旧硬件引用先在当前 GL 上下文释放。
+    renderer_.reset();
     renderer_ = std::make_unique<GLRenderer>();
     if (!renderer_->init(videoWidth_, videoHeight_)) {
         LOG_ERROR("Failed to initialize renderer");
@@ -1619,6 +1739,137 @@ bool Player::initWindowAndRenderer() {
     }
 
     LOG_INFO("Window and renderer initialized successfully");
+    return true;
+}
+
+bool Player::initAudioOutput() {
+    // 仅在 Worker 启动前（或旧回调及 Worker 已退出后）确定最终播放拓扑。
+    audioOutput_.reset();
+    audioSampleRate_ = audioChannels_ = 0;
+    audioBufferDelay_ = 0.0;
+    clockController_->avSync()->setClockType(ClockType::EXTERNAL_CLOCK);
+    if (audioDecoder_) {
+        AudioOutput::AudioFormat format;
+        format.sampleRate = audioDecoder_->getSampleRate();
+        format.channels = audioDecoder_->getChannels();
+        format.bitsPerSample = 16;
+        // 无效格式不能交给平台缓冲区尺寸计算（可能出现除零）。
+        if (format.sampleRate > 0 && format.channels > 0) {
+            audioOutput_ = std::make_unique<AudioOutput>();
+            if (!audioOutput_->init(format, [this](uint8_t* buffer, size_t size) {
+                    return audioOutputCallback(buffer, size);
+                })) audioOutput_.reset();
+        }
+        if (audioOutput_) {
+            const size_t frames = audioOutput_->bufferCapacity() / (format.channels * sizeof(int16_t));
+            audioCoverageStarts_.resize(frames);
+            audioCoverageEnds_.resize(frames);
+            audioCoverageCount_ = audioSubmittedFrames_ = 0;
+            clockController_->avSync()->prepareAudioCoverage(frames * 8);
+            audioOutput_->setSubmitCallback([this](size_t offset, size_t count, double delay) {
+                std::lock_guard<std::mutex> lock(audioCallbackMutex_);
+                if (audioPausedForSeek_.load() || offset >= audioCoverageCount_) return;
+                count = std::min(count, audioCoverageCount_ - offset);
+                clockController_->avSync()->submitAudioCoverage(audioCoverageStarts_.data() + offset,
+                    audioCoverageEnds_.data() + offset, count, audioSampleRate_, delay);
+                audioSubmittedFrames_ = std::max(audioSubmittedFrames_, offset + count);
+                if (count && !seekAudioAligned_.load()) markSeekAudioAligned(audioCoverageStarts_[offset]);
+            });
+            audioSampleRate_ = format.sampleRate;
+            audioChannels_ = format.channels;
+            audioOutput_->setVolume(muted_.load() ? 0.0f : volume_.load());
+            clockController_->avSync()->setClockType(ClockType::AUDIO_CLOCK);
+        }
+    }
+    hasAudioStream_ = (audioOutput_ != nullptr);
+    if (hasAudioStream_) return true;
+    return disableAudioPlayback();
+}
+
+bool Player::disableAudioPlayback() {
+    if (audioOutput_) { audioOutput_->stop(); audioOutput_.reset(); }
+    hasAudioStream_ = false;
+    audioResumePending_.store(false);
+    audioSampleRate_ = audioChannels_ = 0;
+    audioBufferDelay_ = 0.0;
+    clockController_->avSync()->setClockType(ClockType::EXTERNAL_CLOCK);
+    // 源音轨仍由 Demuxer 保留供录制/媒体信息使用；只拆除无人消费的播放分支。
+    // 输入已停止，释放最后一次回调持有的引用和工作区。
+    audioCoverageStarts_.clear();
+    audioCoverageEnds_.clear();
+    audioCoverageCount_ = 0;
+    audioDecoder_.reset();
+    queueManager_->audioPacketQueue().reset();
+    queueManager_->audioFrameQueue().reset();
+    audioDrainedEof_.store(true);
+    seekAudioAligned_.store(true);
+    audioPausedForSeek_.store(false);
+    audioDeviceFlushReady_.store(true);
+    allowAudioClockRebase_.store(false);
+    pendingAudioOffset_.store(0);
+    pendingAudioToken_ = {};
+    audioCatchupTargetPTS_.store(-1.0);
+    audioQueueDepth_.store(0);
+    audioUnderrunCount_.store(0);
+    if (!hasVideoStream_) {
+        LOG_ERROR("Audio-only input has no usable audio decoder/output");
+        return false;
+    }
+    if (demuxer_->getAudioStreamIndex() >= 0) {
+        LOG_WARN("Audio playback unavailable; continuing video with external clock");
+        if (toastManager_) {
+            ToastMessage message;
+            message.type = ToastType::Warning;
+            message.title = "Audio unavailable";
+            message.content = "Continuing video without audio output";
+            toastManager_->show(message);
+        }
+    }
+    return true;
+}
+
+bool Player::activateAudioOutput() {
+    if (!audioOutput_) return true;
+    const bool ok = audioOutput_->isPlaying() ? audioOutput_->resume() : audioOutput_->start();
+    if (ok) return true;
+    return handleAudioOutputFailure();
+}
+
+bool Player::handleAudioOutputFailure() {
+    const bool wasPaused = isPaused();
+    const double position = getCurrentTime();
+    cancelQualityCandidate(false);
+    qualitySwitch_.pending = false;
+    qualitySwitch_.success = false;
+    qualitySwitch_.error = "音频故障使候选失效";
+    // 先停设备回调，再取消/join；拆除音频分支只发生在所有使用者退出之后。
+    shouldQuit_.store(true);
+    if (audioOutput_) audioOutput_->stop();
+    joinWorkerThreads(/*abortQueues=*/true);
+    if (!hasVideoStream_ || !demuxer_ || !disableAudioPlayback()) {
+        clockController_->avSync()->pause();
+        setState(PlayerState::ERRORED);
+        triggerError("Audio output failed; no usable video playback remains");
+        return false;
+    }
+    ptsNormalizer_->setHasAudioStream(false);
+    clockController_->resetSeekState();
+    cancelSeekAlignment();
+    clockController_->avSync()->seekTo(position);
+    if (wasPaused) clockController_->avSync()->pause();
+    else clockController_->avSync()->resume();
+    // 已停止旧使用者；重启前先清门控，重启后经完整 Seek 事务建立新 serial/落点。
+    shouldQuit_.store(false);
+    startWorkerThreads();
+    if (!isLiveStream_) seekInternal(position);
+    else if (lastExtractedInfo_.isDash) {
+        std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
+        demuxWorker_->postSeek(position);
+    }
+    if (wasPaused) clockController_->avSync()->pause();
+    else clockController_->avSync()->resume();
+    setState(wasPaused ? PlayerState::PAUSED : PlayerState::PLAYING);
+    LOG_WARN("Audio device failed; continuing video with external clock");
     return true;
 }
 
@@ -1678,8 +1929,8 @@ bool Player::initDecoders() {
         }
     }
 
-    // 记录启用的流，并为对应 packet 队列设置时间基准（duration() 背压用）。
-    // EOF 判定按已启用的流组合判断，避免等待一个从未启动的 decode 线程。
+    // 此处先记录解码能力；initAudioOutput 随后在 Worker 启动前确定最终音频播放分支。
+    // EOF/Seek/直播等待只读最终拓扑，不以源音轨是否存在为准。
     hasVideoStream_ = (videoDecoder_ != nullptr);
     hasAudioStream_ = (audioDecoder_ != nullptr);
 
@@ -1707,10 +1958,10 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     // 不会再有 seek 前回调把旧 PTS 写回 AVSync。
     std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
     // 参数验证
-    if (!buffer || bufferSize == 0) {
-        LOG_ERROR("Invalid audio callback parameters");
-        return 0;
-    }
+    audioCoverageCount_ = 0;
+    audioSubmittedFrames_ = 0;
+    if (!buffer || bufferSize == 0) return 0;
+    std::memset(buffer, 0, bufferSize);
 
     // seek 门控或直播起播预缓冲期间只交付静音：不消费队列、不推进 AClock，
     // 避免首帧尚未建立时主时钟先跑走，起播后把真实音视频误判为过期。
@@ -1726,240 +1977,33 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
         return bufferSize;
     }
 
-    const int sampleSize = 2;
-    const int frameBytes = audioChannels_ * sampleSize;
-    double rate = playbackRate_.load();
-    const double outputDuration = static_cast<double>(bufferSize) /
-                                  static_cast<double>(frameBytes) /
-                                  static_cast<double>(audioSampleRate_);
-
-    // 需要从队列消耗的字节数 = 输出字节数 × 速率
-    // 快放消耗更多内容（压缩播放），慢放消耗更少（拉伸播放）
-    size_t inputNeeded = static_cast<size_t>(bufferSize * rate);
-    if (inputNeeded == 0) inputNeeded = bufferSize;
-
-    // 临时缓冲区存储原始音频内容
-    std::vector<uint8_t> inputBuf(inputNeeded, 0);
-    size_t inputFilled = 0;
-    double firstFramePTS = 0.0;
-    bool hasValidFrame = false;
-    size_t queueDepth = 0;
-
-    // 本次音频回调的追赶目标。只有变速切换或单调性兜底明确设置
-    // audioCatchupTargetPTS_ 后才启用；普通播放不能拿当前 AClock 当目标主动丢帧。
-    // 音频回调本身就是推进 AClock 的来源，若每次都追当前 AClock，在回调延迟或
-    // 队列补充较快时可能在单次回调里连续丢帧很久，导致音频设备没有新 buffer。
-    double audioSyncTarget = audioCatchupTargetPTS_.load();
-    if (audioSyncTarget < 0.0) {
-        audioSyncTarget = -1.0;
+    const size_t frames = bufferSize / (audioChannels_ * sizeof(int16_t));
+    auto* queue = queueManager_->audioFrameQueue().get();
+    if (queue && frames <= audioCoverageStarts_.size()) {
+        audioCoverageCount_ = queue->renderAudio(buffer, frames, audioChannels_, audioSampleRate_,
+            playbackRate_.load(), audioCoverageStarts_.data(), audioCoverageEnds_.data());
+        audioQueueDepth_.store(queue->size());
     }
-    const size_t maxCatchupDiscardBytes = static_cast<size_t>(
-        kMaxAudioCatchupDiscardSec * audioSampleRate_ * frameBytes);
-    size_t catchupDiscardedBytes = 0;
-
-    // 从队列读取 inputNeeded 字节。leasedAudio 复用一份消费者持有的 Frame：
-    // peekRef 在锁内 av_frame_ref 出独立引用，回调读 data[0] 期间即便 audio decode
-    // 线程 seek flush 队列，这份引用的数据仍有效，不会读到被 unref 的 buffer。
-    Frame leasedAudio;
-    while (inputFilled < inputNeeded) {
-        bool hasFrame = queueManager_->audioFrameQueue() ? queueManager_->audioFrameQueue()->peekRef(leasedAudio) : false;
-        size_t frameOffset = pendingAudioOffset_.load();
-
-        if (!hasFrame) {
-            int underruns = audioUnderrunCount_.fetch_add(1) + 1;
-            // 首次立即记录，之后每约 2.5s（100 个 25ms buffer）记录一次，避免网络抖动时
-            // 每 250ms 同步写日志反过来放大解码/渲染卡顿。
-            if (underruns == 1 || underruns % 100 == 0) {
-                LOG_WARN("Audio underrun detected, count: " + std::to_string(underruns));
-            }
-            queueDepth = 0;
-            break;
-        }
-
-        queueDepth = queueManager_->audioFrameQueue()->size();
-        AVFrame* avFrame = leasedAudio.getAVFrame();
-        if (!avFrame || !avFrame->data[0] || avFrame->nb_samples <= 0) {
-            queueManager_->audioFrameQueue()->next();
-            pendingAudioOffset_.store(0);
-            continue;
-        }
-
-        size_t frameDataSize = static_cast<size_t>(avFrame->nb_samples) * frameBytes;
-        // 边界保护：seek 时 audio decode 线程可能在回调读取间隙 flush 队列并清零偏移，
-        // 旧的 frameOffset 可能越过新队头帧的数据范围。越界则丢弃该帧重新对齐，
-        // 避免 memcpy 读越界。
-        if (frameOffset >= frameDataSize) {
-            queueManager_->audioFrameQueue()->next();
-            pendingAudioOffset_.store(0);
-            continue;
-        }
-
-        size_t remainingFrameData = frameDataSize - frameOffset;
-        double framePTS = leasedAudio.getPTS();
-
-        // 音频队列中可能存在旧速率下缓存的旧帧。例如 2x 播放时视频已显示到 842s，
-        // 切回 1x 后音频队列队头仍可能是 833s。若直接播放这些旧帧，AClock 会被拉回
-        // 833s，视频线程因为以音频为主时钟而停止消费 842s 之后的视频帧。
-        //
-        // 这里在音频回调里做“细粒度追赶”：如果当前帧起点早于目标，就按采样数跳过
-        // 已经过时的前半段；若整帧都早于目标，则直接释放整帧。这样即使解码线程还没
-        // 来得及补新帧，音频输出线程也不会慢慢播放一长段旧音频。
-        //
-        // 追赶量必须有上限。音频设备线程需要按时返回并提交 buffer；若单次回调无限
-        // 丢旧帧，WinMM/AudioQueue 得不到新 buffer，AClock 也不会继续更新，画面会卡住。
-        if (audioSyncTarget >= 0.0 && std::isfinite(framePTS)) {
-            double frameStartPTS = framePTS +
-                static_cast<double>(frameOffset) / frameBytes / audioSampleRate_;
-            double lag = audioSyncTarget - frameStartPTS;
-            if (lag > kAudioCatchupToleranceSec) {
-                size_t samplesToDrop = static_cast<size_t>(lag * audioSampleRate_);
-                size_t bytesToDrop = std::min(remainingFrameData, samplesToDrop * static_cast<size_t>(frameBytes));
-                bytesToDrop -= bytesToDrop % static_cast<size_t>(frameBytes);
-
-                if (bytesToDrop >= remainingFrameData) {
-                    catchupDiscardedBytes += remainingFrameData;
-                    queueManager_->audioFrameQueue()->next();
-                    pendingAudioOffset_.store(0);
-                    if (catchupDiscardedBytes >= maxCatchupDiscardBytes) {
-                        break;
-                    }
-                    continue;
-                }
-                if (bytesToDrop > 0) {
-                    catchupDiscardedBytes += bytesToDrop;
-                    frameOffset += bytesToDrop;
-                    remainingFrameData -= bytesToDrop;
-                    pendingAudioOffset_.store(frameOffset);
-                }
-            }
-        }
-
-        if (!hasValidFrame) {
-            if (frameOffset > 0) {
-                framePTS += static_cast<double>(frameOffset) / frameBytes / audioSampleRate_;
-            }
-            firstFramePTS = framePTS;
-            hasValidFrame = true;
-        }
-
-        size_t bytesToCopy = std::min(remainingFrameData, inputNeeded - inputFilled);
-
-        std::memcpy(inputBuf.data() + inputFilled, avFrame->data[0] + frameOffset, bytesToCopy);
-        inputFilled += bytesToCopy;
-
-        if (bytesToCopy < remainingFrameData) {
-            pendingAudioOffset_.store(frameOffset + bytesToCopy);
-            break;
-        } else {
-            queueManager_->audioFrameQueue()->next();
-            pendingAudioOffset_.store(0);
-        }
-    }
-
-    // 最近邻重采样：从 inputFilled 字节映射到 bufferSize 字节
-    int outSamples = bufferSize / frameBytes;
-    int inSamples = inputFilled / frameBytes;
-
-    if (inSamples > 0) {
-        for (int i = 0; i < outSamples; i++) {
-            int srcIdx = static_cast<int>((double)i * inSamples / outSamples);
-            srcIdx = std::min(srcIdx, inSamples - 1);
-            std::memcpy(buffer + i * frameBytes,
-                        inputBuf.data() + srcIdx * frameBytes, frameBytes);
-        }
-    } else {
-        std::memset(buffer, 0, bufferSize);
-    }
-
-    audioQueueDepth_.store(queueDepth);
-
-    if (clockController_ && audioSampleRate_ > 0) {
-        // 这里需要“上一次回调实际提交的基准”，不能使用带墙钟插值的
-        // getAudioClock()。高倍速欠载时，后者已经向前插值 elapsed * rate，
-        // 下方再累加 outputDuration * rate 会把同一段设备播放时间计算两遍，
-        // 日志中 16x 每秒推进约 32 秒正是由此产生。
-        double previousAudioPTS = clockController_->avSync()->getAudioClockBase();
-        double currentAudioPTS = previousAudioPTS;
-        bool shouldUpdateClock = hasValidFrame;
-
-        // 音频帧 PTS 是变速切换时最稳定的媒体时间锚点。
-        // 旧的非 1x 路径会在已按 playbackRate 插值过的时钟上继续累加时长，
-        // 导致 AClock 先漂到过前，再在切回 1x 时从队列帧 PTS 跳回去。
-        // 这里仍保留单调性兜底：一旦发现即将倒退，就把追赶目标推进到当前 AClock，
-        // 并保持本次时钟不变，后续回调/解码线程会主动丢弃落后的音频数据。
-        if (hasValidFrame) {
-            double consumedMediaDuration = static_cast<double>(inSamples) / audioSampleRate_;
-            currentAudioPTS = firstFramePTS + consumedMediaDuration;
-            // 普通连续播放禁止 AClock 倒退；seek 后第一批新音频是合法重定位，必须允许
-            // 从旧的 10.9s 回到 3.6s，否则该保护会把进度条再次钉回旧位置。
-            const bool allowRebase = allowAudioClockRebase_.exchange(false, std::memory_order_acq_rel);
-            if (!allowRebase && currentAudioPTS + kAudioCatchupToleranceSec < previousAudioPTS) {
-                audioCatchupTargetPTS_.store(previousAudioPTS);
-                currentAudioPTS = previousAudioPTS;
-            }
-        }
-
-        // 直播音频短暂断粮时，设备仍持续播放静音 buffer。若 AClock 完全停住，视频会
-        // 堵在浅队列里，音频恢复并一次跳到新 PTS 后视频才集中追赶，表现为“卡住后快进”。
-        // 仅直播且尚未 EOF 时按设备实际输出时长推进播放时钟。
-        // 这不是收到的媒体进度，不能回写 PTS 归一化器或源媒体最新进度。
-        // 仅在整份设备 buffer 都没有真实音频时合成推进；部分填充已经用真实样本 PTS
-        // 计算 consumedMediaDuration，再按整 buffer 推进会重复计时，让 AClock 持续快于视频。
-        if (isLiveStream_ && inputFilled == 0 && !audioDrainedEof_.load()) {
-            currentAudioPTS = previousAudioPTS + outputDuration * rate;
-            shouldUpdateClock = true;
-        }
-
-        // 4x/8x/16x 下音频队列短暂打空是常态。此时设备仍按墙钟输出
-        // 一个 buffer（可能是静音），如果 AClock 不推进，音频主时钟会停住，
-        // 视频追到该点后就只能等待。高倍速欠载时用输出时长 * rate 合成推进，
-        // 让“音频主时钟”保持为播放调度主钟，而不是被队列瞬时欠载拖死。
-        if (!isLiveStream_ && rate >= 4.0 && inputFilled < inputNeeded && !audioDrainedEof_.load()) {
-            double syntheticPTS = previousAudioPTS + outputDuration * rate;
-            if (duration_ > 0.0) {
-                syntheticPTS = std::min(syntheticPTS, duration_);
-            }
-            currentAudioPTS = std::max(currentAudioPTS, syntheticPTS);
-            shouldUpdateClock = true;
-        }
-
-        if (audioSyncTarget >= 0.0 && currentAudioPTS >= audioSyncTarget - kAudioCatchupToleranceSec) {
-            audioCatchupTargetPTS_.store(-1.0);
-        }
-
-        if (!isLiveStream_ && duration_ > 0.0 && std::isfinite(currentAudioPTS)) {
-            currentAudioPTS = std::max(0.0, std::min(currentAudioPTS, duration_));
-        }
-
-        if (shouldUpdateClock) {
-            clockController_->avSync()->updateAudioClock(currentAudioPTS);
-            // 音频真正提交到设备回调后才宣布对齐；此时 getCurrentTime 切回 AClock 不会
-            // 读到 seek 前值。mark 内部同时更新 UI 锚点，兼容只有音频的媒体。
-            if (!seekAudioAligned_.load(std::memory_order_acquire))
-                markSeekAudioAligned(currentAudioPTS);
-        }
-    }
-
+    if (audioCoverageCount_ < frames) audioUnderrunCount_.fetch_add(1);
     return bufferSize;
 }
 
 // 录制控制
 
 void Player::startVideoRecording() {
-    // 公开方法委托给 Internal 方法
-    startVideoRecordingInternal();
+    commandQueue_->post(std::make_unique<StartRecordingCommand>(true));
 }
 
 void Player::stopVideoRecording() {
-    stopVideoRecordingInternal();
+    commandQueue_->post(std::make_unique<StopRecordingCommand>(true));
 }
 
 void Player::startAudioRecording() {
-    startAudioRecordingInternal();
+    commandQueue_->post(std::make_unique<StartRecordingCommand>(false));
 }
 
 void Player::stopAudioRecording() {
-    stopAudioRecordingInternal();
+    commandQueue_->post(std::make_unique<StopRecordingCommand>(false));
 }
 
 bool Player::isVideoRecording() const {
@@ -2045,120 +2089,25 @@ bool Player::shouldDropFrameForSpeed(const AVFrame* avFrame, double rate) {
 }
 
 bool Player::switchQuality(const std::string& formatId, double seekTime) {
-    if (lastPageUrl_.empty()) {
-        LOG_WARN("switchQuality: 非网页视频，无法切换画质");
-        return false;
-    }
-
-    LOG_INFO("switchQuality: formatId=" + formatId + " seekTime=" + std::to_string(seekTime));
-
-    // 停止当前播放，保留窗口
-    pause();
-
-    // 重新提取指定画质的流
-    ExtractedStream info;
-    std::string error;
-    if (!StreamExtractor::extract(lastPageUrl_, formatId, info, error)) {
-        LOG_ERROR("switchQuality: 提取失败 " + error);
-        play();
-        return false;
-    }
-
-    // 停止 worker 线程，重置解复用器。abort 队列解除 decode 线程在帧队列/packet
-    // 队列上的阻塞（pause 后消费者停止，decode 线程可能卡在写入）。
-    shouldQuit_.store(true);
-    joinWorkerThreads(/*abortQueues=*/true);
-    shouldQuit_.store(false);
-
-    if (dashMerger_) { dashMerger_->stop(); dashMerger_.reset(); }
-    demuxer_.reset();
-
-    // 打开新流
-    std::string actualUrl;
-    std::string headers;
-    if (info.isDash) {
-        dashMerger_ = std::make_unique<DashMerger>();
-        // 直接用 seekTime 启动 merger（-ss 参数），避免在 pipe 上 seek
-        const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
-        if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime,
-                                &dashSeekGeneration_, dashGeneration, &shouldQuit_)) {
-            LOG_ERROR("switchQuality: DASH 合并器启动失败");
-            dashMerger_.reset();
-            setState(PlayerState::ERRORED);
-            return false;
-        }
-        lastExtractedInfo_ = info;
-    } else {
-        actualUrl = info.videoUrl;
-        headers   = info.headers;
-    }
-
-    demuxer_ = std::make_unique<Demuxer>();
-    if (info.isDash && !dashMerger_->waitReady()) {
-        LOG_ERROR("switchQuality: DASH 合并器准备失败");
-        dashMerger_->stop();
-        dashMerger_.reset();
-        demuxer_.reset();
-        setState(PlayerState::ERRORED);
-        return false;
-    }
-    if (info.isDash) {
-        dashMerger_->commitPreparedStream();
-        actualUrl = dashMerger_->getPipeUrl();
-    }
-    bool opened = headers.empty() && info.duration == 0.0
-        ? demuxer_->open(actualUrl)
-        : demuxer_->open(actualUrl, headers, info.duration);
-
-    if (!opened) {
-        LOG_ERROR("switchQuality: 打开新流失败");
-        setState(PlayerState::ERRORED);
-        return false;
-    }
-
-    // 用新流的 codec 参数重新初始化解码器（画质切换后编码参数可能不同）
-    videoDecoder_.reset();
-    audioDecoder_.reset();
-    // 确保 packet 队列存在（首次 open 后已创建；此处兜底新流出现新音轨等情况）。
-    // initDecoders 会按实际流设置 time_base 或在流缺失时 reset。
-    if (!audioOnly_ && !queueManager_->videoPacketQueue()) queueManager_->videoPacketQueue() = std::make_unique<PacketQueue>();
-    if (demuxer_->getAudioStreamIndex() >= 0 && !queueManager_->audioPacketQueue())
-        queueManager_->audioPacketQueue() = std::make_unique<PacketQueue>();
-    if (!initDecoders()) {
-        LOG_ERROR("switchQuality: 解码器初始化失败");
-        setState(PlayerState::ERRORED);
-        return false;
-    }
-
-    // 更新渲染器纹理尺寸（新画质分辨率可能不同）
-    if (renderer_) {
-        renderer_->setVideoSize(videoWidth_, videoHeight_);
-    }
-
-    // 在 worker 线程启动前直接 seek，避免异步机制竞态。不用 decodingToTarget_：
-    // seek 在线程启动前完成，demux 从目标位置开始读，decode 线程首个 packet 的
-    // serial 变化会触发一次 flush（队列已空，无副作用）。
-    if (seekTime > 0.0) {
-        // DASH 流：merger 已用 -ss seekTime 启动，pipe 不可 seek，只更新时钟
-        if (!info.isDash) {
-            int64_t seekTs = static_cast<int64_t>(seekTime * 1000000);
-            demuxer_->seek(seekTs);
-        }
-        clockController_->avSync()->seekTo(seekTime);
-        currentAudioFramePTS_.store(seekTime);
-        samplesPlayedInFrame_.store(0);
-    }
-
-    startWorkerThreads();
-
-    // 恢复音频输出（pause() 暂停了它，不恢复则音频时钟不推进，视频也卡死）
-    if (audioOutput_) {
-        audioOutput_->resume();
-    }
-    clockController_->avSync()->resume();
-
-    setState(PlayerState::PLAYING);
-    LOG_INFO("switchQuality: 切换成功");
+    // 主线程入口；返回值只表示接单，完成结果由带请求 ID 的快照发布。
+    const auto state = getState();
+    if (lastPageUrl_.empty() || formatId.empty() || !std::isfinite(seekTime) ||
+        seekTime < 0.0 || seekTime >= static_cast<double>(INT64_MAX / AV_TIME_BASE) ||
+        shouldQuit_.load() || pausedForQualityInstall_ ||
+        (state != PlayerState::PLAYING && state != PlayerState::PAUSED)) return false;
+    const auto& qualities = lastExtractedInfo_.qualities;
+    if (std::none_of(qualities.begin(), qualities.end(), [&](const auto& q) {
+            return q.formatId == formatId;
+        })) return false;
+    if (qualitySwitch_.pending && qualitySwitch_.formatId == formatId) return true;
+    cancelQualityCandidate(false);
+    ++qualitySwitch_.requestId;
+    qualitySwitch_.pending = true;
+    qualitySwitch_.success = false;
+    qualitySwitch_.formatId = formatId;
+    qualitySwitch_.error.clear();
+    commandQueue_->post(std::make_unique<SwitchQualityCommand>(
+        formatId, seekTime, qualitySwitch_.requestId));
     return true;
 }
 
@@ -2201,12 +2150,25 @@ void Player::loadCoverImage() {
 
 // 命令队列与控制流
 
+void Player::notifyRecordingErrors() {
+    if (recordingService_) {
+        const unsigned errors = recordingService_->takeErrors();
+        if ((errors & 1u) != 0) {
+            triggerError("录像启动、写入或封口失败");
+            if (toastManager_) toastManager_->show({ToastType::Error, "录像失败", "无法启动、写入或完成封口，请检查输出文件和日志。"});
+        }
+        if ((errors & 2u) != 0) {
+            triggerError("录音启动、写入或封口失败");
+            if (toastManager_) toastManager_->show({ToastType::Error, "录音失败", "无法启动、写入或完成封口，请检查输出文件和日志。"});
+        }
+    }
+}
+
 void Player::pumpCommands() {
+    notifyRecordingErrors();
     // 取走本帧投递的全部命令，锁外串行执行。
     if (!commandQueue_) return;
-
     auto commands = commandQueue_->drain();
-    if (commands.empty()) return;
 
     // 串行执行所有命令（锁外执行，避免持锁跑重活）
     for (auto& cmd : commands) {
@@ -2214,12 +2176,81 @@ void Player::pumpCommands() {
             cmd->execute(*this);
         }
     }
+    pollQualityCandidate();
+    checkSeekProgress();
+    const int failedSerial = failedDashSeekSerial_.exchange(-1);
+    const auto& videoPackets = queueManager_->videoPacketQueue();
+    const auto& packets = videoPackets ? videoPackets : queueManager_->audioPacketQueue();
+    if (!shouldQuit_.load() && failedSerial >= 0 && packets && packets->serial() == failedSerial) {
+        triggerError("DASH 流 seek 失败，请重试");
+    }
+    const int firstSerial = firstFrameSerial_.exchange(-1);
+    if (!shouldQuit_.load() && firstSerial >= 0 && videoPackets && videoPackets->serial() == firstSerial &&
+        !firstFrameSignaled_.exchange(true)) {
+        if (firstFrameCallback_) firstFrameCallback_();
+    }
+    if (!shouldQuit_.load() && !pausedForQualityInstall_ && audioOutput_ && audioOutput_->hasFailed()) {
+        handleAudioOutputFailure();
+    }
 }
 
 // 命令 execute() 调用的内部执行方法
 //
 // 公开方法投递命令，命令 execute() 调用这些 *Internal() 方法真正落地。
 // 后续阶段公开方法会改为「投递命令」，命令 execute() 调用 *Internal() 真正落地。
+
+bool Player::isAudioPlaybackDrainedLocked() const {
+    return audioDrainedEof_.load() &&
+        (!queueManager_->audioFrameQueue() || queueManager_->audioFrameQueue()->numReadable() == 0) &&
+        audioSubmittedFrames_ >= audioCoverageCount_ &&
+        !clockController_->avSync()->hasPendingAudioCoverage();
+}
+
+void Player::checkSeekProgress() {
+    bool timedOut = false;
+    {
+        // 与 Seek 发布、解码完成及设备提交同锁，不能用上一代 EOF 解除新门控。
+        std::lock_guard<std::mutex> lock(audioCallbackMutex_);
+        if (shouldQuit_.load() || !seekDemuxReady_.load() || isLiveStream_) return;
+        auto* sync = clockController_->avSync();
+        const bool audioEnded = hasAudioStream_ && isAudioPlaybackDrainedLocked();
+        const bool videoReady = seekVideoAligned_.load();
+        const bool videoEnded = videoDrainedEof_.load() &&
+            (!queueManager_->videoFrameQueue() || queueManager_->videoFrameQueue()->numReadable() == 0);
+        if (audioEnded && hasVideoStream_ && videoReady && !videoEnded &&
+            sync->getClockType() == ClockType::AUDIO_CLOCK) {
+            // 不把 EOF 伪装成音频对齐。视频落点来自本代实际入队帧；普通尾部续播
+            // 还保留已消费音频覆盖的尾端，避免回退。seekTo 保留暂停和倍速。
+            const double position = std::max(lastRenderedPTS_.load(), sync->getAudioClock());
+            sync->seekTo(position);
+            sync->setClockType(ClockType::EXTERNAL_CLOCK);
+            releaseAudioSeekGateLocked();
+            LOG_INFO("Audio drained: continue video with external clock at " + std::to_string(position));
+        }
+        const bool audioReady = !hasAudioStream_ || seekAudioAligned_.load() || audioEnded;
+        if ((videoReady || videoEnded) && audioReady) return;
+        // 暂停不消费 PCM，不能把已经入队但未提交的音频当成缺包。
+        if (isPaused() && videoReady &&
+            ((queueManager_->audioFrameQueue() && queueManager_->audioFrameQueue()->numReadable() > 0) ||
+             audioSubmittedFrames_ < audioCoverageCount_ || sync->hasPendingAudioCoverage())) return;
+        if (clockController_->isSeekTimedOut(seekTimeoutSeconds())) {
+            // 没有 EOF 证据就不解除门控/发布对齐，也不让静音推进媒体时钟。
+            audioPausedForSeek_.store(hasAudioStream_);
+            audioResumePending_.store(false);
+            shouldQuit_.store(true, std::memory_order_release);
+            queueManager_->abortAll();
+            timedOut = true;
+        }
+    }
+    if (timedOut) {
+        // 设备及外部回调不能在 audioCallbackMutex_ 内调用。
+        if (audioOutput_ && !audioOutput_->pause())
+            LOG_WARN("Audio device pause failed after Seek timeout");
+        clockController_->avSync()->pause();
+        setState(PlayerState::ERRORED);
+        triggerError("Seek alignment timed out: required media data did not arrive");
+    }
+}
 
 void Player::markSeekVideoAligned(double pts) {
     if (std::isfinite(pts)) {
@@ -2243,15 +2274,15 @@ void Player::cancelSeekAlignment() {
 }
 
 bool Player::releaseAudioSeekGate() {
-    bool shouldResume = false;
-    {
-        std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
-        if (!audioDeviceFlushReady_.load(std::memory_order_acquire)) return false;
-        if (!audioPausedForSeek_.exchange(false, std::memory_order_acq_rel)) return false;
-        shouldResume = audioOutput_ && stateManager_->current() == PlayerState::PLAYING;
-    }
-    // 不持有回调锁启动设备；部分平台可能在 start/restart 内同步触发一次回调。
-    if (shouldResume) audioOutput_->resume();
+    // Worker 只解除门控，设备恢复统一留给主线程（含画质安装事务后的安全边界）。
+    std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
+    return releaseAudioSeekGateLocked();
+}
+
+bool Player::releaseAudioSeekGateLocked() {
+    if (!audioDeviceFlushReady_.load(std::memory_order_acquire)) return false;
+    if (!audioPausedForSeek_.exchange(false, std::memory_order_acq_rel)) return false;
+    audioResumePending_.store(true, std::memory_order_release);
     return true;
 }
 
@@ -2267,6 +2298,19 @@ void Player::seekInternal(double seconds) {
         return;
     }
 
+    // 非有限输入不能进入微秒整数转换，也不能污染 UI/时钟目标。
+    if (!std::isfinite(seconds) || seconds >= static_cast<double>(INT64_MAX) / 1000000.0) {
+        LOG_WARN("Cannot seek: non-finite or out-of-range target");
+        return;
+    }
+    seconds = std::max(0.0, seconds);
+    if (duration_ > 0.0) seconds = std::min(seconds, duration_);
+
+    if (qualitySwitch_.pending) {
+        // 只使旧位置候选失效，保留请求 ID/目标画质；退出后按最新 Seek 位置重建。
+        cancelQualityCandidate(false);
+        LOG_INFO("Seek retargets pending quality: " + qualitySwitch_.formatId);
+    }
     LOG_INFO("Player::seekInternal() - seconds=" + std::to_string(seconds));
     LOG_INFO("  lastRenderedPTS before=" + std::to_string(lastRenderedPTS_.load()));
 
@@ -2274,16 +2318,26 @@ void Player::seekInternal(double seconds) {
         // 门控必须早于 pauseAndFlush 可见；否则 decode 线程可能在平台 Reset 尚未完成时
         // 恢复设备，随后 Reset 再把刚恢复的 AudioQueue 置空/暂停。
         std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
-        audioPausedForSeek_.store(true, std::memory_order_release);
+        audioPausedForSeek_.store(hasAudioStream_, std::memory_order_release);
         audioDeviceFlushReady_.store(false, std::memory_order_release);
     }
-    if (audioOutput_ && audioOutput_->isPlaying()) audioOutput_->pauseAndFlush();
+    if (audioOutput_ && !audioOutput_->pauseAndFlush()) {
+        // Reset 未确认成功时保持门控，绝不发布新目标/代际或恢复旧 PCM。
+        setState(PlayerState::ERRORED);
+        shouldQuit_.store(true);
+        triggerError("Seek failed: audio device cache could not be cleared");
+        return;
+    }
     audioDeviceFlushReady_.store(true, std::memory_order_release);
 
     // 与音频回调串行化后再发布目标与清队列，保证所有 seek 前回调已经结束。
     {
         std::lock_guard<std::mutex> callbackLock(audioCallbackMutex_);
 
+        // 旧 Seek 可能在设备清缓存期间完成；在发布新目标的同一临界区重建门控，
+        // 并丢弃旧完成留下的设备恢复意图。
+        audioPausedForSeek_.store(hasAudioStream_, std::memory_order_release);
+        audioResumePending_.store(false, std::memory_order_release);
         // 先发布目标，再投递 pending seek，随后建立 packet serial 边界并清 frame queue。
         // 顺序不能反过来：若先 flush、后 postSeek，demux 正好在两者之间读完一个旧 packet，
         // pending 仍为 false，它会把旧 packet 按 flush 后的新 serial 入队。
@@ -2294,6 +2348,8 @@ void Player::seekInternal(double seconds) {
         seekAudioAligned_.store(!hasAudioStream_, std::memory_order_release);
         currentAudioFramePTS_.store(seconds);
         samplesPlayedInFrame_.store(0);
+        clockController_->avSync()->setClockType(
+            hasAudioStream_ ? ClockType::AUDIO_CLOCK : ClockType::EXTERNAL_CLOCK);
         clockController_->startSeekToTarget(seconds);
 
         if (demuxWorker_) {
@@ -2301,6 +2357,7 @@ void Player::seekInternal(double seconds) {
             demuxWorker_->postSeek(seconds);
         }
         pendingAudioOffset_.store(0);
+        audioCoverageCount_ = audioSubmittedFrames_ = 0;
         audioCatchupTargetPTS_.store(-1.0);
         allowAudioClockRebase_.store(false, std::memory_order_release);
         audioUnderrunCount_.store(0);
@@ -2320,32 +2377,44 @@ void Player::seekInternal(double seconds) {
 }
 
 void Player::pauseInternal() {
+    if (pausedForQualityInstall_) { qualityInstallWantsPlaying_ = false; return; }
     if (stateManager_->current() != PlayerState::PLAYING) {
         return;
     }
 
     LOG_INFO("Pausing playback");
-    clockController_->avSync()->pause();
-    if (audioOutput_) {
-        audioOutput_->pause();
+    if (audioOutput_ && !audioOutput_->pause()) {
+        triggerError("Audio device could not pause while preserving queued audio");
+        return;
     }
+    clockController_->avSync()->pause();
     setState(PlayerState::PAUSED);
 }
 
 void Player::resumeInternal() {
+    if (pausedForQualityInstall_) { qualityInstallWantsPlaying_ = true; return; }
     if (stateManager_->current() != PlayerState::PAUSED) {
         return;
     }
 
     LOG_INFO("Resuming playback");
-    clockController_->avSync()->resume();
-    if (audioOutput_) {
-        audioOutput_->resume();
+    {
+        std::lock_guard<std::mutex> lock(audioCallbackMutex_);
+        if (seekDemuxReady_.load() && (!seekVideoAligned_.load() || !seekAudioAligned_.load()))
+            clockController_->resetSeekTimer(); // 暂停中未消费的目标 PCM 在恢复后获得完整提交窗口。
     }
+    clockController_->avSync()->resume();
+    // 新画质在暂停中安装时设备只 init，首次恢复需要 start 而非 resume。
+    if (audioOutput_ && !audioPausedForSeek_.load(std::memory_order_acquire)) {
+        if (!activateAudioOutput()) return;
+    }
+    clockController_->avSync()->resume(); // 设备降级可能重建时钟，确保最新 Resume 意图生效。
     setState(PlayerState::PLAYING);
 }
 
 void Player::stopInternal() {
+    cancelQualityCandidate(false);
+    qualitySwitch_.pending = false;
     if (stateManager_->current() == PlayerState::IDLE || stateManager_->current() == PlayerState::STOPPED) {
         return;
     }
@@ -2367,6 +2436,9 @@ void Player::stopInternal() {
 }
 
 void Player::setPlaybackSpeedInternal(double speed) {
+    if (!std::isfinite(speed)) return;
+    // 与设备回调串行发布速率、追赶目标和帧代际；Seek 的设备调用不能持此锁。
+    std::unique_lock<std::mutex> callbackLock(audioCallbackMutex_);
     double requestedSpeed = speed;
     int maxSpeed = HardwareInfo::maxSupportedPlaybackSpeed(videoWidth_, videoHeight_);
     speed = std::max(0.5, std::min(speed, static_cast<double>(maxSpeed)));
@@ -2375,71 +2447,10 @@ void Player::setPlaybackSpeedInternal(double speed) {
                  "x exceeds hardware estimate, clamped to " + std::to_string(speed) + "x");
     }
 
-    double oldSpeed = playbackRate_.exchange(speed);
-
-    // 重置抽帧计数器，确保切换速度时抽帧逻辑重新开始
+    playbackRate_.store(speed);
     frameRenderCounter_ = 0;
-
-    double catchupTarget = -1.0;
-    if (clockController_) {
-        double audioClock = clockController_->avSync()->getAudioClock();
-        double videoClock = clockController_->avSync()->getVideoClock();
-        // 切速瞬间用较新的那个时钟作为音频追赶目标。
-        // 不能只用 AClock：2x 时视频可能已经显示到更靠前的位置；
-        // 也不能只用 VClock：纯音频/视频暂未推进时 AClock 才是可靠位置。
-        catchupTarget = std::max(audioClock, videoClock);
-        clockController_->avSync()->setPlaybackRate(speed);
-
-        // 主流播放器模型：有音频输出时始终使用音频主时钟，视频按 master
-        // 判定 early/late 并丢弃过期帧；只有无音频时才退回外部时钟。
-        ClockType newClockType = audioOutput_ ? ClockType::AUDIO_CLOCK : ClockType::EXTERNAL_CLOCK;
-        clockController_->avSync()->setClockType(newClockType);
-        LOG_INFO("Clock type switched to " + std::to_string(static_cast<int>(newClockType)) +
-                 " for speed " + std::to_string(speed) + "x");
-    }
-
-    // 4x/8x/16x 允许音频欠载时由合成主时钟继续推进，解码器吞吐不足时视频
-    // packet/frame 队列可能落后主时钟数十秒。退出高倍速后若只把 rate 改成 1，
-    // 渲染循环会把所有落后帧判为 late 并无等待消费，看起来仍在高速播放。
-    //
-    // 本地文件可随机访问，因此在切速边界直接 seek 到用户切换瞬间看到的主时间点，
-    // 让 demux、解码器、音视频队列和 AVSync 通过既有 serial/seek 流程一次性重对齐。
-    // 实时流不可回退或随机跳转，仍使用下面的音频追赶逻辑保持连续播放。
-    const bool speedChanged = std::abs(oldSpeed - speed) > 0.001;
-    const bool leavingHighSpeed = speedChanged && oldSpeed >= 4.0 && speed < 4.0;
-    bool realignedBySeek = false;
-    if (leavingHighSpeed && isLocalFile_ && !isLiveStream_ && catchupTarget >= 0.0) {
-        double seekTarget = catchupTarget;
-        if (duration_ > 0.0 && std::isfinite(duration_)) {
-            seekTarget = std::max(0.0, std::min(seekTarget, duration_));
-        }
-        LOG_INFO("Leaving high-speed mode: realigning local playback at " +
-                 std::to_string(seekTarget) + "s");
-        // seek 自己会通过 decodingToTarget_ 丢弃目标前的音视频帧；先取消旧的
-        // “仅音频追赶”任务，避免两个独立目标在解码线程和音频回调中同时生效。
-        audioCatchupTargetPTS_.store(-1.0);
-        pendingAudioOffset_.store(0);
-        seekInternal(seekTarget);
-        realignedBySeek = true;
-    }
-
-    if (speedChanged && !realignedBySeek && catchupTarget >= 0.0) {
-        audioCatchupTargetPTS_.store(catchupTarget);
-        pendingAudioOffset_.store(0);
-        if (clockController_) {
-            // 若切速时 VClock 比 AClock 新，先把 AClock 校准到追赶目标。
-            // 后续音频解码/回调会丢掉目标之前的旧音频，避免主时钟回退。
-            clockController_->avSync()->updateAudioClock(catchupTarget);
-        }
-        if (queueManager_ && queueManager_->audioFrameQueue()) {
-            // 丢弃已经转换好的旧音频帧。packet 队列不 flush，因为它仍然包含
-            // 连续媒体数据；后续 DecodeWorker 会按 audioCatchupTargetPTS_
-            // 在入队前快速丢弃目标 PTS 之前的音频帧。
-            queueManager_->audioFrameQueue()->flush();
-        }
-        LOG_INFO("Audio catch-up target set to " + std::to_string(catchupTarget) +
-                 "s for speed switch");
-    }
+    // 不 flush、不跳 Seek、不按视频时钟丢音频；队列相位和已提交覆盖保持连续。
+    if (clockController_) clockController_->avSync()->setPlaybackRate(speed);
 
     // 释放旧的重采样器（如有）
     if (speedSwrContext_) {
@@ -2450,123 +2461,274 @@ void Player::setPlaybackSpeedInternal(double speed) {
     LOG_INFO("Playback speed set to " + std::to_string(speed) + "x");
 }
 
-void Player::switchQualityInternal(const std::string& formatId, double seekTime) {
-    if (lastPageUrl_.empty()) {
-        LOG_WARN("switchQualityInternal: 非网页视频，无法切换画质");
-        return;
+void Player::cancelQualityCandidate(bool wait) {
+    qualityPrepareGeneration_.fetch_add(1, std::memory_order_acq_rel);
+    if (qualityCandidate_) qualityCandidate_->cancel.store(true, std::memory_order_release);
+    if (wait) qualityCandidate_.reset();
+}
+
+void Player::switchQualityInternal(const std::string& formatId, double seekTime, uint64_t requestId) {
+    if (!qualitySwitch_.pending || requestId != qualitySwitch_.requestId) return;
+    // 一次只运行一个候选；新请求取消旧候选，等它异步退出再启动最新目标。
+    if (qualityCandidate_ || shouldQuit_.load()) return;
+    auto candidate = std::make_unique<QualityCandidate>();
+    candidate->requestId = requestId;
+    candidate->seekTime = isLiveStream_ ? 0.0 : seekTime;
+    candidate->info = lastExtractedInfo_; // 主线程复制，后台不访问活跃会话数据。
+    auto* task = candidate.get();
+    const auto page = lastPageUrl_;
+    const uint64_t generation = qualityPrepareGeneration_.load();
+    try {
+        task->worker = std::thread([this, task, page, formatId, generation] {
+            try {
+                const auto qualities = task->info.qualities;
+                bool reused = false;
+                for (const auto& quality : qualities) {
+                    if (quality.formatId != formatId || quality.videoUrl.empty()) continue;
+                    task->info.videoUrl = quality.videoUrl;
+                    task->info.audioUrl = quality.audioUrl;
+                    task->info.headers = quality.headers;
+                    task->info.isDash = !quality.audioUrl.empty();
+                    task->info.height = quality.height;
+                    task->info.width = 0;
+                    task->info.filesize = 0;
+                    reused = true;
+                    break;
+                }
+                auto prepare = [&]() {
+                    if (task->cancel.load()) return false;
+                    task->input = std::make_unique<Demuxer>(&task->cancel);
+                    std::string url = task->info.videoUrl;
+                    if (task->info.isDash) {
+                        task->merger = std::make_unique<DashMerger>();
+                        if (!task->merger->start(url, task->info.audioUrl, task->info.headers,
+                                task->seekTime, &qualityPrepareGeneration_, generation) ||
+                            !task->merger->waitReady() || task->cancel.load()) {
+                            task->error = "DASH 候选准备失败";
+                            return false;
+                        }
+                        url = task->merger->getPipeUrl();
+                    }
+                    const bool opened = task->info.isDash
+                        ? task->input->openSelfDescribingPipe(url, task->info.duration)
+                        : task->input->open(url, task->info.headers, task->info.duration);
+                    if (!opened || task->cancel.load()) { task->error = "候选输入打开失败"; return false; }
+                    if (task->input->getVideoStreamIndex() < 0 && task->input->getAudioStreamIndex() < 0) {
+                        task->error = "候选输入没有音视频轨道"; return false;
+                    }
+                    if (!task->info.isDash && task->seekTime > 0.0 &&
+                        !task->input->seek(static_cast<int64_t>(task->seekTime * AV_TIME_BASE))) {
+                        task->error = "候选输入定位失败"; return false;
+                    }
+                    task->info.selectedFormatId = formatId;
+                    if (task->info.qualities.empty()) task->info.qualities = qualities;
+                    return !task->cancel.load();
+                };
+                if (reused) {
+                    LOG_INFO("Quality candidate: reuse extracted URL, format=" + formatId);
+                    task->success = prepare();
+                }
+                if (!task->success && !task->cancel.load()) {
+                    // 过期直链/缺少缓存只重新提取一次；先回收候选读写端，不影响旧播放。
+                    task->input.reset();
+                    task->merger.reset();
+                    task->info = ExtractedStream{};
+                    task->error.clear();
+                    LOG_INFO("Quality candidate: extract URL, format=" + formatId);
+                    task->success = StreamExtractor::extract(page, formatId, task->info,
+                        task->error, &task->cancel) && prepare();
+                }
+            } catch (const std::exception& error) {
+                task->error = error.what();
+            }
+            if (!task->success || task->cancel.load()) {
+                task->input.reset();
+                task->merger.reset();
+            }
+            task->done.store(true, std::memory_order_release);
+        });
+        qualityCandidate_ = std::move(candidate);
+    } catch (const std::exception& error) {
+        qualitySwitch_.pending = false;
+        qualitySwitch_.error = error.what();
     }
+}
 
-    LOG_INFO("switchQualityInternal: formatId=" + formatId + " seekTime=" + std::to_string(seekTime));
-
-    // 停止当前播放，保留窗口
-    pauseInternal();
-
-    // 重新提取指定画质的流
-    ExtractedStream info;
-    std::string error;
-    if (!StreamExtractor::extract(lastPageUrl_, formatId, info, error)) {
-        LOG_ERROR("switchQualityInternal: 提取失败 " + error);
-        play();
-        return;
-    }
-
-    // 停止 worker 线程，重置解复用器
-    shouldQuit_.store(true);
-    joinWorkerThreads(/*abortQueues=*/true);
-    shouldQuit_.store(false);
-
-    if (dashMerger_) { dashMerger_->stop(); dashMerger_.reset(); }
-    demuxer_.reset();
-
-    // 打开新流
-    std::string actualUrl;
-    std::string headers;
-    if (info.isDash) {
-        dashMerger_ = std::make_unique<DashMerger>();
-        const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
-        if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, seekTime,
-                                &dashSeekGeneration_, dashGeneration, &shouldQuit_)) {
-            LOG_ERROR("switchQualityInternal: DASH 合并器启动失败");
-            dashMerger_.reset();
-            setState(PlayerState::ERRORED);
-            return;
+void Player::pollQualityCandidate() {
+    if (shouldQuit_.load()) { cancelQualityCandidate(false); return; }
+    if (qualityCandidate_ && qualityCandidate_->done.load(std::memory_order_acquire)) {
+        auto task = std::move(qualityCandidate_);
+        task->worker.join();
+        if (!task->cancel.load() && qualitySwitch_.pending &&
+            task->requestId == qualitySwitch_.requestId) {
+            if (task->success && (isPlaying() || isPaused())) {
+                // 准备期间旧流保持可控；安装使用当前播放意图，GL/设备仅在主线程操作。
+                task->input->bindStopFlag(&shouldQuit_);
+                if (task->merger) task->merger->commitPreparedStream();
+                const double installTime = isLiveStream_ ? 0.0 : getCurrentTime();
+                const bool ok = installQualityStream(task->info, installTime, isPlaying(),
+                    std::move(task->merger), std::move(task->input));
+                qualitySwitch_.success = ok;
+                qualitySwitch_.error = ok ? "" : "新管线初始化失败";
+            } else {
+                qualitySwitch_.success = false;
+                qualitySwitch_.error = task->error.empty() ? "候选已失效" : task->error;
+            }
+            qualitySwitch_.pending = false;
         }
-        lastExtractedInfo_ = info;
-    } else {
-        actualUrl = info.videoUrl;
-        headers   = info.headers;
     }
+    if (!qualityCandidate_ && qualitySwitch_.pending && (isPlaying() || isPaused())) {
+        switchQualityInternal(qualitySwitch_.formatId, getCurrentTime(), qualitySwitch_.requestId);
+    }
+}
 
-    demuxer_ = std::make_unique<Demuxer>();
-    if (info.isDash && !dashMerger_->waitReady()) {
-        LOG_ERROR("switchQualityInternal: DASH 合并器准备失败");
-        dashMerger_->stop();
-        dashMerger_.reset();
-        demuxer_.reset();
+bool Player::installQualityStream(const ExtractedStream& info, double seekTime, bool wasPlaying,
+                                 std::unique_ptr<DashMerger> merger, std::unique_ptr<Demuxer> input) {
+    // 控制线程事务：即使状态回调重入 Pause/Resume，也只改变恢复意图。
+    pausedForQualityInstall_ = true;
+    qualityInstallWantsPlaying_ = wasPlaying;
+    // 候选不能借用旧管线退出标志，否则 join 旧 Worker 会取消最终定位。
+    input->bindStopFlag(nullptr);
+    clockController_->avSync()->pause();
+    shouldQuit_.store(true);
+    // 门控先于设备 stop；不持回调锁调用平台 API。等待旧 Worker 后才销毁回调依赖。
+    audioDeviceFlushReady_.store(false);
+    audioPausedForSeek_.store(true);
+    if (audioOutput_) audioOutput_->stop();
+    joinWorkerThreads(true);
+    // 冻结后真正重定位候选，不靠从准备起点解码追赶。定位失败进入错误态。
+    seekTime = isLiveStream_ ? 0.0 : getCurrentTime();
+    bool positioned = true;
+    if (!isLiveStream_) {
+        if (info.isDash) {
+            input.reset();
+            merger.reset();
+            merger = std::make_unique<DashMerger>();
+            input = std::make_unique<Demuxer>();
+            positioned = merger->start(info.videoUrl, info.audioUrl, info.headers, seekTime) &&
+                merger->waitReady() && input->openSelfDescribingPipe(merger->getPipeUrl(), info.duration);
+            if (positioned) merger->commitPreparedStream();
+        } else {
+            positioned = input->seek(static_cast<int64_t>(seekTime * AV_TIME_BASE));
+        }
+    }
+    if (!positioned) {
+        input.reset(); merger.reset();
+        // 旧输入已被中断，不能以清标志方式回滚到不确定协议状态。
+        pausedForQualityInstall_ = false;
+        qualityInstallWantsPlaying_ = false;
         setState(PlayerState::ERRORED);
-        return;
+        triggerError("Quality switch: final input positioning failed");
+        return false;
     }
-    if (info.isDash) {
-        dashMerger_->commitPreparedStream();
-        actualUrl = dashMerger_->getPipeUrl();
+    input->bindStopFlag(&shouldQuit_);
+    audioOutput_.reset();
+    // 旧录制必须在旧输入销毁前封口；丢弃尚未执行的 Start，不能带到新会话。
+    if (recordingService_) {
+        const bool wasRecording = isVideoRecording() || isAudioRecording();
+        recordingService_->finishForStreamReplacement();
+        if (wasRecording && toastManager_) {
+            ToastMessage message;
+            message.type = ToastType::Info;
+            message.title = "Recording stopped";
+            message.content = "Quality changed; start a new recording if needed";
+            toastManager_->show(message);
+        }
     }
-    bool opened = headers.empty() && info.duration == 0.0
-        ? demuxer_->open(actualUrl)
-        : demuxer_->open(actualUrl, headers, info.duration);
-
-    if (!opened) {
-        LOG_ERROR("switchQualityInternal: 打开新流失败");
-        setState(PlayerState::ERRORED);
-        return;
-    }
-
-    // 用新流的 codec 参数重新初始化解码器
+    glfwMakeContextCurrent(window_->getGLFWWindow());
+    renderer_.reset();
     videoDecoder_.reset();
     audioDecoder_.reset();
-    if (!audioOnly_ && !queueManager_->videoPacketQueue()) queueManager_->videoPacketQueue() = std::make_unique<PacketQueue>();
-    if (demuxer_->getAudioStreamIndex() >= 0 && !queueManager_->audioPacketQueue())
-        queueManager_->audioPacketQueue() = std::make_unique<PacketQueue>();
-    if (!initDecoders()) {
-        LOG_ERROR("switchQualityInternal: 解码器初始化失败");
+    subtitleDecoder_.reset();
+    subtitleManager_.reset();
+    demuxer_.reset();
+    dashMerger_.reset();
+    demuxer_ = std::move(input);
+    dashMerger_ = std::move(merger);
+    queueManager_->reset();
+    audioOnly_ = demuxer_->getVideoStreamIndex() < 0;
+    isLiveStream_ = demuxer_->isLiveStream();
+    duration_ = demuxer_->getDuration() / 1000000.0;
+    constexpr int kVideoFrames = 4, kAudioFrames = 10;
+    constexpr int kLiveVideoFrames = 3, kLiveAudioFrames = 8; // 保持直播浅队列策略。
+    if (!audioOnly_) {
+        queueManager_->videoPacketQueue() = std::make_unique<PacketQueue>();
+        queueManager_->videoFrameQueue() = std::make_unique<FrameQueue>(
+            isLiveStream_ ? kLiveVideoFrames : kVideoFrames, true);
+    }
+    queueManager_->audioPacketQueue() = std::make_unique<PacketQueue>();
+    queueManager_->audioFrameQueue() = std::make_unique<FrameQueue>(
+        isLiveStream_ ? kLiveAudioFrames : kAudioFrames, false);
+    if (!initDecoders() || !initRenderer() || !initAudioOutput()) {
+        if (audioOutput_) { audioOutput_->stop(); audioOutput_.reset(); }
+        renderer_.reset();
+        videoDecoder_.reset(); audioDecoder_.reset();
+        subtitleDecoder_.reset(); subtitleManager_.reset();
+        demuxer_.reset(); dashMerger_.reset();
         setState(PlayerState::ERRORED);
-        return;
+        triggerError("Quality switch: failed to initialize the new playback pipeline");
+        pausedForQualityInstall_ = false;
+        return false;
     }
-
-    // 更新渲染器纹理尺寸
-    if (renderer_) {
-        renderer_->setVideoSize(videoWidth_, videoHeight_);
-    }
-
-    // 在 worker 线程启动前直接 seek
-    if (seekTime > 0.0) {
-        if (!info.isDash) {
-            int64_t seekTs = static_cast<int64_t>(seekTime * 1000000);
-            demuxer_->seek(seekTs);
-        }
-        clockController_->avSync()->seekTo(seekTime);
-        currentAudioFramePTS_.store(seekTime);
-        samplesPlayedInFrame_.store(0);
-    }
-
+    resetQualityPlayback(info, seekTime);
+    shouldQuit_.store(false);
     startWorkerThreads();
-
-    // 恢复音频输出
-    if (audioOutput_) {
-        audioOutput_->resume();
+    // 安装期设备操作仍在事务内执行，不能经通用 ResumeCommand 重入。
+    if (qualityInstallWantsPlaying_) {
+        clockController_->avSync()->resume();
+        if (audioOutput_ && !audioPausedForSeek_.load(std::memory_order_acquire)) {
+            if (!activateAudioOutput()) {
+                qualityInstallWantsPlaying_ = false;
+                pausedForQualityInstall_ = false;
+                return false;
+            }
+        }
     }
-    clockController_->avSync()->resume();
+    const bool resumeWanted = qualityInstallWantsPlaying_;
+    qualityInstallWantsPlaying_ = false;
+    pausedForQualityInstall_ = false;
+    setState(resumeWanted ? PlayerState::PLAYING : PlayerState::PAUSED);
+    return true;
+}
 
-    setState(PlayerState::PLAYING);
-    LOG_INFO("switchQualityInternal: 切换成功");
+void Player::resetQualityPlayback(const ExtractedStream& info, double seekTime) {
+    // DASH 管道 URL 已在准备阶段转交给 Demuxer，不得再次 getPipeUrl() 取走 fd。
+    liveReopenPath_ = info.isDash ? "" : info.videoUrl;
+    liveReopenHeaders_ = info.isDash ? "" : info.headers;
+    liveReopenDuration_ = info.duration;
+    ptsNormalizer_->setHasVideoStream(hasVideoStream_);
+    ptsNormalizer_->setHasAudioStream(hasAudioStream_);
+    ptsNormalizer_->reset();
+    liveVideoLatency_.reset(); liveAudioLatency_.reset();
+    prebuffering_.store(isLiveStream_);
+    sawFirstKeyframe_.store(false);
+    pendingAudioOffset_.store(0); pendingAudioToken_ = {};
+    audioCatchupTargetPTS_.store(-1.0);
+    audioUnderrunCount_.store(0);
+    lastEnqueuedVideoPTS_.store(0.0);
+    lastRenderedPTS_.store(seekTime);
+    currentAudioFramePTS_.store(seekTime); samplesPlayedInFrame_.store(0);
+    clockController_->resetSeekState();
+    clockController_->avSync()->seekTo(seekTime);
+    if (!isLiveStream_) clockController_->startSeekToTarget(seekTime);
+    cancelSeekAlignment();
+    seekUiTargetPTS_.store(seekTime);
+    seekVideoAligned_.store(!hasVideoStream_ || isLiveStream_);
+    seekAudioAligned_.store(!hasAudioStream_);
+    allowAudioClockRebase_.store(true);
+    audioPausedForSeek_.store(hasAudioStream_);
+    audioDeviceFlushReady_.store(true);
+    failedDashSeekSerial_.store(-1);
+    qualityMediaInfo_ = std::make_unique<MediaInfo>();
+    if (!qualityMediaInfo_->extractFromContext(demuxer_->getFormatContext())) qualityMediaInfo_.reset();
+    if (audioOnly_) loadCoverImage();
+    lastExtractedInfo_ = info; // DemuxWorker 启动前发布，不能与其读 isDash 竞争。
 }
 
 void Player::startVideoRecordingInternal() {
+    if (getState() != PlayerState::PLAYING && getState() != PlayerState::PAUSED) return;
     if (!recordingService_) {
         LOG_WARN("RecordingService not available");
-        return;
-    }
-    if (!demuxer_ || demuxer_->getVideoStreamIndex() < 0) {
-        LOG_WARN("Cannot record video: no video stream");
         return;
     }
     auto& cfg = Config::getInstance().get();
@@ -2595,10 +2757,7 @@ void Player::startVideoRecordingInternal() {
     std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + "." + ext;
 
     // 投递请求到 RecordingService，demux 线程串行处理
-    recordingService_->requestStartVideo(outputPath,
-                                          demuxer_->getFormatContext(),
-                                          demuxer_->getVideoStreamIndex(),
-                                          demuxer_->getAudioStreamIndex());
+    recordingService_->requestStartVideo(outputPath);
 }
 
 void Player::stopVideoRecordingInternal() {
@@ -2608,14 +2767,12 @@ void Player::stopVideoRecordingInternal() {
 }
 
 void Player::startAudioRecordingInternal() {
+    if (getState() != PlayerState::PLAYING && getState() != PlayerState::PAUSED) return;
     if (!recordingService_) {
         LOG_WARN("RecordingService not available");
         return;
     }
-    if (!demuxer_ || !audioDecoder_ || demuxer_->getAudioStreamIndex() < 0) {
-        LOG_WARN("Cannot record audio: no audio stream");
-        return;
-    }
+    // 源轨道由 demux 消费请求时检查，不从 UI 线程访问活跃输入。
     auto& cfg = Config::getInstance().get();
 
     auto now = std::chrono::system_clock::now();
@@ -2631,10 +2788,7 @@ void Player::startAudioRecordingInternal() {
     std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + ".m4a";
 
     // 投递请求到 RecordingService
-    recordingService_->requestStartAudio(outputPath,
-                                          demuxer_->getFormatContext(),
-                                          demuxer_->getVideoStreamIndex(),
-                                          demuxer_->getAudioStreamIndex());
+    recordingService_->requestStartAudio(outputPath);
 }
 
 void Player::stopAudioRecordingInternal() {
@@ -2834,19 +2988,22 @@ bool Player::openImageFile(const std::string& path) {
     queueManager_->videoFrameQueue() = std::make_unique<FrameQueue>(2, /*keepLast=*/true);
     queueManager_->videoFrameQueue()->start();
 
-    // 将解码帧注入队列槽位（reference 增持引用计数，imgFrame 释放后槽内数据仍有效）
-    Frame* slot = queueManager_->videoFrameQueue()->peekWritable();
-    if (!slot) {
+    // 图片也走私有帧提交，不暴露内部槽位。
+    Frame prepared;
+    if (!prepared.getAVFrame()) {
         av_frame_free(&imgFrame);
-        LOG_ERROR("openImageFile: peekWritable failed");
         return false;
     }
-    slot->reference(imgFrame);
-    slot->setPTS(0.0);
-    slot->setDuration(0.0);
-    slot->setType(FrameType::VIDEO);
-    queueManager_->videoFrameQueue()->push();
+    av_frame_move_ref(prepared.getAVFrame(), imgFrame);
+    prepared.setPTS(0.0);
+    prepared.setType(FrameType::VIDEO);
+    auto* imageQueue = queueManager_->videoFrameQueue().get();
+    const auto result = imageQueue->trySubmit(prepared, imageQueue->outputTag(0));
     av_frame_free(&imgFrame);
+    if (result != FrameQueue::SubmitResult::Committed) {
+        LOG_ERROR("openImageFile: frame submission failed");
+        return false;
+    }
 
     // 设置标志：图片模式无 Worker 线程，EOF 判断需跳过
     isImageMode_    = true;

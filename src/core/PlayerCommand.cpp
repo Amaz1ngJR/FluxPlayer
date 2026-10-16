@@ -52,7 +52,7 @@ void SetSpeedCommand::execute(Player& player) {
 }
 
 void SwitchQualityCommand::execute(Player& player) {
-    player.switchQualityInternal(formatId, seekTime);
+    player.switchQualityInternal(formatId, seekTime, requestId);
 }
 
 void StartRecordingCommand::execute(Player& player) {

@@ -67,6 +67,8 @@ public:
     void stop();
 
     bool isRunning() const { return running_.load(); }
+    /// 在关闭写端前发布；读端 EOF 只有在合并及尾部排空成功时才代表正常完成。
+    bool completedSuccessfully() const { return completedSuccessfully_.load(std::memory_order_acquire); }
 
     /**
      * @brief 等待远程流和输出管道准备完成。
@@ -94,6 +96,7 @@ private:
     std::thread thread_;
     std::atomic<bool> running_{false};
     std::atomic<bool> ready_{false};   ///< 合并线程已完成 FFmpeg 初始化，可以开始写数据
+    std::atomic<bool> completedSuccessfully_{false};
     std::atomic<bool> cancelOnGeneration_{true}; ///< 候选准备期响应 seek generation，提交后关闭
 #ifdef _WIN32
     std::string pipeName_;  ///< Windows 命名管道名称

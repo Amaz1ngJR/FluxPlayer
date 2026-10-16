@@ -182,7 +182,11 @@ public:
      *
      * @param src 源帧（不修改其引用计数语义之外的状态）
      */
-    void refFrom(const Frame& src);
+    /** @return 引用成功返回 true；失败时清空当前帧。 */
+    bool refFrom(const Frame& src);
+
+    /** @brief 交换底层引用和全部元数据，双方仍可复用，不复制像素或采样。 */
+    void swap(Frame& other) noexcept;
 
     /** @brief 解除对数据的引用，释放帧缓冲区 */
     void unreference();

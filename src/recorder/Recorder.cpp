@@ -49,6 +49,21 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
         return false;
     }
 
+    // 所有 start 早退都保留失败；只有文件头写入成功才清除。
+    failed_ = true;
+    const int requiredIdx = mode == Mode::VIDEO ? videoStreamIdx : audioStreamIdx;
+    if (!inputFmtCtx || requiredIdx < 0 || requiredIdx >= static_cast<int>(inputFmtCtx->nb_streams) ||
+        inputFmtCtx->streams[requiredIdx]->codecpar->codec_type !=
+            (mode == Mode::VIDEO ? AVMEDIA_TYPE_VIDEO : AVMEDIA_TYPE_AUDIO) ||
+        (mode == Mode::VIDEO && audioStreamIdx >= 0 &&
+         (audioStreamIdx >= static_cast<int>(inputFmtCtx->nb_streams) ||
+          inputFmtCtx->streams[audioStreamIdx]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO))) {
+        LOG_ERROR("Recorder: invalid input stream");
+        failed_ = true;
+        return false;
+    }
+    outputVideoIdx_ = outputAudioIdx_ = -1;
+    inputVideoTb_ = inputAudioTb_ = AVRational{0, 1};
     mode_ = mode;
     inputVideoIdx_ = videoStreamIdx;
     inputAudioIdx_ = audioStreamIdx;
@@ -56,7 +71,13 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
 
     // 确保输出目录存在
     std::filesystem::path p(outputPath_);
-    std::filesystem::create_directories(p.parent_path());
+    std::error_code directoryError;
+    if (!p.parent_path().empty()) std::filesystem::create_directories(p.parent_path(), directoryError);
+    if (directoryError) {
+        LOG_ERROR("Recorder: cannot create directory: " + directoryError.message());
+        failed_ = true;
+        return false;
+    }
 
     // 创建输出格式上下文
     const char* format = nullptr;
@@ -76,12 +97,23 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
     }
     // VIDEO 模式：根据文件扩展名自动推断格式
 
+    // 在文件头成功前统一释放候选上下文；失败不留下半初始化的活动录制器。
+    const auto failStart = [this](const std::string& message) {
+        LOG_ERROR(message);
+        if (outputFmtCtx_) {
+            if (outputFmtCtx_->pb) avio_closep(&outputFmtCtx_->pb);
+            avformat_free_context(outputFmtCtx_);
+            outputFmtCtx_ = nullptr;
+        }
+        failed_ = true;
+        return false;
+    };
+
     int ret = avformat_alloc_output_context2(&outputFmtCtx_, nullptr, format, outputPath_.c_str());
     if (ret < 0 || !outputFmtCtx_) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to allocate output context: " + std::string(errBuf));
-        return false;
+        return failStart("Failed to allocate output context: " + std::string(errBuf));
     }
 
     // 创建输出流
@@ -90,16 +122,14 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
         AVStream* inVideoStream = inputFmtCtx->streams[videoStreamIdx];
         AVStream* outVideoStream = avformat_new_stream(outputFmtCtx_, nullptr);
         if (!outVideoStream) {
-            LOG_ERROR("Failed to create output video stream");
-            avformat_free_context(outputFmtCtx_);
-            outputFmtCtx_ = nullptr;
-            return false;
+            return failStart("Failed to create output video stream");
         }
         outputVideoIdx_ = outVideoStream->index;
         inputVideoTb_ = inVideoStream->time_base;
 
         // 转封装：直接拷贝编解码器参数（无损、零 CPU，不重编码）
-        avcodec_parameters_copy(outVideoStream->codecpar, inVideoStream->codecpar);
+        if (avcodec_parameters_copy(outVideoStream->codecpar, inVideoStream->codecpar) < 0)
+            return failStart("Failed to copy video codec parameters");
         outVideoStream->time_base = inVideoStream->time_base;
         // 清除 codec_tag，让 muxer 自动选择
         outVideoStream->codecpar->codec_tag = 0;
@@ -112,11 +142,12 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
             if (outAudioStream) {
                 outputAudioIdx_ = outAudioStream->index;
                 inputAudioTb_ = inAudioStream->time_base;
-                avcodec_parameters_copy(outAudioStream->codecpar, inAudioStream->codecpar);
+                if (avcodec_parameters_copy(outAudioStream->codecpar, inAudioStream->codecpar) < 0)
+                    return failStart("Failed to copy video audio codec parameters");
                 outAudioStream->time_base = inAudioStream->time_base;
                 outAudioStream->codecpar->codec_tag = 0;
             } else {
-                LOG_WARN("VIDEO record: failed to create audio stream, recording video only");
+                return failStart("Failed to create recording audio stream");
             }
         }
     } else {
@@ -124,16 +155,14 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
         AVStream* inAudioStream = inputFmtCtx->streams[audioStreamIdx];
         AVStream* outAudioStream = avformat_new_stream(outputFmtCtx_, nullptr);
         if (!outAudioStream) {
-            LOG_ERROR("Failed to create output audio stream");
-            avformat_free_context(outputFmtCtx_);
-            outputFmtCtx_ = nullptr;
-            return false;
+            return failStart("Failed to create output audio stream");
         }
         outputAudioIdx_ = outAudioStream->index;
         inputAudioTb_ = inAudioStream->time_base;
 
         // 音频始终转封装
-        avcodec_parameters_copy(outAudioStream->codecpar, inAudioStream->codecpar);
+        if (avcodec_parameters_copy(outAudioStream->codecpar, inAudioStream->codecpar) < 0)
+            return failStart("Failed to copy audio codec parameters");
         outAudioStream->time_base = inAudioStream->time_base;
 
         // 清除 codec_tag，让 muxer 自动选择合适的标签（避免容器不兼容）
@@ -146,10 +175,7 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
         if (ret < 0) {
             char errBuf[AV_ERROR_MAX_STRING_SIZE];
             av_strerror(ret, errBuf, sizeof(errBuf));
-            LOG_ERROR("Failed to open output file: " + outputPath_ + " (" + errBuf + ")");
-            avformat_free_context(outputFmtCtx_);
-            outputFmtCtx_ = nullptr;
-            return false;
+            return failStart("Failed to open output file: " + outputPath_ + " (" + errBuf + ")");
         }
     }
 
@@ -158,14 +184,11 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
-        LOG_ERROR("Failed to write output header: " + std::string(errBuf));
-        avio_closep(&outputFmtCtx_->pb);
-        avformat_free_context(outputFmtCtx_);
-        outputFmtCtx_ = nullptr;
-        return false;
+        return failStart("Failed to write output header: " + std::string(errBuf));
     }
 
     recording_.store(true);
+    failed_ = false;
     startTime_ = std::chrono::steady_clock::now();
     started_ = false;
     startSec_ = 0.0;
@@ -177,9 +200,9 @@ bool Recorder::start(const std::string& outputPath, Mode mode,
 }
 
 bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
-    if (!recording_.load() || !outputFmtCtx_) return false;
-
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!recording_.load() || !outputFmtCtx_ || failed_) return false;
+    if (!packet) { failed_ = true; return false; }
 
     const bool isVideoInput = (inputStreamIdx == inputVideoIdx_);
     const bool isAudioInput = (inputStreamIdx == inputAudioIdx_);
@@ -197,7 +220,7 @@ bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
         inputTb = inputAudioTb_;
         startOffsetTs = &startAudioOffsetTs_;
     } else {
-        return false;  // 不匹配/无对应输出流，忽略
+        return true;  // 非目标轨道属于正常忽略，不作为写入失败。
     }
 
     // 起录对齐：
@@ -237,7 +260,7 @@ bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
 
     // 拷贝 packet
     AVPacket* pkt = av_packet_clone(packet);
-    if (!pkt) return false;
+    if (!pkt) { failed_ = true; return false; }
     pkt->stream_index = outputStreamIdx;
 
     // 时间戳：减去本流起点偏移后换算到输出 time_base
@@ -257,30 +280,49 @@ bool Recorder::writePacket(AVPacket* packet, int inputStreamIdx) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
         LOG_ERROR("Failed to write packet: " + std::string(errBuf));
+        failed_ = true;
         return false;
     }
     return true;
 }
 
-void Recorder::stop() {
+bool Recorder::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (!recording_.load() || !outputFmtCtx_) return;
-
-    // 写入文件尾
-    av_write_trailer(outputFmtCtx_);
-
-    // 关闭文件
-    if (!(outputFmtCtx_->oformat->flags & AVFMT_NOFILE)) {
-        avio_closep(&outputFmtCtx_->pb);
+    if (!recording_.load() || !outputFmtCtx_) return !failed_;
+    bool ok = !failed_;
+    const int trailerRet = av_write_trailer(outputFmtCtx_);
+    if (trailerRet < 0) {
+        char errBuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(trailerRet, errBuf, sizeof(errBuf));
+        LOG_ERROR("Failed to write trailer: " + std::string(errBuf));
+        ok = false;
     }
 
-    // 释放格式上下文
+    if (outputFmtCtx_->pb) {
+        // 某些 muxer 不传播 AVIO 缓冲写失败；flush 后独立检查 sticky error。
+        avio_flush(outputFmtCtx_->pb);
+        if (outputFmtCtx_->pb->error < 0) {
+            LOG_ERROR("Recording output I/O failed: " + std::to_string(outputFmtCtx_->pb->error));
+            ok = false;
+        }
+    }
+    int closeRet = 0;
+    if (!(outputFmtCtx_->oformat->flags & AVFMT_NOFILE)) {
+        closeRet = avio_closep(&outputFmtCtx_->pb);
+        if (closeRet < 0) {
+            char errBuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(closeRet, errBuf, sizeof(errBuf));
+            LOG_ERROR("Failed to close recording output: " + std::string(errBuf));
+            ok = false;
+        }
+    }
     avformat_free_context(outputFmtCtx_);
     outputFmtCtx_ = nullptr;
-
     recording_.store(false);
-    LOG_INFO("Recorder stopped: " + outputPath_);
+    failed_ = !ok;
+    LOG_INFO(std::string("Recorder stopped: ") + outputPath_ + (ok ? "" : " (with errors)"));
+    return ok;
 }
 
 double Recorder::getElapsedSeconds() const {

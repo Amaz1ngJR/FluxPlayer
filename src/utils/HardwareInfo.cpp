@@ -139,14 +139,21 @@ std::optional<PerformanceEstimate> runDecodeBenchmark() {
         }
 
         if (packet->stream_index == videoStreamIndex) {
-            decoder.sendPacket(packet);
-            while (decodedFrames < kBenchmarkMaxFrames && decoder.receiveFrame(rawFrame)) {
-                if (decoder.prepareFrame(rawFrame.getAVFrame(), preparedFrame)) {
-                    ++decodedFrames;
-                    preparedFrame.unreference();
+            bool retry;
+            do {
+                decoder.sendPacket(packet);
+                retry = decoder.lastResult() == AVERROR(EAGAIN);
+                bool received = false;
+                while (decodedFrames < kBenchmarkMaxFrames && decoder.receiveFrame(rawFrame)) {
+                    received = true;
+                    if (decoder.prepareFrame(rawFrame.getAVFrame(), preparedFrame)) {
+                        ++decodedFrames;
+                        preparedFrame.unreference();
+                    }
+                    rawFrame.unreference();
                 }
-                rawFrame.unreference();
-            }
+                if (!received) break;
+            } while (retry && decodedFrames < kBenchmarkMaxFrames);
         }
 
         av_packet_unref(packet);

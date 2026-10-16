@@ -7,6 +7,8 @@
 
 #include <string>
 #include <memory>
+#include <atomic>
+#include <cstdint>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -24,8 +26,20 @@ namespace FluxPlayer {
  */
 class Demuxer {
 public:
-    Demuxer();
+    /** @brief stop 标志须覆盖 Demuxer 生命周期；只发布原子意图，不跨线程 close。 */
+    explicit Demuxer(const std::atomic<bool>* externalStop = nullptr);
     ~Demuxer();
+    Demuxer(const Demuxer&) = delete;
+    Demuxer& operator=(const Demuxer&) = delete;
+
+    enum class IoResult { Ok, Cancelled, Superseded, ControlWake, TimedOut, EndOfFile, Again, Error };
+    /** @brief 并发安全地取消；取消在 close/open 之间保持，不自动复活该对象。 */
+    void requestCancel() { cancelled_.store(true, std::memory_order_release); }
+    bool isCancelled() const;
+    /** 仅在无 I/O/协议回调运行时由所有者更换停止标志，目标寿命须覆盖输入。 */
+    void bindStopFlag(const std::atomic<bool>* stop) { externalStop_ = stop; }
+    /** @brief 仅由 I/O 所属线程读取最近操作结果。 */
+    IoResult lastIoResult() const { return lastIoResult_; }
 
     /**
      * @brief 打开媒体文件或网络流
@@ -63,7 +77,9 @@ public:
      * @param packet 用于接收数据的 AVPacket 指针（调用者需在使用后 av_packet_unref）
      * @return 成功返回 true，文件结束或出错返回 false
      */
-    bool readPacket(AVPacket* packet);
+    // 可选 generation 须在本次调用结束前有效；缺省仍响应 externalStop_。
+    bool readPacket(AVPacket* packet, const std::atomic<uint64_t>* generation = nullptr,
+                    uint64_t expectedGeneration = 0, const std::atomic<bool>* controlWake = nullptr);
 
     /// 最近一次 readPacket 的 FFmpeg 返回值，用于区分 EAGAIN、EOF 和永久错误。
     int getLastReadError() const { return m_lastReadError; }
@@ -158,7 +174,9 @@ public:
      * @param timestamp 目标时间戳（微秒）
      * @return 成功返回 true，失败返回 false
      */
-    bool seek(int64_t timestamp);
+    // generation 必须在本次同步调用及协议回调结束前有效；仅 I/O 所属线程调用。
+    bool seek(int64_t timestamp, const std::atomic<uint64_t>* generation = nullptr,
+              uint64_t expectedGeneration = 0);
 
     /**
      * @brief 检测是否为实时流（RTSP/RTMP/RTP 等）
@@ -173,6 +191,26 @@ public:
     AVFormatContext* getFormatContext() { return m_formatCtx; }
 
 private:
+    // opaque 指向不可移动的 Demuxer；回调不分配、不记录日志、不获取业务锁。
+    static int interruptCallback(void* opaque);
+    bool prepareInput();
+    bool preparePipeInput(const std::string& filename);
+    static int readPipe(void* opaque, uint8_t* buffer, int size);
+    void* pipeHandle_ = nullptr; ///< Windows HANDLE，仅 I/O 所属线程创建/关闭。
+    int pipeFd_ = -1; ///< POSIX 读端所有权由 DashMerger 转入。
+    AVIOContext* pipeIo_ = nullptr; ///< 自定义可取消 AVIO，close_input 后由所有者回收。
+    bool beginIo(int timeoutSeconds);
+    int finishIo(int result);
+    std::atomic<const std::atomic<bool>*> externalStop_;
+    std::atomic<bool> cancelled_{false};
+    std::atomic<int64_t> deadlineNs_{0}; ///< 回调可能由协议内部线程读取，按原子快照发布。
+    bool isSuperseded() const;
+    bool isControlWake() const;
+    std::atomic<const std::atomic<bool>*> controlWake_{nullptr};
+    std::atomic<const std::atomic<uint64_t>*> seekGeneration_{nullptr};
+    std::atomic<uint64_t> expectedSeekGeneration_{0};
+    IoResult lastIoResult_ = IoResult::Ok;
+
     /**
      * @brief 为指定路由打开输入并探测流。
      * @param filename 输入 URL/路径

@@ -137,10 +137,10 @@ void HomeScreen::renderUI() {
 void HomeScreen::chooseLocalFile() {
     const char* filters[] = {
         "*.mp4", "*.mkv", "*.avi", "*.mov", "*.flv", "*.wmv", "*.webm", "*.ts",
-        "*.m4v", "*.3gp", "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg", "*.jpg",
-        "*.jpeg", "*.png", "*.yuv", "*.nv12"
+        "*.m4v", "*.3gp", "*.mp3", "*.wav", "*.flac", "*.aac", "*.ogg", "*.m4a",
+        "*.mka", "*.opus", "*.jpg", "*.jpeg", "*.png", "*.yuv", "*.nv12"
     };
-    const char* selected = tinyfd_openFileDialog("Select Media File", "", 20, filters,
+    const char* selected = tinyfd_openFileDialog("Select Media File", "", 23, filters,
                                                   "Media Files", 0);
     if (!selected) return;
     selectedFile_ = selected;

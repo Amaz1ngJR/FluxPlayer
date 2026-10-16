@@ -10,6 +10,7 @@
 
 #include <string>
 #include <vector>
+#include <atomic>
 
 namespace FluxPlayer {
 
@@ -18,6 +19,10 @@ struct QualityOption {
     std::string formatId;  ///< yt-dlp format_id，传给 -f 参数
     int height;            ///< 分辨率高度（360/480/720/1080/2160）
     std::string label;     ///< 显示名称，如 "1080P"
+    // 当前提取会话内的直链快照，仅 HTTP(S) 单文件格式；打开失败时重新提取一次。
+    std::string videoUrl;
+    std::string audioUrl;
+    std::string headers;
 };
 
 /// yt-dlp 提取结果
@@ -65,12 +70,14 @@ public:
      * @param formatId 指定画质的 format_id，空则取最佳画质
      * @param out      提取结果
      * @param error    失败时的错误描述
+     * @param cancelled 停止标志，生命周期覆盖本次调用；提取线程先终止本任务进程树再回收，调用者发布取消后才 join
      * @return 成功返回 true
      */
     static bool extract(const std::string& pageUrl,
                         const std::string& formatId,
                         ExtractedStream& out,
-                        std::string& error);
+                        std::string& error,
+                        const std::atomic<bool>* cancelled = nullptr);
 
     /// 检测 yt-dlp 是否已安装
     static bool isAvailable();

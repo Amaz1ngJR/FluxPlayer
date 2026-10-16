@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -117,9 +118,10 @@ struct SetSpeedCommand : PlayerCommand {
 struct SwitchQualityCommand : PlayerCommand {
     std::string formatId;
     double seekTime;
+    uint64_t requestId;
 
-    SwitchQualityCommand(const std::string& fid, double st)
-        : formatId(fid), seekTime(st) {}
+    SwitchQualityCommand(const std::string& fid, double st, uint64_t id)
+        : formatId(fid), seekTime(st), requestId(id) {}
     void execute(Player& player) override;
 };
 

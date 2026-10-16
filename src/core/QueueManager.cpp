@@ -10,8 +10,14 @@ QueueManager::~QueueManager() = default;
 void QueueManager::startAll() {
     if (videoPktQueue_) videoPktQueue_->start();
     if (audioPktQueue_) audioPktQueue_->start();
-    if (videoQueue_) videoQueue_->start();
-    if (audioQueue_) audioQueue_->start();
+    if (videoQueue_) {
+        videoQueue_->flush(videoPktQueue_ ? videoPktQueue_->serial() : 0);
+        videoQueue_->start();
+    }
+    if (audioQueue_) {
+        audioQueue_->flush(audioPktQueue_ ? audioPktQueue_->serial() : 0);
+        audioQueue_->start();
+    }
 }
 
 void QueueManager::abortAll() {
@@ -24,13 +30,13 @@ void QueueManager::abortAll() {
 void QueueManager::flushAll() {
     if (videoPktQueue_) videoPktQueue_->flush();
     if (audioPktQueue_) audioPktQueue_->flush();
-    if (videoQueue_) videoQueue_->flush();
-    if (audioQueue_) audioQueue_->flush();
+    if (videoQueue_) videoQueue_->flush(videoPktQueue_ ? videoPktQueue_->serial() : 0);
+    if (audioQueue_) audioQueue_->flush(audioPktQueue_ ? audioPktQueue_->serial() : 0);
 }
 
 void QueueManager::flushPacketQueues() {
-    if (videoPktQueue_) videoPktQueue_->flush();
-    if (audioPktQueue_) audioPktQueue_->flush();
+    // 包代际改变时同步发布帧边界，不能留下永远无法提交的新 serial。
+    flushAll();
 }
 
 void QueueManager::reset() {

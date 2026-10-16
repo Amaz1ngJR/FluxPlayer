@@ -23,107 +23,191 @@ RecordingService::~RecordingService() {
 
 // 控制线程接口
 
-void RecordingService::requestStartVideo(const std::string& outputPath,
-                                          AVFormatContext* inputFmtCtx,
-                                          int videoStreamIdx, int audioStreamIdx) {
+void RecordingService::requestStartVideo(const std::string& outputPath) {
     {
         std::lock_guard<std::mutex> lock(requestMutex_);
+        const auto state = status_.videoState.load();
+        if (state == RecordingState::Starting || state == RecordingState::Recording) return;
+        if (!inputAvailable_) {
+            reportError(status_.videoState);
+            return;
+        }
         pendingRequests_.push_back({
             DemuxRecordingRequest::Action::StartVideo,
             outputPath,
-            inputFmtCtx,
-            videoStreamIdx,
-            audioStreamIdx
+            inputAvailable_ ? inputGeneration_ : 0
         });
+        // 在请求可被消费前发布 Starting，避免覆盖 demux 已发布的结果。
+        status_.videoState.store(RecordingState::Starting);
     }
-    // 立即更新状态为 Starting，UI 可见「录制准备中」
-    status_.videoState.store(RecordingState::Starting);
     LOG_INFO("RecordingService: video recording requested, output=" + outputPath);
 }
 
 void RecordingService::requestStopVideo() {
     {
         std::lock_guard<std::mutex> lock(requestMutex_);
+        if (!publishedInput_) return; // 无输入时由边界封口，不留下无人消费的 Stopping。
         pendingRequests_.push_back({
             DemuxRecordingRequest::Action::StopVideo,
-            "", nullptr, -1, -1
+            "", inputGeneration_
         });
+        readWake_.store(true, std::memory_order_release);
+        auto state = status_.videoState.load();
+        while (state != RecordingState::Error &&
+               !status_.videoState.compare_exchange_weak(state, RecordingState::Stopping)) {}
     }
-    status_.videoState.store(RecordingState::Stopping);
     LOG_INFO("RecordingService: stop video recording requested");
 }
 
-void RecordingService::requestStartAudio(const std::string& outputPath,
-                                          AVFormatContext* inputFmtCtx,
-                                          int videoStreamIdx, int audioStreamIdx) {
+void RecordingService::requestStartAudio(const std::string& outputPath) {
     {
         std::lock_guard<std::mutex> lock(requestMutex_);
+        const auto state = status_.audioState.load();
+        if (state == RecordingState::Starting || state == RecordingState::Recording) return;
+        if (!inputAvailable_) {
+            reportError(status_.audioState);
+            return;
+        }
         pendingRequests_.push_back({
             DemuxRecordingRequest::Action::StartAudio,
             outputPath,
-            inputFmtCtx,
-            videoStreamIdx,
-            audioStreamIdx
+            inputAvailable_ ? inputGeneration_ : 0
         });
+        status_.audioState.store(RecordingState::Starting);
     }
-    status_.audioState.store(RecordingState::Starting);
     LOG_INFO("RecordingService: audio recording requested, output=" + outputPath);
 }
 
 void RecordingService::requestStopAudio() {
     {
         std::lock_guard<std::mutex> lock(requestMutex_);
+        if (!publishedInput_) return;
         pendingRequests_.push_back({
             DemuxRecordingRequest::Action::StopAudio,
-            "", nullptr, -1, -1
+            "", inputGeneration_
         });
+        readWake_.store(true, std::memory_order_release);
+        auto state = status_.audioState.load();
+        while (state != RecordingState::Error &&
+               !status_.audioState.compare_exchange_weak(state, RecordingState::Stopping)) {}
     }
-    status_.audioState.store(RecordingState::Stopping);
     LOG_INFO("RecordingService: stop audio recording requested");
+}
+
+void RecordingService::publishState(std::atomic<RecordingState>& state, RecordingState value) {
+    std::lock_guard<std::mutex> lock(requestMutex_);
+    const bool video = &state == &status_.videoState;
+    for (const auto& request : pendingRequests_) {
+        const bool requestVideo = request.action == DemuxRecordingRequest::Action::StartVideo ||
+                                  request.action == DemuxRecordingRequest::Action::StopVideo;
+        if (video == requestVideo) return; // 新请求的 Starting/Stopping 优先于旧完成结果。
+    }
+    if (value == RecordingState::Idle && state.load() == RecordingState::Error) return;
+    state.store(value);
+}
+
+void RecordingService::reportError(std::atomic<RecordingState>& state) {
+    state.store(RecordingState::Error);
+    pendingErrors_.fetch_or(&state == &status_.videoState ? 1u : 2u);
+}
+
+void RecordingService::finishRecorder(std::unique_ptr<Recorder>& recorder,
+                                      std::atomic<RecordingState>& state) {
+    const bool failed = state.load() == RecordingState::Error;
+    const bool ok = !recorder || recorder->stop();
+    recorder.reset();
+    if (!ok && !failed) reportError(state);
+    else publishState(state, failed ? RecordingState::Error : RecordingState::Idle);
+}
+
+void RecordingService::finishForStreamReplacement() {
+    // 已没有 demux 使用者，禁止旧请求携带 inputFmtCtx 进入新会话。
+    {
+        std::lock_guard<std::mutex> lock(requestMutex_);
+        pendingRequests_.clear();
+        readWake_.store(false, std::memory_order_release);
+        ++inputGeneration_;
+        inputAvailable_ = false;
+        publishedInput_ = nullptr;
+    }
+    finishRecorder(videoRecorder_, status_.videoState);
+    finishRecorder(audioRecorder_, status_.audioState);
+    status_.videoElapsedSec.store(0.0);
+    status_.audioElapsedSec.store(0.0);
+    status_.videoFileSize.store(0);
+    status_.audioFileSize.store(0);
 }
 
 // Demux 线程接口
 
-void RecordingService::processPendingRequests() {
-    // 取走全部待处理请求（锁内极短，锁外执行）
-    std::vector<DemuxRecordingRequest> requests;
+void RecordingService::processPendingRequests(AVFormatContext* currentInput, bool allowStart) {
+    // 固定本轮请求数量，避免持续投递使读包饥饿；文件 I/O 在锁外执行。
+    size_t requestCount;
+    uint64_t generation;
     {
         std::lock_guard<std::mutex> lock(requestMutex_);
-        requests.swap(pendingRequests_);
+        if (publishedInput_ != currentInput) {
+            ++inputGeneration_;
+            publishedInput_ = currentInput;
+        }
+        inputAvailable_ = allowStart && currentInput;
+        generation = inputGeneration_;
+        requestCount = pendingRequests_.size();
+        readWake_.store(false, std::memory_order_release);
+    }
+    // 流索引只在输入所有者线程读取；UI 不再访问可能被 DASH 替换的 unique_ptr。
+    int videoIndex = -1, audioIndex = -1;
+    if (currentInput) {
+        for (unsigned i = 0; i < currentInput->nb_streams; ++i) {
+            const auto type = currentInput->streams[i]->codecpar->codec_type;
+            if (type == AVMEDIA_TYPE_VIDEO && videoIndex < 0) videoIndex = static_cast<int>(i);
+            if (type == AVMEDIA_TYPE_AUDIO && audioIndex < 0) audioIndex = static_cast<int>(i);
+        }
     }
 
-    if (requests.empty()) return;
+    if (!requestCount) return;
 
-    // 串行处理所有请求
-    for (const auto& req : requests) {
+    // 每次只取一个请求，使完成发布仍可看到同批后续的 Start/Stop；I/O 不持请求锁。
+    for (size_t i = 0; i < requestCount; ++i) {
+        DemuxRecordingRequest req;
+        {
+            std::lock_guard<std::mutex> lock(requestMutex_);
+            req = std::move(pendingRequests_.front());
+            pendingRequests_.erase(pendingRequests_.begin());
+        }
+        const bool isStart = req.action == DemuxRecordingRequest::Action::StartVideo ||
+                             req.action == DemuxRecordingRequest::Action::StartAudio;
+        // 不解引用过期请求的输入；EOF、Seek 等输入边界禁止起录，但仍处理 Stop。
+        if (isStart && (!allowStart || !currentInput || req.inputGeneration != generation)) {
+            auto& state = req.action == DemuxRecordingRequest::Action::StartVideo
+                ? status_.videoState : status_.audioState;
+            reportError(state);
+            LOG_WARN("RecordingService: rejected stale/unavailable input Start");
+            continue;
+        }
         switch (req.action) {
             case DemuxRecordingRequest::Action::StartVideo: {
                 if (videoRecorder_ && videoRecorder_->isRecording()) {
                     LOG_WARN("RecordingService: video recording already in progress, ignoring new request");
-                    status_.videoState.store(RecordingState::Recording);
+                    publishState(status_.videoState, RecordingState::Recording);
                     break;
                 }
                 videoRecorder_ = std::make_unique<Recorder>();
                 bool ok = videoRecorder_->start(req.outputPath, Recorder::Mode::VIDEO,
-                                                 req.inputFmtCtx, req.videoStreamIdx, req.audioStreamIdx);
+                                                 currentInput, videoIndex, audioIndex);
                 if (ok) {
-                    status_.videoState.store(RecordingState::Recording);
+                    publishState(status_.videoState, RecordingState::Recording);
                     LOG_INFO("RecordingService: video recording started");
                 } else {
                     LOG_ERROR("RecordingService: failed to start video recording");
                     videoRecorder_.reset();
-                    status_.videoState.store(RecordingState::Error);
+                    reportError(status_.videoState);
                 }
                 break;
             }
 
             case DemuxRecordingRequest::Action::StopVideo: {
-                if (videoRecorder_ && videoRecorder_->isRecording()) {
-                    videoRecorder_->stop();
-                    LOG_INFO("RecordingService: video recording stopped");
-                }
-                videoRecorder_.reset();
-                status_.videoState.store(RecordingState::Idle);
+                finishRecorder(videoRecorder_, status_.videoState);
                 status_.videoElapsedSec.store(0.0);
                 status_.videoFileSize.store(0);
                 break;
@@ -132,30 +216,25 @@ void RecordingService::processPendingRequests() {
             case DemuxRecordingRequest::Action::StartAudio: {
                 if (audioRecorder_ && audioRecorder_->isRecording()) {
                     LOG_WARN("RecordingService: audio recording already in progress, ignoring new request");
-                    status_.audioState.store(RecordingState::Recording);
+                    publishState(status_.audioState, RecordingState::Recording);
                     break;
                 }
                 audioRecorder_ = std::make_unique<Recorder>();
                 bool ok = audioRecorder_->start(req.outputPath, Recorder::Mode::AUDIO,
-                                                 req.inputFmtCtx, req.videoStreamIdx, req.audioStreamIdx);
+                                                 currentInput, videoIndex, audioIndex);
                 if (ok) {
-                    status_.audioState.store(RecordingState::Recording);
+                    publishState(status_.audioState, RecordingState::Recording);
                     LOG_INFO("RecordingService: audio recording started");
                 } else {
                     LOG_ERROR("RecordingService: failed to start audio recording");
                     audioRecorder_.reset();
-                    status_.audioState.store(RecordingState::Error);
+                    reportError(status_.audioState);
                 }
                 break;
             }
 
             case DemuxRecordingRequest::Action::StopAudio: {
-                if (audioRecorder_ && audioRecorder_->isRecording()) {
-                    audioRecorder_->stop();
-                    LOG_INFO("RecordingService: audio recording stopped");
-                }
-                audioRecorder_.reset();
-                status_.audioState.store(RecordingState::Idle);
+                finishRecorder(audioRecorder_, status_.audioState);
                 status_.audioElapsedSec.store(0.0);
                 status_.audioFileSize.store(0);
                 break;
@@ -171,7 +250,11 @@ void RecordingService::writeVideoPacket(AVPacket* packet, int inputStreamIdx) {
     }
 
     if (videoRecorder_ && videoRecorder_->isRecording()) {
-        videoRecorder_->writePacket(packet, inputStreamIdx);
+        if (!videoRecorder_->writePacket(packet, inputStreamIdx)) {
+            reportError(status_.videoState);
+            finishRecorder(videoRecorder_, status_.videoState);
+            return;
+        }
         // 更新统计信息（每次 write 都更新，UI 每帧读取）
         status_.videoElapsedSec.store(videoRecorder_->getElapsedSeconds());
         status_.videoFileSize.store(videoRecorder_->getFileSize());
@@ -184,7 +267,11 @@ void RecordingService::writeAudioPacket(AVPacket* packet, int inputStreamIdx) {
     }
 
     if (audioRecorder_ && audioRecorder_->isRecording()) {
-        audioRecorder_->writePacket(packet, inputStreamIdx);
+        if (!audioRecorder_->writePacket(packet, inputStreamIdx)) {
+            reportError(status_.audioState);
+            finishRecorder(audioRecorder_, status_.audioState);
+            return;
+        }
         status_.audioElapsedSec.store(audioRecorder_->getElapsedSeconds());
         status_.audioFileSize.store(audioRecorder_->getFileSize());
     }

@@ -1,5 +1,6 @@
 #include "FluxPlayer/ui/Controller.h"
 #include "FluxPlayer/core/Player.h"
+#include "FluxPlayer/core/MediaInfo.h"
 #include "FluxPlayer/ui/Window.h"
 #include "FluxPlayer/ui/UiContext.h"
 #include "FluxPlayer/ui/SkinManager.h"
@@ -316,11 +317,38 @@ void Controller::render() {
             {0, 0, ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y}, ImGui::GetIO().DeltaTime);
     }
 
+    // 主线程消费完成事件，标签只在对应请求成功后更新；失败保留旧标签。
+    const auto& qualityStatus = player_.getQualitySwitchStatus();
+    const bool qualityCompleted = !qualityStatus.pending && qualityStatus.success &&
+        qualityStatus.requestId != completedQualityRequest_;
+    if (!qualityStatus.pending && qualityStatus.requestId != completedQualityRequest_) {
+        if (qualityStatus.success) {
+            const auto* media = player_.getQualityMediaInfo();
+            if (media) {
+                const auto video = media->getVideoStreamInfo(0);
+                const auto audio = media->getAudioStreamInfo(0);
+                setMediaInfo(player_.getCurrentSourceUrl(), video.width, video.height,
+                    player_.getDuration(), video.fps, video.codecName, video.profile,
+                    audio.codecName, audio.profile, audio.sampleRate, audio.channels,
+                    audio.channelLayout, video.gopSize);
+            }
+        } else if (!qualityStatus.error.empty()) {
+            if (auto* toasts = player_.getToastManager()) {
+                ToastMessage message;
+                message.type = ToastType::Error;
+                message.title = "Quality switch failed";
+                message.content = qualityStatus.error;
+                toasts->show(message);
+            }
+        }
+        completedQualityRequest_ = qualityStatus.requestId;
+    }
+
     // 同步原始来源和网页提取信息。画质仍只使用 page URL；下载则覆盖所有网络源。
     std::string newSource = player_.isCurrentSourceNetwork() ? player_.getCurrentSourceUrl() : std::string{};
     currentSourceUrl_ = std::move(newSource);
     std::string newUrl = player_.getLastPageUrl();
-    if (newUrl != currentPageUrl_) {
+    if (newUrl != currentPageUrl_ || qualityCompleted) {
         currentPageUrl_ = newUrl;
         if (!newUrl.empty()) {
             const auto& info = player_.getLastExtractedInfo();
@@ -331,8 +359,11 @@ void Controller::render() {
                 item.label    = q.label;
                 qualities_.push_back(item);
             }
-            // 取第一个（最高画质）作为当前画质
+            // 完成后按实际选中的 ID 找标签，不把最高画质误报为当前画质。
             currentQualityLabel_ = qualities_.empty() ? "" : qualities_[0].label;
+            for (const auto& q : qualities_) {
+                if (q.formatId == info.selectedFormatId) currentQualityLabel_ = q.label;
+            }
             webUploader_   = info.uploader;
             webPlatform_   = info.platform;
             webViewCount_  = info.viewCount;
@@ -607,7 +638,8 @@ Controller::provideLuaData(const std::string& name) const {
              {"downloadDecoder", downloadDecoder_}, {"downloadEncoder", downloadEncoder_},
              {"downloadZeroCopy", downloadZeroCopy_},
              {"downloadPaused", downloader_ && downloader_->isPaused() ? "true" : "false"},
-             {"quality", currentQualityLabel_},
+             {"quality", player_.getQualitySwitchStatus().pending ? "SWITCHING..." : currentQualityLabel_},
+             {"qualitySwitching", player_.getQualitySwitchStatus().pending ? "true" : "false"},
              {"brightness", std::to_string(player_.getBrightness())},
              {"showMediaInfo", showMediaInfo_ ? "true" : "false"},
              {"showStats", showStats_ ? "true" : "false"},
@@ -663,7 +695,7 @@ void Controller::handleLuaAction(
         if (index >= 0 && index < static_cast<int>(qualities_.size()) && !currentPageUrl_.empty()) {
             const auto quality = qualities_[index];
             pendingLuaSeekProgress_ = -1;
-            if (player_.switchQuality(quality.formatId, player_.getCurrentTime())) currentQualityLabel_ = quality.label;
+            player_.switchQuality(quality.formatId, player_.getCurrentTime());
         }
     } else if (action == "setSpeed") {
         const double maxSpeed = HardwareInfo::maxSupportedPlaybackSpeed(videoWidth_, videoHeight_);

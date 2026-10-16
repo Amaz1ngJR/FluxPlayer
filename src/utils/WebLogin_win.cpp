@@ -19,7 +19,7 @@
  *   异步接口需要的 IUnknown + Invoke；
  * - 不链接 WebView2LoaderStatic.lib：运行时通过 LoadLibraryW 动态加载
  *   WebView2Loader.dll，DLL 由 WebView2 Runtime 提供；
- * - 异步流程通过私有消息泵驱动：模态期间持续 PeekMessage/DispatchMessage，
+ * - 异步流程通过私有消息泵驱动：模态期间持续 GetMessage/DispatchMessage，
  *   保证 WebView2 的回调能被处理；
  * - 「完成登录」点击后异步读取所有 cookies，回调里用 PostMessage 通知主流程退出循环。
  */
@@ -110,8 +110,9 @@ std::string wideToUtf8(LPCWSTR ws) {
     if (!ws) return "";
     int len = WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 1) return "";
-    std::string out(len - 1, '\0');
+    std::string out(len, '\0');
     WideCharToMultiByte(CP_UTF8, 0, ws, -1, out.data(), len, nullptr, nullptr);
+    out.resize(len - 1); // 转换包含终止符，分配时不能少一个字节。
     return out;
 }
 
@@ -198,6 +199,15 @@ NetscapeCookie convertCookie(ICoreWebView2Cookie* c) {
 // 登录窗口状态：随窗口生命周期持有
 // ───────────────────────────────────────────────
 struct LoginContext {
+    // WebView2 的 STA 回调持有 COM 风格引用，退出窗口后仍可安全拒绝迟到结果。
+    ULONG AddRef() { return static_cast<ULONG>(InterlockedIncrement(&refs)); }
+    ULONG Release() {
+        const LONG remaining = InterlockedDecrement(&refs);
+        if (!remaining) delete this;
+        return static_cast<ULONG>(remaining);
+    }
+    LONG refs = 1;
+    ComPtr<ICoreWebView2Environment> environment;
     HWND hwnd = nullptr;
     HWND completeBtn = nullptr;
     HWND useExistingBtn = nullptr;
@@ -253,7 +263,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_COMMAND: {
-        if (!ctx) return 0;
+        if (!ctx || ctx->modalResult != ModalResult::None) return 0;
         const int id = LOWORD(wp);
         if (id == kIdCancel) {
             ctx->modalResult = ModalResult::Cancel;
@@ -294,7 +304,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 nullptr,
                 MakeCallback<ICoreWebView2GetCookiesCompletedHandler, ICoreWebView2CookieList>(
                     IID_ICoreWebView2GetCookiesCompletedHandler,
-                    [ctx](HRESULT errorCode, ICoreWebView2CookieList* list) -> HRESULT {
+                    [state = ComPtr<LoginContext>(ctx)](HRESULT errorCode, ICoreWebView2CookieList* list) -> HRESULT {
+                        auto* ctx = state.Get();
+                        if (!ctx->running.load() || ctx->modalResult != ModalResult::None) return S_OK;
                         if (FAILED(errorCode) || !list) {
                             ctx->error = "GetCookies 调用失败";
                             ctx->modalResult = ModalResult::Failed;
@@ -327,6 +339,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CLOSE:
         if (ctx) {
+            if (ctx->modalResult != ModalResult::None) return 0;
             ctx->modalResult = ModalResult::Cancel;
             PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
         } else {
@@ -372,7 +385,9 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     const wchar_t* cls = ensureWindowClass(hInst);
 
-    LoginContext ctx;
+    ComPtr<LoginContext> state;
+    state.Attach(new LoginContext());
+    auto& ctx = *state.Get();
     ctx.startUrlUtf8 = pageUrl;
     ctx.startUrl = utf8ToWide(pageUrl);
     ctx.host = extractHost(pageUrl);
@@ -405,7 +420,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdUseExisting, hInst, nullptr);
     // 控件初始化完成即可继续，不必等待网页加载或登录。
     EnableWindow(ctx.completeBtn, FALSE);
-    EnableWindow(ctx.useExistingBtn, FALSE);
+    EnableWindow(ctx.useExistingBtn, TRUE);
     // 触发首次布局
     SendMessageW(hwnd, WM_SIZE, 0, 0);
 
@@ -419,7 +434,8 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         PCWSTR, PCWSTR,
         ICoreWebView2EnvironmentOptions*,
         ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
-    HMODULE loaderDll = LoadLibraryW(L"WebView2Loader.dll");
+    // Loader 保持进程级加载：退出窗口后异步创建仍可能回调，不能提前卸载入口模块。
+    static HMODULE loaderDll = LoadLibraryW(L"WebView2Loader.dll");
     if (!loaderDll) {
         DestroyWindow(hwnd);
         outcome.result = WebLoginResult::Failed;
@@ -431,7 +447,6 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     auto pfnCreateEnv = reinterpret_cast<PFnCreateWebView2Env>(
         GetProcAddress(loaderDll, "CreateCoreWebView2EnvironmentWithOptions"));
     if (!pfnCreateEnv) {
-        FreeLibrary(loaderDll);
         DestroyWindow(hwnd);
         outcome.result = WebLoginResult::Failed;
         outcome.error = "WebView2Loader.dll 中未找到入口函数";
@@ -439,22 +454,31 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     }
 
     // ── 创建 WebView2 环境（异步） ──
-    ComPtr<ICoreWebView2Environment> envHolder;
     HRESULT hr = pfnCreateEnv(nullptr, nullptr, nullptr,
         MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler, ICoreWebView2Environment>(
             IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
-            [&](HRESULT errorCode, ICoreWebView2Environment* env) -> HRESULT {
+            [state](HRESULT errorCode, ICoreWebView2Environment* env) -> HRESULT {
+                auto& ctx = *state.Get();
+                if (!ctx.running.load() || ctx.modalResult != ModalResult::None) return S_OK;
+                const HWND hwnd = ctx.hwnd;
                 if (FAILED(errorCode) || !env) {
                     ctx.error = "创建 WebView2 环境失败，请确认已安装 WebView2 Runtime";
                     ctx.modalResult = ModalResult::Failed;
                     PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
                     return S_OK;
                 }
-                envHolder = env;
-                env->CreateCoreWebView2Controller(hwnd,
+                ctx.environment = env;
+                const HRESULT createResult = env->CreateCoreWebView2Controller(hwnd,
                     MakeCallback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, ICoreWebView2Controller>(
                         IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
-                        [&](HRESULT err2, ICoreWebView2Controller* controller) -> HRESULT {
+                        [state](HRESULT err2, ICoreWebView2Controller* controller) -> HRESULT {
+                            auto& ctx = *state.Get();
+                            if (!ctx.running.load() || ctx.modalResult != ModalResult::None) {
+                                if (controller && FAILED(controller->Close()))
+                                    LOG_WARN("WebLogin: 关闭迟到的 WebView2 控制器失败");
+                                return S_OK;
+                            }
+                            const HWND hwnd = ctx.hwnd;
                             if (FAILED(err2) || !controller) {
                                 ctx.error = "创建 WebView2 控制器失败";
                                 ctx.modalResult = ModalResult::Failed;
@@ -463,47 +487,78 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                             }
                             ctx.controller = controller;
                             ComPtr<ICoreWebView2> wv;
-                            controller->get_CoreWebView2(&wv);
+                            if (FAILED(controller->get_CoreWebView2(&wv)) || !wv) {
+                                ctx.error = "获取 WebView2 页面失败";
+                                ctx.modalResult = ModalResult::Failed;
+                                PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
+                                return S_OK;
+                            }
                             ctx.webView = wv;
-
+                            // 登录窗口只用于认证；原生静音覆盖子框架，不依赖网页脚本暂停媒体。
+                            ComPtr<ICoreWebView2_8> mediaView;
+                            if (FAILED(wv.CopyTo(IID_ICoreWebView2_8,
+                                    reinterpret_cast<void**>(mediaView.ReleaseAndGetAddressOf()))) ||
+                                !mediaView || FAILED(mediaView->put_IsMuted(TRUE))) {
+                                ctx.error = "无法静音登录页面，请更新 WebView2 Runtime";
+                                ctx.modalResult = ModalResult::Failed;
+                                PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
+                                return S_OK;
+                            }
                             RECT rc; GetClientRect(hwnd, &rc);
                             rc.bottom -= 36;
-                            controller->put_Bounds(rc);
-
+                            if (FAILED(controller->put_Bounds(rc)) ||
+                                FAILED(wv->Navigate(ctx.startUrl.c_str()))) {
+                                ctx.error = "初始化或导航登录页面失败";
+                                ctx.modalResult = ModalResult::Failed;
+                                PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
+                                return S_OK;
+                            }
                             EnableWindow(ctx.completeBtn, TRUE);
-                            EnableWindow(ctx.useExistingBtn, TRUE);
-                            wv->Navigate(ctx.startUrl.c_str());
                             return S_OK;
                         }
                     ).Get());
+                if (FAILED(createResult)) {
+                    ctx.error = "启动 WebView2 控制器创建失败";
+                    ctx.modalResult = ModalResult::Failed;
+                    PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
+                }
                 return S_OK;
             }
         ).Get());
 
     if (FAILED(hr)) {
-        FreeLibrary(loaderDll);
-        DestroyWindow(hwnd);
-        outcome.result = WebLoginResult::Failed;
-        outcome.error = "WebView2 入口调用失败 hr=" + std::to_string(hr);
-        return outcome;
+        ctx.error = "WebView2 入口调用失败 hr=" + std::to_string(hr);
+        ctx.modalResult = ModalResult::Failed;
+        ctx.running = false;
     }
 
     // ── 模态消息泵 ──
     MSG m;
     while (ctx.running.load()) {
         BOOL got = GetMessageW(&m, nullptr, 0, 0);
-        if (got <= 0) break;
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage(static_cast<int>(m.wParam)); // 不吞掉应用退出。
+            else ctx.error = "登录窗口消息循环失败";
+            break;
+        }
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
 
-    // 释放 WebView2
-    if (ctx.controller) ctx.controller->Close();
+    // 先失效，再关闭页面。Close 结束网页媒体，Stop 只取消导航，不能替代 Close。
+    ctx.running = false;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    ctx.hwnd = nullptr;
+    if (ctx.webView && FAILED(ctx.webView->Stop()))
+        LOG_WARN("WebLogin: 停止页面导航失败");
+    if (ctx.controller && FAILED(ctx.controller->Close())) {
+        ctx.error = "关闭 WebView2 登录页面失败";
+        ctx.modalResult = ModalResult::Failed;
+    }
     ctx.controller.Reset();
     ctx.webView.Reset();
-    envHolder.Reset();
+    ctx.environment.Reset();
     DestroyWindow(hwnd);
-    FreeLibrary(loaderDll);
 
     switch (ctx.modalResult) {
     case ModalResult::Complete:

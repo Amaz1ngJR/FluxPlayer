@@ -67,31 +67,26 @@ void DecodeWorker::runVideo() {
     auto& clockController_ = player_->clockController_;
 
     AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        player_->inputReadFailure_.store(AVERROR(ENOMEM));
+        shouldQuit_.store(true);
+        return;
+    }
     Frame rawFrame;
     int lastSerial = -1;  // 上次处理的 packet serial，变化即 seek/flush 边界
 
     while (!shouldQuit_.load()) {
-        // seek 循环级超时保护：enqueueVideoFrame 的超时依赖视频帧产生；若解码器因参考帧
-        // 缺失等长时间不产帧，超时永不触发。此处仅清除 decodingToTarget_，让后续帧按实际
-        // PTS 自然重新校准 AV sync（见 enqueueVideoFrame）。
-        if (clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
-            clockController_->finishSeekToTarget();
-            // 无视频帧可用于精确落点时解除视频等待；音频仍按自己的门控独立对齐。
-            player_->markSeekVideoAligned(player_->lastRenderedPTS_.load());
-            LOG_WARN("Seek loop timeout, no frames produced, awaiting next frame for resync");
-        }
-
         int serial = lastSerial;
         int ret = videoPktQueue_->get(packet, /*block=*/true, &serial);
         if (ret == 0) {
             break;  // abort
         }
 
-        // serial 变化（seek / flush / reopen）：本线程独占 flush 解码器与视频帧队列，
-        // 与生产者同线程，无竞态。serial 变化也意味着 EOF 停泊被 seek 解除 → 清 drainedEof。
+        // serial 改变时本线程独占刷新解码器；帧边界已由控制路径发布。
+        // 新 serial 同时解除 EOF 停泊，旧引用和凭证不能推进新队列。
         if (serial != lastSerial) {
             videoDecoder_->flush();
-            if (videoQueue_) videoQueue_->flush();
+            // 帧代际由控制路径发布，解码线程不能用迟到 serial 覆盖新边界。
             player_->lastEnqueuedVideoPTS_.store(0.0);
             player_->videoDrainedEof_.store(false);  // 退出 EOF 停泊态，恢复消费
             lastSerial = serial;
@@ -100,11 +95,35 @@ void DecodeWorker::runVideo() {
         // null 包：drain 解码器后停泊（不退出线程）
         bool isEof = (packet->data == nullptr && packet->size == 0);
 
-        videoDecoder_->sendPacket(packet);
-        av_packet_unref(packet);
+        bool retryPacket;
+        bool decoderEof = false;
+        do {
+        videoDecoder_->sendPacket(isEof ? nullptr : packet);
+        const int sendResult = videoDecoder_->lastResult();
+        retryPacket = sendResult == AVERROR(EAGAIN);
+        if (sendResult < 0 && !retryPacket && sendResult != AVERROR_EOF) {
+            // 普通坏包由解码器记录并跳过，保留硬件连续失败降级策略；drain 失败必须报错。
+            if (isEof) {
+                player_->inputReadFailure_.store(sendResult);
+                shouldQuit_.store(true);
+            }
+            break;
+        }
+        bool receivedFrame = false;
 
-        // 取尽解码器当前可输出的所有帧
-        while (videoDecoder_->receiveFrame(rawFrame)) {
+        // EAGAIN 时保留原包，取尽输出后重发；flush/stop 使其失效。
+        while (!shouldQuit_.load()) {
+            outputTag_ = videoQueue_->outputTag(serial);
+            if (!videoDecoder_->receiveFrame(rawFrame)) {
+                const int result = videoDecoder_->lastResult();
+                decoderEof = result == AVERROR_EOF;
+                if (result != AVERROR(EAGAIN) && !decoderEof) {
+                    player_->inputReadFailure_.store(result);
+                    shouldQuit_.store(true);
+                }
+                break;
+            }
+            receivedFrame = true;
             // stop/flush 后不再归一化或入队，避免停止时才出现“首帧/预缓冲完成”。
             if (shouldQuit_.load() || videoPktQueue_->serial() != serial) {
                 rawFrame.unreference();
@@ -128,11 +147,22 @@ void DecodeWorker::runVideo() {
             checkPrebufferComplete();
         }
 
-        if (isEof) {
-            // EOF：残留帧已 drain 完，标记停泊。不 break——回到循环顶部 get(block=true)
+        if (!shouldQuit_.load() && videoPktQueue_->serial() == serial &&
+            ((retryPacket && !receivedFrame && !decoderEof) ||
+             (isEof && !retryPacket && !decoderEof))) {
+            // send/receive 不能同时 EAGAIN；已接受 drain 后也不能请求新包。
+            player_->inputReadFailure_.store(AVERROR(EIO));
+            shouldQuit_.store(true);
+        }
+        } while (retryPacket && !decoderEof && !shouldQuit_.load() && videoPktQueue_->serial() == serial);
+        av_packet_unref(packet);
+
+        if (isEof && decoderEof) {
+            // 只有 receive 明确返回 EOF 才发布 drained，不以空包本身作依据。
             // 阻塞在空队列上等待 seek 唤醒（新 serial 的包到达）或 abort（shouldQuit_/stop）。
             // 这样 EOF 后 seek 恢复时本线程仍存活，能消费 demux 恢复读取的新包。
-            player_->videoDrainedEof_.store(true);
+            std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
+            if (videoPktQueue_->serial() == serial) player_->videoDrainedEof_.store(true);
         }
     }
 
@@ -153,21 +183,15 @@ void DecodeWorker::runAudio() {
     auto& clockController_ = player_->clockController_;
 
     AVPacket* packet = av_packet_alloc();
+    if (!packet) {
+        player_->inputReadFailure_.store(AVERROR(ENOMEM));
+        shouldQuit_.store(true);
+        return;
+    }
     Frame rawFrame;
     int lastSerial = -1;
 
     while (!shouldQuit_.load()) {
-        // seek 超时保护（纯音频模式无视频线程时由本线程兜底清除 decodingToTarget_）
-        if (clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
-            clockController_->finishSeekToTarget();
-            // 纯音频或目标附近无音频帧时不能永久固定 UI；回退到当前 AClock。
-            const double fallbackAudioPTS = clockController_->avSync()->getAudioClockBase();
-            player_->markSeekAudioAligned(fallbackAudioPTS);
-            if (player_->audioPausedForSeek_.load(std::memory_order_acquire))
-                player_->releaseAudioSeekGate();
-            LOG_WARN("Seek loop timeout (audio), awaiting next frame for resync");
-        }
-
         int serial = lastSerial;
         int ret = audioPktQueue_->get(packet, /*block=*/true, &serial);
         if (ret == 0) {
@@ -176,18 +200,40 @@ void DecodeWorker::runAudio() {
 
         if (serial != lastSerial) {
             audioDecoder_->flush();
-            if (audioQueue_) audioQueue_->flush();
-            player_->pendingAudioOffset_.store(0);
+            // 帧队列已由控制路径清空，残留消费偏移按凭证身份失效。
             player_->audioDrainedEof_.store(false);  // 退出 EOF 停泊态，恢复消费
             lastSerial = serial;
         }
 
         bool isEof = (packet->data == nullptr && packet->size == 0);
 
-        audioDecoder_->sendPacket(packet);
-        av_packet_unref(packet);
+        bool retryPacket;
+        bool decoderEof = false;
+        do {
+        audioDecoder_->sendPacket(isEof ? nullptr : packet);
+        const int sendResult = audioDecoder_->lastResult();
+        retryPacket = sendResult == AVERROR(EAGAIN);
+        if (sendResult < 0 && !retryPacket && sendResult != AVERROR_EOF) {
+            if (isEof) {
+                player_->inputReadFailure_.store(sendResult);
+                shouldQuit_.store(true);
+            }
+            break;
+        }
+        bool receivedFrame = false;
 
-        while (audioDecoder_->receiveFrame(rawFrame)) {
+        while (!shouldQuit_.load()) {
+            outputTag_ = audioQueue_->outputTag(serial);
+            if (!audioDecoder_->receiveFrame(rawFrame)) {
+                const int result = audioDecoder_->lastResult();
+                decoderEof = result == AVERROR_EOF;
+                if (result != AVERROR(EAGAIN) && !decoderEof) {
+                    player_->inputReadFailure_.store(result);
+                    shouldQuit_.store(true);
+                }
+                break;
+            }
+            receivedFrame = true;
             if (shouldQuit_.load() || audioPktQueue_->serial() != serial) {
                 rawFrame.unreference();
                 break;
@@ -216,20 +262,31 @@ void DecodeWorker::runAudio() {
             }
             // 只有目标帧完成格式转换并真正入队后才能恢复设备；目标前丢弃帧返回 true
             // 但 enqueued=false，不能过早解除门控重现 underrun/AClock 回跳。
-            if (audioEnqueued && player_->seekDemuxReady_.load(std::memory_order_acquire) &&
-                player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
-                // 此处只说明目标音频已入队，可以恢复设备；A/V 对齐要等设备回调真正
-                // 消费该帧并提交新 AClock 后再发布，否则 UI 会过早切回旧音频时钟。
-                player_->releaseAudioSeekGate();
-                LOG_INFO("Seek: first target audio frame queued, audio output resumed");
+            if (audioEnqueued) {
+                std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
+                if (audioPktQueue_->serial() == serial &&
+                    player_->seekDemuxReady_.load(std::memory_order_acquire) &&
+                    player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
+                    player_->releaseAudioSeekGateLocked();
+                }
             }
             rawFrame.unreference();
             checkPrebufferComplete();
         }
 
-        if (isEof) {
-            // EOF：drain 完毕，标记停泊。不 break——回到 get(block=true) 等 seek 唤醒或 abort。
-            player_->audioDrainedEof_.store(true);
+        if (!shouldQuit_.load() && audioPktQueue_->serial() == serial &&
+            ((retryPacket && !receivedFrame && !decoderEof) ||
+             (isEof && !retryPacket && !decoderEof))) {
+            player_->inputReadFailure_.store(AVERROR(EIO));
+            shouldQuit_.store(true);
+        }
+        } while (retryPacket && !decoderEof && !shouldQuit_.load() && audioPktQueue_->serial() == serial);
+        av_packet_unref(packet);
+
+        if (isEof && decoderEof) {
+            // 确认 receive EOF 后停泊，等待 Seek 的新 serial 或 abort。
+            std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
+            if (audioPktQueue_->serial() == serial) player_->audioDrainedEof_.store(true);
         }
     }
 
@@ -324,23 +381,19 @@ bool DecodeWorker::normalizeAudioPTS(Frame& rawFrame) {
     return true;
 }
 
-Frame* DecodeWorker::waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial) {
-    // 可中断地等待可写帧槽：替代 FrameQueue::peekWritable 的无限阻塞。
-    // seek 时渲染暂停、帧队列不再被消费，若硬阻塞则本 decode 线程无法回到循环顶部
-    // 处理 serial 变化（flush），形成死锁。轮询 tryPeekWritable，并在以下情况放弃：
-    //   - shouldQuit_：stop/quit
-    //   - pktQueue serial 变化：发生了 seek/flush，应回到循环顶部重新对齐
-    //   - 当前直播帧已落后：放弃输出，继续解码后续压缩包以追赶最新媒体进度
-    constexpr int kPollMs = 5;
+bool DecodeWorker::submitPreparedFrame(FrameQueue* queue, PacketQueue* packets, FrameQueue::Tag tag) {
     for (;;) {
-        // 等待期间 demux 仍可能推进最新进度，每次轮询都复查当前帧是否已过时。
-        // 使用保存的源 PTS，不能拿归一化后的时间戳与源时间域比较。
-        if (dropLiveFrame(sourcePTS_)) return nullptr;
-        if (player_->shouldQuit_.load()) return nullptr;
-        if (pktQueue && pktQueue->serial() != serial) return nullptr;
-        Frame* w = frameQueue->tryPeekWritable();
-        if (w) return w;
-        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+        if (player_->shouldQuit_.load() || packets->serial() != tag.serial || dropLiveFrame(sourcePTS_)) {
+            preparedFrame_.unreference();
+            return false;
+        }
+        const auto result = queue->trySubmit(preparedFrame_, tag);
+        if (result == FrameQueue::SubmitResult::Committed) return true;
+        if (result != FrameQueue::SubmitResult::Full) {
+            preparedFrame_.unreference();
+            return false;
+        }
+        queue->waitForSpace(tag);
     }
 }
 
@@ -370,45 +423,21 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         return true;
     }
 
-    // 精确跳转处理：快速丢弃所有中间帧
+    // 精确跳转处理：先决定是否保留，真正提交成功后才发布对齐。
+    bool alignVideo = false;
+    bool rebaseVideo = false;
     if (clockController_->isDecodingToTarget()) {
-        double targetPTS = clockController_->getDecodeTargetPTS();
-
-        if (framePTS < targetPTS - 0.001) {  // 允许1ms的误差
-            // 超时保护：seek 落点远早于目标时（如文件损坏导致 FFmpeg 回退到更早位置），
-            // 避免长时间丢帧卡住，超过 2 秒后放弃精确跳转，从当前帧开始播放
-            if (clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
-                clockController_->finishSeekToTarget();
-                // 超时后重新校准 AV 同步时钟到实际位置，
-                // 否则 AClock 仍指向旧目标，渲染循环会强制跳 VClock 导致进度条错误
-                clockController_->avSync()->seekTo(framePTS);
-                player_->currentAudioFramePTS_.store(framePTS);
-                player_->samplesPlayedInFrame_.store(0);
-                player_->markSeekVideoAligned(framePTS);
-                LOG_WARN("Seek timeout, giving up, playing from PTS=" + std::to_string(framePTS));
-                // fall through：将当前帧入队，从此处开始播放
-            } else {
+        const double targetPTS = clockController_->getDecodeTargetPTS();
+        if (framePTS < targetPTS - 0.001) {
+            if (!clockController_->isSeekTimedOut(player_->seekTimeoutSeconds())) {
                 rawFrame.unreference();
                 return true;
             }
-        }
-        else {
-            // **到达目标位置**
-            clockController_->finishSeekToTarget();
-            player_->markSeekVideoAligned(framePTS);
-            // seek 落点偏移检测：FFmpeg 回退到更晚的关键帧时，
-            // 实际 PTS 可能远大于目标，需重新校准 AV 同步时钟，
-            // 否则音频输出仍期望从旧目标位置开始，导致 AQueue 耗尽、播放器冻结
-            if (framePTS - clockController_->getDecodeTargetPTS() > 1.0) {
-                clockController_->avSync()->seekTo(framePTS);
-                player_->currentAudioFramePTS_.store(framePTS);
-                player_->samplesPlayedInFrame_.store(0);
-                LOG_WARN("Seek: actual PTS=" + std::to_string(framePTS)
-                         + " differs from target=" + std::to_string(clockController_->getDecodeTargetPTS())
-                         + ", recalibrating AV sync");
-            } else {
-                LOG_INFO("Seek: Reached target PTS=" + std::to_string(framePTS));
-            }
+            alignVideo = true;
+            rebaseVideo = true;
+        } else {
+            alignVideo = true;
+            rebaseVideo = framePTS - targetPTS > 1.0;
         }
     }
 
@@ -424,47 +453,31 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
         player_->lastEnqueuedVideoPTS_.store(framePTS);
     }
 
-    // 不需要丢弃的帧：获取可写槽 -> 转换 -> 提交
-    // 有空位时直接准备显示帧；队列满时暂存 AVFrame 引用并可中断地等待。
-    // move_ref 只转移引用所有权，不会释放底层 buffer/surface；放弃当前帧时必须释放暂存引用。
-    Frame* writable = videoQueue_->tryPeekWritable();
-    if (writable) {
-        // 快速路径：队列有空位，直接写入
-        if (videoDecoder_->prepareFrame(rawFrame.getAVFrame(), *writable)) {
-            // prepareFrame 内部根据 AVFrame::pts 重置 PTS，会覆盖 normalizeVideoPTS 的归一化结果，
-            // 此处把归一化后的 PTS 和 estimated 标记重新覆盖回 writable
-            writable->setPTS(framePTS);
-            writable->setPTSEstimated(rawFrame.isPTSEstimated());
-            videoQueue_->push();
-            // 首帧回调：仅触发一次，供 OpeningScreen 等异步 UI 判断 BUFFER FIRST FRAME 完成
-            if (!player_->firstFrameSignaled_.exchange(true, std::memory_order_acq_rel)) {
-                if (player_->firstFrameCallback_) player_->firstFrameCallback_();
-            }
-        } else {
-            writable->unreference();
-        }
-        rawFrame.unreference();
-    } else {
-        // 慢速路径：队列满，将当前帧引用移到临时对象，保留显示准备所需的数据。
-        AVFrame* tempFrame = av_frame_alloc();
-        av_frame_move_ref(tempFrame, rawFrame.getAVFrame());
-        // rawFrame 现在为空，底层 buffer 引用由 tempFrame 持有。
-
-        // 可中断等待：直播帧过时、serial 变化（seek/flush）或停止时放弃当前帧。
-        writable = waitWritableSlot(videoQueue_.get(), videoPktQueue_.get(), serial);
-        if (!writable) {
-            av_frame_free(&tempFrame);
-            return false;  // 调用方区分直播丢弃与停止/flush，决定继续取帧或退出。
-        }
-        if (videoDecoder_->prepareFrame(tempFrame, *writable)) {
-            writable->setPTS(framePTS);
-            writable->setPTSEstimated(rawFrame.isPTSEstimated());
-            videoQueue_->push();
-        } else {
-            writable->unreference();
-        }
-        av_frame_free(&tempFrame);
+    // 转换仅访问私有帧，代际在取解码输出前捕获；提交成功才发布首帧。
+    preparedFrame_.unreference();
+    if (!videoDecoder_->prepareFrame(rawFrame.getAVFrame(), preparedFrame_)) {
+        preparedFrame_.unreference();
+        return false;
     }
+    preparedFrame_.setPTS(framePTS);
+    preparedFrame_.setPTSEstimated(rawFrame.isPTSEstimated());
+    if (!submitPreparedFrame(videoQueue_.get(), videoPktQueue_.get(), outputTag_)) return false;
+    {
+        // Seek 控制路径持同一锁发布新边界；迟到提交不得完成新 Seek。
+        std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
+        if (videoPktQueue_->serial() != serial) return false;
+        if (alignVideo) {
+            if (rebaseVideo) {
+                clockController_->avSync()->seekTo(framePTS);
+                player_->currentAudioFramePTS_.store(framePTS);
+                player_->samplesPlayedInFrame_.store(0);
+            }
+            player_->markSeekVideoAligned(framePTS);
+            clockController_->finishSeekToTarget();
+        }
+        if (!player_->firstFrameSignaled_.load()) player_->firstFrameSerial_.store(serial);
+    }
+    rawFrame.unreference();
     return true;
 }
 
@@ -523,63 +536,36 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued
         rawFrame.unreference();
         return true;
     }
-    if (player_->seekDemuxReady_.load(std::memory_order_acquire) &&
-        player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
-        const double targetPTS = clockController_->getDecodeTargetPTS();
-        if (audioPTS < targetPTS - 0.001) {
-            rawFrame.unreference();
-            return true;
-        }
-        // 先把 AClock 基准移到真实首帧，再入队和恢复设备；这样音频回调的单调性保护
-        // 不会拿 seek 前的 7~15s 旧时钟拒绝 1~3s 的新 PTS。
-        clockController_->avSync()->updateAudioClock(audioPTS);
-        player_->currentAudioFramePTS_.store(audioPTS);
-        player_->samplesPlayedInFrame_.store(0);
-        player_->allowAudioClockRebase_.store(true, std::memory_order_release);
-        if (audioPTS - targetPTS > 2.0) {
-            LOG_WARN("Seek: audio PTS=" + std::to_string(audioPTS) +
-                     " far from target=" + std::to_string(targetPTS));
-        }
+    const bool alignAudio = player_->seekDemuxReady_.load(std::memory_order_acquire) &&
+        player_->audioPausedForSeek_.load(std::memory_order_acquire);
+    if (alignAudio && audioPTS < clockController_->getDecodeTargetPTS() - 0.001) {
+        rawFrame.unreference();
+        return true;
     }
 
-    // 不需要丢弃的帧：获取可写槽 -> 转换 -> 提交
-    // 音频队列由平台音频线程实时消费，阻塞时间极短；同样先尝试非阻塞
-    Frame* audioWritable = audioQueue_->tryPeekWritable();
-    if (!audioWritable) {
-        // 队列满：暂存当前帧引用，等待中若直播帧已过时则释放引用，不再进行音频转换。
-        double savedPTS = rawFrame.getPTS();
-        const bool savedEstimated = rawFrame.isPTSEstimated();
-        AVFrame* tempAudio = av_frame_alloc();
-        av_frame_move_ref(tempAudio, rawFrame.getAVFrame());
-
-        audioWritable = waitWritableSlot(audioQueue_.get(), audioPktQueue_.get(), serial);
-        if (!audioWritable) {
-            av_frame_free(&tempAudio);
-            return false;  // 放弃当前帧
-        }
-        if (audioDecoder_->convertToS16(tempAudio, *audioWritable)) {
-            audioWritable->setPTS(savedPTS);
-            audioWritable->setPTSEstimated(savedEstimated);
-            audioWritable->setType(FrameType::AUDIO);
-            audioQueue_->push();
-            if (enqueued) *enqueued = true;
-        } else {
-            LOG_WARN("Failed to convert audio frame to S16 format");
-            audioWritable->unreference();
-        }
-        av_frame_free(&tempAudio);
-    } else {
-        if (audioDecoder_->convertToS16(avFrame, *audioWritable)) {
-            audioWritable->setPTS(rawFrame.getPTS());
-            audioWritable->setPTSEstimated(rawFrame.isPTSEstimated());
-            audioWritable->setType(FrameType::AUDIO);
-            audioQueue_->push();
-            if (enqueued) *enqueued = true;
-        } else {
-            LOG_WARN("Failed to convert audio frame to S16 format");
-            audioWritable->unreference();
+    // 转换和队列槽位分离，flush 时私有输出保持有效，但过期提交会被拒绝。
+    preparedFrame_.unreference();
+    if (!audioDecoder_->convertToS16(avFrame, preparedFrame_)) {
+        preparedFrame_.unreference();
+        LOG_WARN("Failed to convert audio frame to S16 format");
+        return false;
+    }
+    preparedFrame_.setPTS(rawFrame.getPTS());
+    preparedFrame_.setPTSEstimated(rawFrame.isPTSEstimated());
+    preparedFrame_.setType(FrameType::AUDIO);
+    if (!submitPreparedFrame(audioQueue_.get(), audioPktQueue_.get(), outputTag_)) return false;
+    {
+        std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
+        if (audioPktQueue_->serial() != serial) return false;
+        if (alignAudio && player_->audioPausedForSeek_.load(std::memory_order_acquire)) {
+            // 设备仍被门控；只有真正入队的新音频才可校准时钟并允许回调重定位。
+            clockController_->avSync()->updateAudioClock(audioPTS);
+            player_->currentAudioFramePTS_.store(audioPTS);
+            player_->samplesPlayedInFrame_.store(0);
+            player_->allowAudioClockRebase_.store(true, std::memory_order_release);
         }
     }
+    if (enqueued) *enqueued = true;
     return true;
 }
 

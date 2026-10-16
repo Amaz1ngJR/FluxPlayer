@@ -10,11 +10,26 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/core/TimeUtils.h"
 #include <cerrno>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#include <poll.h>
+#endif
 
 namespace FluxPlayer {
 
 namespace {
+constexpr int kOpenTimeoutSeconds = 15;
+constexpr int kProbeTimeoutSeconds = 10;
+// RTMP 握手后的实时探测受关键帧间隔与网络抖动影响，独立于普通输入预算。
+constexpr int kRtmpProbeTimeoutSeconds = 30;
+constexpr int kReadTimeoutSeconds = 10;
+constexpr int kSeekTimeoutSeconds = 8;
+
 bool isPipeInput(const std::string& filename) {
     return filename.rfind("pipe:", 0) == 0 ||
            filename.rfind("\\\\.\\pipe\\", 0) == 0;
@@ -44,8 +59,9 @@ bool streamInfoReadyForPipe(const std::string& filename, AVFormatContext* ctx) {
 }
 }  // namespace
 
-Demuxer::Demuxer()
-    : m_formatCtx(nullptr)
+Demuxer::Demuxer(const std::atomic<bool>* externalStop)
+    : externalStop_(externalStop)
+    , m_formatCtx(nullptr)
     , m_videoStreamIndex(-1)
     , m_audioStreamIndex(-1)
     , m_subtitleStreamIndex(-1) {
@@ -57,32 +73,142 @@ Demuxer::~Demuxer() {
     close();
 }
 
+bool Demuxer::isCancelled() const {
+    const auto* stop = externalStop_.load(std::memory_order_acquire);
+    return cancelled_.load(std::memory_order_acquire) ||
+        (stop && stop->load(std::memory_order_acquire));
+}
+
+bool Demuxer::isSuperseded() const {
+    const auto* generation = seekGeneration_.load(std::memory_order_acquire);
+    return generation && generation->load(std::memory_order_acquire) !=
+        expectedSeekGeneration_.load(std::memory_order_acquire);
+}
+
+bool Demuxer::isControlWake() const {
+    const auto* wake = controlWake_.load(std::memory_order_acquire);
+    return wake && wake->load(std::memory_order_acquire);
+}
+
+int Demuxer::interruptCallback(void* opaque) {
+    auto* self = static_cast<Demuxer*>(opaque);
+    const int64_t deadline = self->deadlineNs_.load(std::memory_order_acquire);
+    // 录制 Stop 只在读包边界取走请求，不能中断协议分块读取后假定可续读。
+    return self->isCancelled() || self->isSuperseded() ||
+        (deadline != 0 && steadyNowNs() >= deadline);
+}
+
+bool Demuxer::beginIo(int timeoutSeconds) {
+    deadlineNs_ = steadyNowNs() + static_cast<int64_t>(timeoutSeconds) * 1'000'000'000;
+    lastIoResult_ = isCancelled() ? IoResult::Cancelled :
+        (isSuperseded() ? IoResult::Superseded :
+         (isControlWake() ? IoResult::ControlWake : IoResult::Ok));
+    return lastIoResult_ == IoResult::Ok;
+}
+
+int Demuxer::finishIo(int result) {
+    // 取消优先于底层 EOF/错误；超时与用户取消必须分开，不能误进 EOF 停泊。
+    if (isCancelled()) {
+        lastIoResult_ = IoResult::Cancelled;
+        result = AVERROR_EXIT;
+    } else if (isSuperseded()) {
+        lastIoResult_ = IoResult::Superseded;
+        result = AVERROR_EXIT;
+    } else if (result < 0 && ((deadlineNs_ != 0 && steadyNowNs() >= deadlineNs_) ||
+                              result == AVERROR(ETIMEDOUT))) {
+        // find_stream_info 可在中断后用已收集的流参数成功返回；不能仅因墙钟超时
+        // 推翻 FFmpeg 的成功结果。用户取消/代际失效仍由上方分支无条件拒绝。
+        lastIoResult_ = IoResult::TimedOut;
+        result = AVERROR(ETIMEDOUT);
+    } else if (result == AVERROR_EOF) lastIoResult_ = IoResult::EndOfFile;
+    else if (result == AVERROR(EAGAIN)) lastIoResult_ = IoResult::Again;
+    else lastIoResult_ = result < 0 ? IoResult::Error : IoResult::Ok;
+    deadlineNs_ = 0;
+    return result;
+}
+
+int Demuxer::readPipe(void* opaque, uint8_t* buffer, int size) {
+    auto* self = static_cast<Demuxer*>(opaque);
+    while (!interruptCallback(self)) {
+#ifdef _WIN32
+        // Windows 在服务端关闭/断开时可能返回不同错误码；两次调用均可能遇到。
+        // 此处只描述传输结束，DASH 生产端是否成功由 DemuxWorker 另外核对。
+        const auto pipeResult = [](DWORD error) {
+            return error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED ||
+                   error == ERROR_NO_DATA ? AVERROR_EOF : AVERROR(EIO);
+        };
+        DWORD available = 0;
+        if (!PeekNamedPipe(self->pipeHandle_, nullptr, 0, nullptr, &available, nullptr))
+            return pipeResult(GetLastError());
+        if (!available) { Sleep(10); continue; }
+        DWORD received = 0;
+        if (!ReadFile(self->pipeHandle_, buffer, std::min<DWORD>(available, size), &received, nullptr))
+            return pipeResult(GetLastError());
+        return received ? static_cast<int>(received) : AVERROR_EOF;
+#else
+        pollfd fd{self->pipeFd_, POLLIN, 0};
+        const int ready = poll(&fd, 1, 10);
+        if (ready < 0) { if (errno == EINTR) continue; return AVERROR(errno); }
+        if (!ready) continue;
+        const auto received = ::read(self->pipeFd_, buffer, size);
+        if (received > 0) return static_cast<int>(received);
+        if (!received) return AVERROR_EOF;
+        if (errno != EAGAIN && errno != EINTR) return AVERROR(errno);
+#endif
+    }
+    return AVERROR_EXIT;
+}
+
+bool Demuxer::preparePipeInput(const std::string& filename) {
+    if (!isPipeInput(filename)) return true;
+#ifdef _WIN32
+    pipeHandle_ = CreateFileA(filename.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (pipeHandle_ == INVALID_HANDLE_VALUE) { pipeHandle_ = nullptr; return false; }
+#else
+    try { pipeFd_ = std::stoi(filename.substr(5)); }
+    catch (...) { return false; }
+    const int flags = fcntl(pipeFd_, F_GETFL, 0);
+    if (flags < 0 || fcntl(pipeFd_, F_SETFL, flags | O_NONBLOCK) < 0) return false;
+#endif
+    constexpr int kPipeBufferBytes = 32768;
+    auto* buffer = static_cast<unsigned char*>(av_malloc(kPipeBufferBytes));
+    if (!buffer) return false;
+    pipeIo_ = avio_alloc_context(buffer, kPipeBufferBytes, 0, this, readPipe, nullptr, nullptr);
+    if (!pipeIo_) { av_free(buffer); return false; }
+    m_formatCtx->pb = pipeIo_;
+    m_formatCtx->flags |= AVFMT_FLAG_CUSTOM_IO;
+    return true;
+}
+
+bool Demuxer::prepareInput() {
+    // 仅 I/O 所属线程调用；重试时释放旧上下文，但保留取消意图。
+    close();
+    if (!beginIo(kOpenTimeoutSeconds)) return false;
+    m_formatCtx = avformat_alloc_context();
+    if (!m_formatCtx) { finishIo(AVERROR(ENOMEM)); return false; }
+    m_formatCtx->interrupt_callback = {interruptCallback, this};
+    return true;
+}
+
 /**
  * 打开媒体文件并解析流信息
  * @param filename 媒体文件路径或网络流 URL
  * @return 成功返回 true，失败返回 false
  */
 bool Demuxer::open(const std::string& filename) {
-    LOG_INFO("Opening media file: " + filename);
-    if (openInternal(filename, "", 0.0, /*useConfiguredProxy=*/true)) return true;
-
-    const auto& cfg = Config::getInstance().get();
-    if (FluxPlayer::isHttpUrl(filename) && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
-        LOG_WARN("HTTP open via proxy failed, retrying direct once");
-        close();
-        return openInternal(filename, "", 0.0, /*useConfiguredProxy=*/false);
-    }
-    return false;
+    return open(filename, "", 0.0);
 }
 
 bool Demuxer::openInternal(const std::string& filename,
                            const std::string& httpHeaders,
                            double knownDuration,
                            bool useConfiguredProxy) {
+    if (!prepareInput()) return false;
+    if (!preparePipeInput(filename)) { close(); return false; }
     AVDictionary* options = configureNetworkOptions(filename, useConfiguredProxy);
     if (!httpHeaders.empty()) av_dict_set(&options, "headers", httpHeaders.c_str(), 0);
 
-    int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
+    int ret = finishIo(avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options));
     av_dict_free(&options);
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
@@ -93,9 +219,27 @@ bool Demuxer::openInternal(const std::string& filename,
     }
 
     if (!streamInfoReadyForPipe(filename, m_formatCtx)) {
-        ret = avformat_find_stream_info(m_formatCtx, nullptr);
+        const int64_t probeStartNs = steadyNowNs();
+        const int probeTimeout = FluxPlayer::isRtmpUrl(filename)
+            ? kRtmpProbeTimeoutSeconds : kProbeTimeoutSeconds;
+        const int probeResult = beginIo(probeTimeout)
+            ? avformat_find_stream_info(m_formatCtx, nullptr) : AVERROR_EXIT;
+        const bool probeDeadlineReached = deadlineNs_.load() != 0 &&
+            steadyNowNs() >= deadlineNs_.load();
+        ret = finishIo(probeResult);
+        if (ret >= 0 && probeDeadlineReached && m_formatCtx->pb) {
+            // 探测可在中断后返回成功，但 AVIO 仍保留该次中断的错误/EOF。
+            // 仅对成功且触及本次截止时间的探测复位，不掩盖正常读包错误。
+            m_formatCtx->pb->error = 0;
+            m_formatCtx->pb->eof_reached = 0;
+        }
+        LOG_INFO("Stream probe: ffmpeg=" + std::to_string(probeResult) +
+                 ", result=" + std::to_string(ret) + ", elapsedMs=" +
+                 std::to_string((steadyNowNs() - probeStartNs) / 1'000'000));
         if (ret < 0) {
-            LOG_WARN("Failed to find stream information: " + filename);
+            char errBuf[AV_ERROR_MAX_STRING_SIZE];
+            av_strerror(ret, errBuf, sizeof(errBuf));
+            LOG_WARN("Failed to find stream information: " + filename + " - " + errBuf);
             close();
             return false;
         }
@@ -282,11 +426,21 @@ void Demuxer::logMediaInfo(const std::string& filename) const {
  * 关闭解复用器，释放资源
  */
 void Demuxer::close() {
+    // demuxer 的 read_close 仍可能访问 pb；先关闭格式上下文，再释放自定义 AVIO。
+    // 此函数只由 I/O 所有者或其 join 后的线程调用，不用于跨线程解除阻塞。
     if (m_formatCtx) {
         LOG_DEBUG("Closing demuxer and releasing resources");
         avformat_close_input(&m_formatCtx);
-        m_formatCtx = nullptr;
     }
+    if (pipeIo_) {
+        av_freep(&pipeIo_->buffer);
+        avio_context_free(&pipeIo_);
+    }
+#ifdef _WIN32
+    if (pipeHandle_) { CloseHandle(static_cast<HANDLE>(pipeHandle_)); pipeHandle_ = nullptr; }
+#else
+    if (pipeFd_ >= 0) { ::close(pipeFd_); pipeFd_ = -1; }
+#endif
     m_videoStreamIndex = -1;
     m_audioStreamIndex = -1;
     m_subtitleStreamIndex = -1;
@@ -299,18 +453,34 @@ void Demuxer::close() {
  *
  * 注意：调用者需要在使用完 packet 后调用 av_packet_unref() 释放
  */
-bool Demuxer::readPacket(AVPacket* packet) {
+bool Demuxer::readPacket(AVPacket* packet, const std::atomic<uint64_t>* generation,
+                         uint64_t expectedGeneration, const std::atomic<bool>* controlWake) {
     m_lastReadError = AVERROR(EINVAL);
     if (!m_formatCtx) {
+        lastIoResult_ = isCancelled() ? IoResult::Cancelled : IoResult::Error;
         LOG_ERROR("Format context is null, cannot read packet");
         return false;
     }
 
-    // 从文件中读取下一个数据包
-    // packet 可能属于视频流、音频流或其他流
-    int ret = av_read_frame(m_formatCtx, packet);
+    controlWake_.store(controlWake, std::memory_order_release);
+    // 只有代际中断后的显式重定位可复用输入；录制 Stop 从不打断协议 I/O。
+    if (m_formatCtx->pb && lastIoResult_ == IoResult::Superseded) {
+        m_formatCtx->pb->error = 0;
+        m_formatCtx->pb->eof_reached = 0;
+    }
+    // 可选请求代际覆盖本次读包：新 Seek 只中断旧 I/O，不关闭上下文。
+    expectedSeekGeneration_.store(expectedGeneration, std::memory_order_release);
+    seekGeneration_.store(generation, std::memory_order_release);
+    int ret = beginIo(kReadTimeoutSeconds)
+        ? finishIo(av_read_frame(m_formatCtx, packet)) : AVERROR_EXIT;
+    controlWake_.store(nullptr, std::memory_order_release);
+    seekGeneration_.store(nullptr, std::memory_order_release);
+    deadlineNs_.store(0, std::memory_order_release);
     m_lastReadError = ret;
     if (ret < 0) {
+        av_packet_unref(packet);
+        if (lastIoResult_ == IoResult::Cancelled || lastIoResult_ == IoResult::Superseded ||
+            lastIoResult_ == IoResult::ControlWake) return false;
         if (ret == AVERROR_EOF) {
             LOG_DEBUG("End of file reached during packet reading");
         } else {
@@ -419,7 +589,8 @@ int Demuxer::getBitrate() const {
  *
  * 注意：跳转后需要刷新解码器缓冲区（调用 decoder.flush()）
  */
-bool Demuxer::seek(int64_t timestamp) {
+bool Demuxer::seek(int64_t timestamp, const std::atomic<uint64_t>* generation,
+                   uint64_t expectedGeneration) {
     if (!m_formatCtx) {
         LOG_ERROR("Cannot seek: format context is null");
         return false;
@@ -452,11 +623,25 @@ bool Demuxer::seek(int64_t timestamp) {
     //
     // 注意: 对于 H.264/H.265 等帧间压缩格式,仍然会跳转到关键帧,
     // 但解码器会从关键帧开始解码,直到目标位置,实现精确跳转
-    int ret = avformat_seek_file(m_formatCtx, seekStreamIndex,
+    expectedSeekGeneration_.store(expectedGeneration, std::memory_order_release);
+    seekGeneration_.store(generation, std::memory_order_release);
+    if (!beginIo(kSeekTimeoutSeconds)) {
+        seekGeneration_.store(nullptr, std::memory_order_release);
+        deadlineNs_.store(0, std::memory_order_release);
+        return false;
+    }
+    // 上次被中断的 AVIO 可能保留 sticky error，不能让它污染最新目标。
+    if (m_formatCtx->pb && m_formatCtx->pb->error == AVERROR_EXIT) {
+        m_formatCtx->pb->error = 0;
+        m_formatCtx->pb->eof_reached = 0;
+    }
+    int ret = finishIo(avformat_seek_file(m_formatCtx, seekStreamIndex,
                                   INT64_MIN,     // min_ts: 允许任意最小值
                                   seekTarget,    // ts: 目标时间戳
                                   seekTarget,    // max_ts: 目标时间戳
-                                  0);            // flags: 精确跳转
+                                  0));           // flags: 精确跳转
+    seekGeneration_.store(nullptr, std::memory_order_release);
+    if (lastIoResult_ == IoResult::Superseded) return false;
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
@@ -473,13 +658,16 @@ bool Demuxer::openSelfDescribingPipe(const std::string& filename, double knownDu
         LOG_ERROR("openSelfDescribingPipe requires a pipe URL or Windows named pipe");
         return false;
     }
+    if (!prepareInput()) return false;
+    if (!preparePipeInput(filename)) { close(); return false; }
     AVDictionary* options = configureNetworkOptions(filename);
-    const int ret = avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options);
+    const int ret = finishIo(avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options));
     av_dict_free(&options);
     if (ret < 0) {
         char errBuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errBuf, sizeof(errBuf));
         LOG_ERROR("Failed to open self-describing pipe: " + std::string(errBuf));
+        close();
         return false;
     }
     if (!streamInfoReadyForPipe(filename, m_formatCtx)) {
@@ -502,6 +690,7 @@ bool Demuxer::open(const std::string& filename,
                    double knownDuration) {
     if (openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/true)) return true;
 
+    if (isCancelled()) return false; // 用户取消不得触发代理回退。
     const auto& cfg = Config::getInstance().get();
     if (FluxPlayer::isHttpUrl(filename) && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
         LOG_WARN("HTTP open via proxy failed, retrying direct once");

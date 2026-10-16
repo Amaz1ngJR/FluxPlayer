@@ -8,12 +8,6 @@
 
 namespace FluxPlayer {
 
-namespace {
-
-constexpr double kMaxAudioClockInterpolationSec = 0.1;
-
-} // namespace
-
 AVSync::AVSync(ClockType clockType)
     : clockType_(clockType)
     , audioClock_(0.0)
@@ -25,7 +19,6 @@ AVSync::AVSync(ClockType clockType)
     , audioClockUpdateNs_(steadyNowNs())
     , videoClockUpdateNs_(steadyNowNs())
     , paused_(false)
-    , pauseStartTime_(0.0)
     , averageFrameDelay_(0.04)  // 默认 25 fps
 {
     LOG_INFO("AVSync initialized with clock type: " + std::to_string(static_cast<int>(clockType)));
@@ -36,9 +29,58 @@ AVSync::~AVSync() {
 }
 
 void AVSync::updateAudioClock(double pts) {
+    if (!std::isfinite(pts)) return;
+    std::lock_guard<std::mutex> lock(audioClockMutex_);
     audioClock_.store(pts);
-    audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
-    LOG_DEBUG("Audio clock updated: " + std::to_string(pts));
+    audioHead_ = audioCount_ = 0;
+}
+
+void AVSync::prepareAudioCoverage(size_t capacity) {
+    std::lock_guard<std::mutex> lock(audioClockMutex_);
+    audioCoverage_.resize(capacity);
+    audioHead_ = audioCount_ = 0;
+}
+
+double AVSync::audioClockAtLocked(int64_t now) const {
+    double value = audioClock_.load();
+    for (size_t i = 0; i < audioCount_; ++i) {
+        const auto& span = audioCoverage_[(audioHead_ + i) % audioCoverage_.size()];
+        if (now < span.beginNs) break;
+        if (now >= span.endNs) { value = span.end; continue; }
+        const double fraction = static_cast<double>(now - span.beginNs) /
+                                static_cast<double>(span.endNs - span.beginNs);
+        return span.start + (span.end - span.start) * fraction;
+    }
+    return value; // 无有效覆盖（含静音尾部）时冻结，不凭墙钟伪造媒体进度。
+}
+
+void AVSync::submitAudioCoverage(const double* starts, const double* ends, size_t count,
+                                  int sampleRate, double delay) {
+    if (!starts || !ends || sampleRate <= 0 || !std::isfinite(delay)) return;
+    std::lock_guard<std::mutex> lock(audioClockMutex_);
+    if (audioCoverage_.empty()) return;
+    const int64_t now = audioClockPaused_ ? audioPauseNs_ : steadyNowNs();
+    while (audioCount_ && audioCoverage_[audioHead_].endNs <= now) {
+        audioClock_.store(audioCoverage_[audioHead_].end);
+        audioHead_ = (audioHead_ + 1) % audioCoverage_.size();
+        --audioCount_;
+    }
+    int64_t begin = now + static_cast<int64_t>(std::max(0.0, delay) * 1e9);
+    if (audioCount_) {
+        const auto& tail = audioCoverage_[(audioHead_ + audioCount_ - 1) % audioCoverage_.size()];
+        begin = std::max(begin, tail.endNs);
+    }
+    for (size_t i = 0; i < count && audioCount_ < audioCoverage_.size(); ++i) {
+        if (!std::isfinite(starts[i]) || !std::isfinite(ends[i]) || ends[i] < starts[i]) continue;
+        auto& span = audioCoverage_[(audioHead_ + audioCount_++) % audioCoverage_.size()];
+        span = {starts[i], ends[i], begin + static_cast<int64_t>(i * 1e9 / sampleRate),
+                begin + static_cast<int64_t>((i + 1) * 1e9 / sampleRate)};
+    }
+}
+
+double AVSync::getAudioClockBase() const {
+    std::lock_guard<std::mutex> lock(audioClockMutex_);
+    return audioClock_.load();
 }
 
 void AVSync::updateVideoClock(double pts) {
@@ -48,19 +90,15 @@ void AVSync::updateVideoClock(double pts) {
 }
 
 double AVSync::getAudioClock() const {
-    int64_t updatedNs = audioClockUpdateNs_.load(std::memory_order_acquire);
-    double base = audioClock_.load();
-    if (paused_) {
-        return base;
-    }
+    std::lock_guard<std::mutex> lock(audioClockMutex_);
+    return audioClockAtLocked(audioClockPaused_ ? audioPauseNs_ : steadyNowNs());
+}
 
-    int64_t nowNs = steadyNowNs();
-    double elapsed = static_cast<double>(nowNs - updatedNs) / 1'000'000'000.0;
-    if (elapsed < 0.0) elapsed = 0.0;
-    if (elapsed > kMaxAudioClockInterpolationSec) {
-        elapsed = kMaxAudioClockInterpolationSec;
-    }
-    return base + elapsed * playbackRate_.load();
+bool AVSync::hasPendingAudioCoverage() const {
+    std::lock_guard<std::mutex> lock(audioClockMutex_);
+    if (!audioCount_) return false;
+    const auto& tail = audioCoverage_[(audioHead_ + audioCount_ - 1) % audioCoverage_.size()];
+    return tail.endNs > (audioClockPaused_ ? audioPauseNs_ : steadyNowNs());
 }
 
 double AVSync::getVideoClock() const {
@@ -203,7 +241,11 @@ double AVSync::computeAudioDelay(double audioPTS) {
 
 void AVSync::reset() {
     LOG_INFO("AVSync reset");
-    audioClock_.store(0.0);
+    updateAudioClock(0.0);
+    {
+        std::lock_guard<std::mutex> lock(audioClockMutex_);
+        audioClockPaused_ = false;
+    }
     videoClock_.store(0.0);
     {
         std::lock_guard<std::mutex> lk(extClockMutex_);
@@ -215,7 +257,6 @@ void AVSync::reset() {
     audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
     videoClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
     paused_.store(false);
-    pauseStartTime_.store(0.0);
     averageFrameDelay_.store(0.04);
 }
 
@@ -235,12 +276,12 @@ void AVSync::resetExternalClock() {
 void AVSync::pause() {
     if (!paused_.load()) {
         LOG_INFO("AVSync paused");
-        // 必须在置 extClockPaused_ 之前读取时钟当前值，否则读到的是冻结后的旧 offset
-        double currentAudio = getAudioClock();
-        double master = getMasterClock();
-        pauseStartTime_.store(master);
-        audioClock_.store(currentAudio);
-        audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
+        // 保留已提交覆盖和每段生成速率，恢复时只平移设备时间锚点。
+        {
+            std::lock_guard<std::mutex> lock(audioClockMutex_);
+            audioPauseNs_ = steadyNowNs();
+            audioClockPaused_ = true;
+        }
         {
             // external clock 冻结在当前值：offset = 当前 external clock，paused=true
             std::lock_guard<std::mutex> lk(extClockMutex_);
@@ -258,24 +299,29 @@ void AVSync::resume() {
     if (paused_.load()) {
         LOG_INFO("AVSync resumed");
         {
-            // 从 pauseStartTime_ 处继续：offset = 暂停时主时钟值，重置 base，解除 paused
+            // 保留暂停/Seek 后的最新 offset，仅重置墙钟基准。
             std::lock_guard<std::mutex> lk(extClockMutex_);
             externalClockBaseNs_ = steadyNowNs();
-            externalClockOffset_ = pauseStartTime_.load();
             extClockRate_        = playbackRate_.load();
             extClockPaused_      = false;
         }
-        audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(audioClockMutex_);
+            const int64_t shift = steadyNowNs() - audioPauseNs_;
+            for (size_t i = 0; i < audioCount_; ++i) {
+                auto& span = audioCoverage_[(audioHead_ + i) % audioCoverage_.size()];
+                span.beginNs += shift;
+                span.endNs += shift;
+            }
+            audioClockPaused_ = false;
+        }
         paused_.store(false);
     }
 }
 
 void AVSync::setPlaybackRate(double rate) {
     if (!paused_.load()) {
-        // 速率切换前先锁定当前时钟值，避免 elapsed * newRate 导致时钟跳变
-        double currentAudio = getAudioClock();
-        audioClock_.store(currentAudio);
-        audioClockUpdateNs_.store(steadyNowNs(), std::memory_order_release);
+        // 已提交音频覆盖保留生成时速率；新速率只影响之后生成的 PCM。
 
         // external clock：先结算到当前值再换 base + 新速率，保证连续
         std::lock_guard<std::mutex> lk(extClockMutex_);
@@ -291,7 +337,7 @@ void AVSync::setPlaybackRate(double rate) {
 void AVSync::seekTo(double seekTime) {
     LOG_INFO("AVSync seeking to: " + std::to_string(seekTime));
 
-    audioClock_.store(seekTime);
+    updateAudioClock(seekTime);
     videoClock_.store(seekTime);
     {
         std::lock_guard<std::mutex> lk(extClockMutex_);

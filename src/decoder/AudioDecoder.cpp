@@ -162,15 +162,16 @@ void AudioDecoder::close() {
 bool AudioDecoder::sendPacket(AVPacket* packet) {
     if (!m_codecCtx) {
         LOG_ERROR("Audio codec context is null");
+        lastResult_ = AVERROR(EINVAL);
         return false;
     }
 
-    int ret = avcodec_send_packet(m_codecCtx, packet);
+    int ret = lastResult_ = avcodec_send_packet(m_codecCtx, packet);
     if (ret < 0) {
         if (ret == AVERROR(EAGAIN)) {
             // 解码器缓冲区满，需要先接收帧
             LOG_DEBUG("Audio decoder buffer full, need to receive frames first");
-            return true;
+            return false;
         } else if (ret == AVERROR_EOF) {
             LOG_INFO("Audio decoder reached EOF");
             return false;
@@ -194,11 +195,12 @@ bool AudioDecoder::sendPacket(AVPacket* packet) {
 bool AudioDecoder::receiveFrame(Frame& frame) {
     if (!m_codecCtx) {
         LOG_ERROR("Audio codec context is null");
+        lastResult_ = AVERROR(EINVAL);
         return false;
     }
 
     // 从解码器获取一帧音频数据
-    int ret = avcodec_receive_frame(m_codecCtx, frame.getAVFrame());
+    int ret = lastResult_ = avcodec_receive_frame(m_codecCtx, frame.getAVFrame());
     if (ret < 0) {
         if (ret == AVERROR(EAGAIN)) {
             // 需要发送更多数据包

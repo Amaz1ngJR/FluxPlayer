@@ -1,5 +1,8 @@
 #pragma once
 
+#include "FluxPlayer/core/FrameQueue.h"
+#include "FluxPlayer/decoder/Frame.h"
+
 #include <memory>
 #include <thread>
 
@@ -50,7 +53,9 @@ private:
     bool normalizeAudioPTS(Frame& rawFrame);
     bool enqueueVideoFrame(Frame& rawFrame, int serial);
     bool enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued);
-    Frame* waitWritableSlot(FrameQueue* frameQueue, PacketQueue* pktQueue, int serial);
+    bool submitPreparedFrame(FrameQueue* queue, PacketQueue* packets, FrameQueue::Tag tag);
+    Frame preparedFrame_; ///< 仅本解码线程访问，格式转换不借用队列槽位。
+    FrameQueue::Tag outputTag_; ///< 在 receive 前捕获，flush 后不可给旧输出重新贴标签。
 
     // 当前帧归一化前的源 PTS（秒），仅本解码线程访问；等待队列空位时仍以它判断积压。
     double sourcePTS_ = 0.0;

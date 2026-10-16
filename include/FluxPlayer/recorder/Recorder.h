@@ -47,14 +47,15 @@ public:
      */
     bool writePacket(AVPacket* packet, int inputStreamIdx);
 
-    /** 停止录制，写入文件尾 */
-    void stop();
+    /** 停止录制并释放资源；写包、封口或关闭失败返回 false，重复调用保留结果。 */
+    bool stop();
 
     bool isRecording() const { return recording_.load(); }
     double getElapsedSeconds() const;
     int64_t getFileSize() const;
 
 private:
+    bool failed_ = false;       ///< mutex_ 保护，本次录制错误保持到下一次 start。
     AVFormatContext* outputFmtCtx_;
 
     int inputVideoIdx_;

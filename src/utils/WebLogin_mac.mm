@@ -38,12 +38,31 @@ static const NSInteger kWebLoginModalUseExisting = 1004;
 @property(nonatomic, strong) NSTextField* statusLabel;  ///< 当前 URL 提示
 @property(nonatomic, strong) NSButton* completeButton;
 @property(nonatomic, strong) NSButton* useExistingButton;
-@property(nonatomic, assign) NSInteger pendingResponse;  ///< 异步 cookie 读取期间暂存的返回码
+@property(nonatomic, assign) NSInteger pendingResponse;  ///< 0 表示活动中；非零阻止迟到回调结束其他模态窗口
 @property(nonatomic, copy)   NSString* pageUrlString;
 @property(nonatomic, strong) NSMutableArray<NSHTTPCookie*>* readCookies;
 @end
 
 @implementation FPWebLoginController
+
+- (void)finishWithResponse:(NSInteger)response {
+    // Cookie 异步读取可能晚于取消返回；旧回调不能结束下一次模态窗口。
+    if (self.pendingResponse != 0) return;
+    self.pendingResponse = response;
+    [NSApp stopModalWithCode:response];
+}
+
+- (void)dealloc {
+    // 本文件使用 MRC，strong/copy 属性必须显式释放。
+    [_window release];
+    [_webView release];
+    [_statusLabel release];
+    [_completeButton release];
+    [_useExistingButton release];
+    [_pageUrlString release];
+    [_readCookies release];
+    [super dealloc];
+}
 
 - (void)onCompleteClicked:(id)sender {
     // 防止重复点击：禁用按钮
@@ -54,26 +73,25 @@ static const NSInteger kWebLoginModalUseExisting = 1004;
     // 异步读取所有 cookies
     WKHTTPCookieStore* store = self.webView.configuration.websiteDataStore.httpCookieStore;
     [store getAllCookies:^(NSArray<NSHTTPCookie *> * _Nonnull cookies) {
+        if (self.pendingResponse != 0) return;
         self.readCookies = [NSMutableArray arrayWithArray:cookies];
-        // 在主线程退出模态
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [NSApp stopModalWithCode:kWebLoginModalComplete];
-        });
+        // CookieStore 回调在主线程执行，不再排入一个可能跨越模态生命周期的任务。
+        [self finishWithResponse:kWebLoginModalComplete];
     }];
 }
 
 - (void)onUseExistingClicked:(id)sender {
-    [NSApp stopModalWithCode:kWebLoginModalUseExisting];
+    [self finishWithResponse:kWebLoginModalUseExisting];
 }
 
 - (void)onCancelClicked:(id)sender {
-    [NSApp stopModalWithCode:kWebLoginModalCancel];
+    [self finishWithResponse:kWebLoginModalCancel];
 }
 
 // 用户关闭窗口（红色按钮 / Cmd+W）等同于取消
 - (BOOL)windowShouldClose:(NSWindow*)sender {
-    [NSApp stopModalWithCode:kWebLoginModalCancel];
-    return NO;  // stopModal 内部已经处理，不让窗口在模态期间被销毁
+    [self finishWithResponse:kWebLoginModalCancel];
+    return NO;  // 退出模态后由统一清理路径销毁窗口和网页。
 }
 
 // WKWebView 导航完成回调：更新地址栏标签
@@ -171,6 +189,13 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     }
 
     @autoreleasepool {
+        NSString* pageUrlString = [NSString stringWithUTF8String:pageUrl.c_str()];
+        NSURL* url = pageUrlString ? [NSURL URLWithString:pageUrlString] : nil;
+        if (!url) {
+            outcome.result = WebLoginResult::Failed;
+            outcome.error = "无效的 URL: " + pageUrl;
+            return outcome;
+        }
         // ── 创建窗口 ──
         const CGFloat winW = 980, winH = 720;
         NSRect frame = NSMakeRect(0, 0, winW, winH);
@@ -179,13 +204,14 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                                                         styleMask:style
                                                           backing:NSBackingStoreBuffered
                                                             defer:NO];
+        [window setReleasedWhenClosed:NO]; // MRC：统一清理显式释放，避免 close 隐式重复释放。
         [window setTitle:@"FluxPlayer 登录"];
         [window setContentMinSize:NSMakeSize(660, 360)];
         [window center];
 
         FPWebLoginController* ctrl = [[FPWebLoginController alloc] init];
         ctrl.window = window;
-        ctrl.pageUrlString = [NSString stringWithUTF8String:pageUrl.c_str()];
+        ctrl.pageUrlString = pageUrlString;
         [window setDelegate:ctrl];
 
         NSView* content = [window contentView];
@@ -194,6 +220,8 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         WKWebViewConfiguration* config = [[WKWebViewConfiguration alloc] init];
         // 默认 dataStore 提供持久化 cookie；FluxPlayer 自己最终读取后写入 web_cookies.txt
         config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
+        // 登录页不是播放页，禁止网页在未获得用户播放操作时自动启动音视频。
+        config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeAll;
 
         const CGFloat bottomBarH = 50.0;
         NSRect webFrame = NSMakeRect(0, bottomBarH, winW, winH - bottomBarH - 28);  // 顶部留空给地址栏
@@ -252,20 +280,35 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         ctrl.completeButton = completeBtn;
 
         // ── 加载起始 URL ──
-        NSURL* url = [NSURL URLWithString:ctrl.pageUrlString];
-        if (!url) {
-            outcome.result = WebLoginResult::Failed;
-            outcome.error = "无效的 URL: " + pageUrl;
-            return outcome;
-        }
         [webView loadRequest:[NSURLRequest requestWithURL:url]];
 
         // ── 弹出模态 ──
         [window makeKeyAndOrderFront:nil];
         NSInteger response = [NSApp runModalForWindow:window];
 
-        // 模态结束，关闭窗口
-        [window orderOut:nil];
+        // 隐藏窗口不会停止媒体；退出后必须拆除并释放 WKWebView。
+        // 先使迟到 Cookie 回调失效，随后断开委托与控制器引用。
+        if (ctrl.pendingResponse == 0) ctrl.pendingResponse = kWebLoginModalCancel;
+        [webView stopLoading];
+        webView.navigationDelegate = nil;
+        [webView removeFromSuperview];
+        ctrl.webView = nil;
+        [webView release];
+        [config release];
+        [window setDelegate:nil];
+        cancelBtn.target = nil;
+        useExistingBtn.target = nil;
+        completeBtn.target = nil;
+        ctrl.window = nil;
+        ctrl.statusLabel = nil;
+        ctrl.completeButton = nil;
+        ctrl.useExistingButton = nil;
+        [statusLabel release];
+        [cancelBtn release];
+        [useExistingBtn release];
+        [completeBtn release];
+        [window close];
+        [window release];
 
         // 处理返回值
         if (response == kWebLoginModalComplete) {
@@ -288,6 +331,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
             outcome.result = WebLoginResult::Cancelled;
             LOG_INFO("WebLogin: 用户取消登录");
         }
+        [ctrl release];
     }
 
     return outcome;

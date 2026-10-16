@@ -137,18 +137,26 @@ void Frame::reference(AVFrame* src) {
     }
 }
 
-void Frame::refFrom(const Frame& src) {
-    if (!m_frame || !src.m_frame) {
-        return;
+bool Frame::refFrom(const Frame& src) {
+    if (this == &src) return m_frame != nullptr;
+    unreference();
+    if (!m_frame || !src.m_frame || av_frame_ref(m_frame, src.m_frame) < 0) {
+        return false;
     }
-    // 先释放自身旧引用，避免 av_frame_ref 在已有 buffer 上泄漏
-    av_frame_unref(m_frame);
-    av_frame_ref(m_frame, src.m_frame);
-    // 拷贝全部元数据（AVFrame 之外由 Frame 自行维护的字段）
-    m_pts          = src.m_pts;
-    m_duration     = src.m_duration;
-    m_type         = src.m_type;
+    m_pts = src.m_pts;
+    m_duration = src.m_duration;
+    m_type = src.m_type;
     m_ptsEstimated = src.m_ptsEstimated;
+    return true;
+}
+
+void Frame::swap(Frame& other) noexcept {
+    using std::swap;
+    swap(m_frame, other.m_frame);
+    swap(m_pts, other.m_pts);
+    swap(m_duration, other.m_duration);
+    swap(m_type, other.m_type);
+    swap(m_ptsEstimated, other.m_ptsEstimated);
 }
 
 void Frame::unreference() {

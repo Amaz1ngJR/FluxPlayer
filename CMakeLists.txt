@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.9.0 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.9.1 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -252,8 +252,9 @@ target_include_directories(FluxPlayer PRIVATE
     third_party          # 项目内其他模块使用的仅头文件第三方库根目录
 )
 
-# 链接第三方静态库
-target_link_libraries(FluxPlayer PRIVATE glfw glad imgui tinyfiledialogs lua_static)
+# GLFW/GLAD 由 imgui 的 PUBLIC 依赖统一传递，避免在依赖库前直接列出后又被追加。
+# 静态链接顺序由目标依赖图保证：先 imgui，再 glfw/glad。
+target_link_libraries(FluxPlayer PRIVATE imgui tinyfiledialogs lua_static)
 
 # FFmpeg：添加头文件路径和库搜索路径，然后链接各个模块
 target_include_directories(FluxPlayer PRIVATE ${FFMPEG_ROOT}/include)

@@ -41,9 +41,9 @@ public:
     void startSeekToTarget(double targetPTS);
 
     /**
-     * 检查 seek 是否超时（decode 线程每轮检查）
+     * 检查独立的 Seek 计时窗口（控制线程周期检查，也可由解码侧查询）
      * @param timeoutSec 超时阈值（秒）；调用方按本地/网络来源选择
-     * @return true 表示已超时，decode 线程应放弃丢帧并恢复正常渲染
+     * @return true 表示计时窗口已超时；不受视频先完成精确定位影响
      */
     bool isSeekTimedOut(double timeoutSec) const;
 

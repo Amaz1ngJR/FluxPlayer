@@ -43,7 +43,7 @@ public:
     /**
      * @brief 向解码器发送压缩的视频数据包
      * @param packet 待解码的 AVPacket（来自 Demuxer）
-     * @return 成功返回 true，失败返回 false
+     * @return 仅包被接受返回 true；false 时查询 lastResult()，EAGAIN 须取帧后重发原包
      */
     bool sendPacket(AVPacket* packet);
 
@@ -55,6 +55,9 @@ public:
      * @return 成功返回 true，需要更多数据或出错返回 false
      */
     bool receiveFrame(Frame& frame);
+
+    /// 最近一次 send/receive 的 FFmpeg 返回码；仅解码所属线程访问。
+    int lastResult() const { return lastResult_; }
 
     /** @brief 刷新解码器缓冲区，seek 操作后必须调用以清除残留帧 */
     void flush();
@@ -102,6 +105,7 @@ public:
     bool disableHardwareAcceleration();
 
 private:
+    int lastResult_ = 0;
     AVCodecContext* m_codecCtx;     ///< 视频解码器上下文
     SwsContext* m_swsCtx;           ///< 图像格式转换上下文（延迟初始化）
     AVRational m_timeBase;          ///< 视频流时间基准，用于 PTS 计算

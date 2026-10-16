@@ -180,7 +180,9 @@ void Downloader::cancel() {
 // ── 辅助：提取流 URL，按目标高度选择最佳画质 ──
 static bool extractStream(const std::string& sourceUrl,
                            const std::string& heightStr,
-                           ExtractedStream& out) {
+                           ExtractedStream& out,
+                           const std::atomic<bool>& cancelled) {
+    if (cancelled.load()) return false;
     // 已确认的媒体直链不依赖 yt-dlp。duration/filesize 在打开 FFmpeg 输入后补齐；
     // 标题只用于生成文件名，因此移除 query/fragment，避免把鉴权 token 写入磁盘。
     if (!StreamExtractor::needsExtraction(sourceUrl)) {
@@ -195,7 +197,7 @@ static bool extractStream(const std::string& sourceUrl,
     }
 
     std::string error;
-    if (!StreamExtractor::extract(sourceUrl, "", out, error)) {
+    if (!StreamExtractor::extract(sourceUrl, "", out, error, &cancelled)) {
         LOG_ERROR("Downloader: 提取流失败: " + error);
         return false;
     }
@@ -215,9 +217,10 @@ static bool extractStream(const std::string& sourceUrl,
     if (bestFmtId.empty() || bestFmtId == out.selectedFormatId) return true;
 
     ExtractedStream refined;
-    if (StreamExtractor::extract(sourceUrl, bestFmtId, refined, error)) {
+    if (StreamExtractor::extract(sourceUrl, bestFmtId, refined, error, &cancelled)) {
         out = refined;
     } else {
+        if (cancelled.load()) return false;
         LOG_WARN("Downloader: 指定画质提取失败，使用默认画质: " + error);
     }
     return true;
@@ -668,7 +671,7 @@ void Downloader::downloadLoop(const std::string& sourceUrl,
                                FinishCallback   onFinish) {
     // ── 第一步：提取流 URL ──
     ExtractedStream info;
-    if (!extractStream(sourceUrl, formatId, info)) {
+    if (!extractStream(sourceUrl, formatId, info, cancelled_)) {
         running_.store(false);
         if (onFinish) onFinish(false, "", "提取流失败");
         return;
