@@ -243,8 +243,15 @@ struct RealESRGAN::Impl {
             // DirectML 不支持 memory patterns 和并行 session execution。
             check(api->DisableMemPattern(raw));
             check(api->SetSessionExecutionMode(raw, ORT_SEQUENTIAL));
+            // Diagnostic opt-in: changes CPU waiting only, not model arithmetic.
+            // Alternating tests did not establish a reliable throughput gain;
+            // keep the existing low-CPU wait policy as the default.
+            const char* syncSpin=std::getenv("FLUX_SR_DML_CPU_SYNC_SPIN");
+            const bool spinEnabled=syncSpin && std::string(syncSpin)=="1";
+            check(api->AddSessionConfigEntry(raw,"ep.dml.enable_cpu_sync_spinning",spinEnabled?"1":"0"));
             adapter = preferredSrAdapter();
             check(append(raw, static_cast<int>(adapter.index)));
+            LOG_INFO(std::string("Offline SR: DirectML CPU sync spinning=")+(spinEnabled?"1":"0"));
         }
 #endif
 #ifdef _WIN32

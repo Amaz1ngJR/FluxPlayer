@@ -6,6 +6,9 @@
 #include "SRFileCommit.h"
 #include "SRColorConverter.h"
 #include "SRVideoDecoder.h"
+#include "SRAudioPacketTiming.h"
+#include "SRSerialWorker.h"
+#include <cstdlib>
 #include <array>
 #include <cstring>
 #include <algorithm>
@@ -106,11 +109,25 @@ struct Pipeline {
     AVStream *video = nullptr, *audio = nullptr, *outVideo = nullptr, *outAudio = nullptr;
     SRVideoDecoder decode;
     Codec encode;
+    std::unique_ptr<SRSerialWorker> frameWriter;
+    bool encodePending = false;
+    struct OutputFormat {
+        AVPixelFormat pix_fmt = AV_PIX_FMT_YUV420P;
+        AVRational sample_aspect_ratio{1,1};
+        AVColorRange color_range = AVCOL_RANGE_MPEG;
+        AVColorSpace colorspace = AVCOL_SPC_UNSPECIFIED;
+        AVColorPrimaries color_primaries = AVCOL_PRI_UNSPECIFIED;
+        AVColorTransferCharacteristic color_trc = AVCOL_TRC_UNSPECIFIED;
+    } outputFormat;
+    std::atomic<int64_t> encodeNanoseconds{0};
     std::unique_ptr<SRAudioTranscoder> audioTranscoder;
     bool copyAudioTrack = false;
     std::string container = "mp4";
     std::vector<uint8_t> rgbBuffer, previousRgb, enhancedBuffer;
+    Frame rgbFrame;
     uint64_t reusedFrames = 0;
+    uint64_t audioPacketsSeen = 0;
+    uint64_t restoredAudioDurations = 0;
     std::unique_ptr<SwsContext, void(*)(SwsContext*)> toRgb{nullptr,sws_freeContext}, toYuv{nullptr,sws_freeContext};
     RealESRGAN model;
     SRColorConverter colors;
@@ -132,6 +149,9 @@ struct Pipeline {
     std::map<int64_t, int64_t> durations;
     Pipeline(const SuperResolutionJob& j, std::atomic<bool>& c, decltype(update) u) : job(j), cancelled(c), update(std::move(u)) {}
     ~Pipeline() {
+        // The writer can still reference the muxer/AVIO after a decode or model
+        // failure. Always join before closing any file or FFmpeg context.
+        frameWriter.reset();
         if (input) avformat_close_input(&input);
         if (output) {
             if (output->pb) { av_freep(&output->pb->buffer); avio_context_free(&output->pb); }
@@ -224,8 +244,15 @@ struct Pipeline {
         if(sourceSar.num==0)sourceSar={1,1};
         if(sourceSar.num<=0||sourceSar.den<=0||av_q2d(sourceSar)<.01||av_q2d(sourceSar)>100)throw std::runtime_error("Invalid source SAR");
         sourceRange=first->color_range==AVCOL_RANGE_UNSPECIFIED?video->codecpar->color_range:first->color_range;
+        // swscale's SIMD writers require padded rows, even when the logical
+        // RGB24 row size is not aligned (e.g. 600px -> 1800 bytes). A tightly
+        // sized vector can be overwritten at the last row and corrupt the heap.
+        rgbFrame=newFrame();rgbFrame->width=sourceW;rgbFrame->height=sourceH;rgbFrame->format=AV_PIX_FMT_RGB24;
+        check(av_frame_get_buffer(rgbFrame.get(),32),"Allocate aligned RGB conversion frame");
+        uint64_t rgbFrameBytes=0;
+        for(const auto* buffer:rgbFrame->buf)if(buffer)rgbFrameBytes+=buffer->size;
         const uint64_t pixelBytes=uint64_t(sourceW)*sourceH*(6+3*job.scale*job.scale)+uint64_t(job.outputWidth)*job.outputHeight*6+
-            uint64_t(3)*256*256*(1+job.scale*job.scale)*sizeof(float)+colors.scratchBytes()+decode.scratchBytes();
+            uint64_t(3)*256*256*(1+job.scale*job.scale)*sizeof(float)+colors.scratchBytes()+decode.scratchBytes()+rgbFrameBytes;
         if(pixelBytes>512ULL*1024*1024)throw std::runtime_error("Image buffers exceed 512 MiB safety budget");
         if (sourceW != video->codecpar->width || sourceH != video->codecpar->height) throw std::runtime_error("Source dimensions changed during decode");
         // FFmpeg 4.x VideoToolbox 在 VFR 样本上产生 PTS<DTS；先使用支持源时序的 libx264。
@@ -254,6 +281,8 @@ struct Pipeline {
             encode=std::move(candidate); update([&](auto& s){s.encoder=name;}); break;
         }
         if (!encode) throw std::runtime_error("No compatible H.264 encoder");
+        outputFormat={encode->pix_fmt,encode->sample_aspect_ratio,encode->color_range,
+            encode->colorspace,encode->color_primaries,encode->color_trc};
     }
 #if LIBAVFORMAT_VERSION_MAJOR >= 61
     static int writePacket(void* opaque,const uint8_t* data,int size) {
@@ -350,6 +379,7 @@ struct Pipeline {
         }
     }
     void encodeFrame(AVFrame* frame) {
+        const auto began=Clock::now();
         if (frame) {
             if (durations.size() >= 64) throw std::runtime_error("Encoder reorder buffer exceeds limit");
             durations.emplace(frame->pts, getDuration(frame));
@@ -357,6 +387,20 @@ struct Pipeline {
         int rc=avcodec_send_frame(encode.get(),frame);
         if (rc==AVERROR(EAGAIN)) {drainEncoder();rc=avcodec_send_frame(encode.get(),frame);}
         check(rc,"Send video frame"); drainEncoder();
+        encodeNanoseconds.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-began).count(),std::memory_order_relaxed);
+    }
+    void waitVideo() {
+        if(!encodePending)return;
+        frameWriter->wait();encodePending=false;++frames;
+        update([&](auto& s){s.frames=frames;});
+    }
+    void submitVideo(AVFrame* frame) {
+        waitVideo();
+        if(!frameWriter) {encodeFrame(frame);++frames;return;}
+        auto copy=std::shared_ptr<AVFrame>(av_frame_clone(frame),FrameDelete{});
+        if(!copy)throw std::bad_alloc();
+        frameWriter->submit([this,copy]{stopCheck();encodeFrame(copy.get());});
+        encodePending=true;
     }
     Frame convert(const AVFrame* source) {
         const auto colorStart = Clock::now();
@@ -371,7 +415,7 @@ struct Pipeline {
         const auto matrix=source->colorspace==AVCOL_SPC_UNSPECIFIED?video->codecpar->color_space:source->colorspace;
         const auto primaries=source->color_primaries==AVCOL_PRI_UNSPECIFIED?video->codecpar->color_primaries:source->color_primaries;
         const auto transfer=source->color_trc==AVCOL_TRC_UNSPECIFIED?video->codecpar->color_trc:source->color_trc;
-        if(matrix!=encode->colorspace||primaries!=encode->color_primaries||transfer!=encode->color_trc)throw std::runtime_error("Source color properties changed");
+        if(matrix!=outputFormat.colorspace||primaries!=outputFormat.color_primaries||transfer!=outputFormat.color_trc)throw std::runtime_error("Source color properties changed");
         const auto conversionStart=Clock::now();
         rgbBuffer.resize(size_t(sourceW)*sourceH*3);
         auto range=source->color_range==AVCOL_RANGE_UNSPECIFIED?video->codecpar->color_range:source->color_range;
@@ -382,8 +426,11 @@ struct Pipeline {
             if (!toRgb) throw std::runtime_error("Cannot create RGB converter");
             check(sws_setColorspaceDetails(toRgb.get(),sws_getCoefficients(coefficients),range==AVCOL_RANGE_JPEG,sws_getCoefficients(coefficients),1,0,1<<16,1<<16),"RGB matrix");
         }
-        uint8_t* dst[]={rgbBuffer.data(),nullptr,nullptr,nullptr}; int stride[]={sourceW*3,0,0,0};
-        if (sws_scale(toRgb.get(),source->data,source->linesize,0,sourceH,dst,stride)!=sourceH) throw std::runtime_error("Incomplete source conversion");
+        if (sws_scale(toRgb.get(),source->data,source->linesize,0,sourceH,rgbFrame->data,rgbFrame->linesize)!=sourceH)
+            throw std::runtime_error("Incomplete source conversion");
+        const size_t rowBytes=size_t(sourceW)*3;
+        for(int row=0;row<sourceH;++row)
+            std::memcpy(rgbBuffer.data()+size_t(row)*rowBytes,rgbFrame->data[0]+size_t(row)*rgbFrame->linesize[0],rowBytes);
         const auto inferenceStart=Clock::now();
         rgbSeconds+=std::chrono::duration<double>(inferenceStart-conversionStart).count();
         // 只复用逐字节相同的输入；仍编码当前帧及其独立 PTS，不做相似帧近似。
@@ -394,19 +441,19 @@ struct Pipeline {
         stopCheck();
         const auto outputStart=Clock::now();
         inferenceSeconds+=std::chrono::duration<double>(outputStart-inferenceStart).count();
-        auto target=newFrame(); target->width=job.outputWidth; target->height=job.outputHeight; target->format=encode->pix_fmt;
-        target->sample_aspect_ratio=encode->sample_aspect_ratio; target->color_range=encode->color_range;
-        target->colorspace=encode->colorspace; target->color_primaries=encode->color_primaries; target->color_trc=encode->color_trc;
+        auto target=newFrame(); target->width=job.outputWidth; target->height=job.outputHeight; target->format=outputFormat.pix_fmt;
+        target->sample_aspect_ratio=outputFormat.sample_aspect_ratio; target->color_range=outputFormat.color_range;
+        target->colorspace=outputFormat.colorspace; target->color_primaries=outputFormat.color_primaries; target->color_trc=outputFormat.color_trc;
         check(av_frame_get_buffer(target.get(),32),"Allocate encoder frame");
         ptrdiff_t lines[]={target->linesize[0],target->linesize[1],target->linesize[2],target->linesize[3]};
-        check(av_image_fill_black(target->data,lines,encode->pix_fmt,AVCOL_RANGE_MPEG,target->width,target->height),"Fill canvas");
-        const double effectiveW=sourceW*av_q2d(sourceSar)/av_q2d(encode->sample_aspect_ratio);
+        check(av_image_fill_black(target->data,lines,outputFormat.pix_fmt,AVCOL_RANGE_MPEG,target->width,target->height),"Fill canvas");
+        const double effectiveW=sourceW*av_q2d(sourceSar)/av_q2d(outputFormat.sample_aspect_ratio);
         double ratio=std::min(double(target->width)/effectiveW,double(target->height)/sourceH);
         int w=std::max(2,int(effectiveW*ratio)/2*2),h=std::max(2,int(sourceH*ratio)/2*2);
         int x=(target->width-w)/4*2,y=(target->height-h)/4*2;
         uint8_t* planes[]={target->data[0]+y*target->linesize[0]+x,target->data[1]+(y/2)*target->linesize[1]+x/2,target->data[2]+(y/2)*target->linesize[2]+x/2,nullptr};
         if(!toYuv) {
-            toYuv.reset(sws_getContext(sourceW*job.scale,sourceH*job.scale,AV_PIX_FMT_RGB24,w,h,encode->pix_fmt,SWS_LANCZOS,nullptr,nullptr,nullptr));
+            toYuv.reset(sws_getContext(sourceW*job.scale,sourceH*job.scale,AV_PIX_FMT_RGB24,w,h,outputFormat.pix_fmt,SWS_LANCZOS,nullptr,nullptr,nullptr));
             if (!toYuv) throw std::runtime_error("Cannot create output converter");
             check(sws_setColorspaceDetails(toYuv.get(),sws_getCoefficients(coefficients),1,sws_getCoefficients(coefficients),0,0,1<<16,1<<16),"Output matrix");
         }
@@ -424,13 +471,32 @@ struct Pipeline {
             ", RGB ms/frame="+std::to_string(rgbSeconds*1000/enhancedFrames)+
             ", model+tiles ms/frame="+std::to_string(inferenceSeconds*1000/enhancedFrames)+
             ", output scale ms/frame="+std::to_string(outputSeconds*1000/enhancedFrames)+
+            ", encode/mux ms/frame="+std::to_string(double(encodeNanoseconds.load(std::memory_order_relaxed))/1e6/enhancedFrames)+
             ", exact-input reuse="+std::to_string(reusedFrames)+
             ", exact-tile reuse="+std::to_string(model.reusedTiles()));
     }
     void copyAudio(AVPacket* packet) {
         stopCheck();
+        // FFmpeg muxing and audio transcoding never overlap the video writer.
+        waitVideo();
         if (audioTranscoder) {audioTranscoder->push(packet);return;}
-        if (packet->pts==AV_NOPTS_VALUE || packet->dts==AV_NOPTS_VALUE || packet->duration<=0) throw std::runtime_error("Missing audio timing");
+        ++audioPacketsSeen;
+        if (restoreAacPrimingDuration(packet,audio)) {
+            ++restoredAudioDurations;
+            LOG_INFO("Offline SR AAC priming duration restored (payload and skip samples unchanged): stream="+
+                std::to_string(audio->index)+", packet="+std::to_string(audioPacketsSeen)+
+                ", pts="+std::to_string(packet->pts)+", duration="+std::to_string(packet->duration)+
+                ", time_base="+std::to_string(audio->time_base.num)+"/"+std::to_string(audio->time_base.den));
+        }
+        if (packet->pts==AV_NOPTS_VALUE || packet->dts==AV_NOPTS_VALUE || packet->duration<=0) {
+            const auto timestamp=[](int64_t value){return value==AV_NOPTS_VALUE?std::string("missing"):std::to_string(value);};
+            throw std::runtime_error("Missing audio timing: stream="+std::to_string(audio->index)+
+                ", codec="+avcodec_get_name(audio->codecpar->codec_id)+
+                ", packet="+std::to_string(audioPacketsSeen)+", pos="+std::to_string(packet->pos)+
+                ", pts="+timestamp(packet->pts)+", dts="+timestamp(packet->dts)+
+                ", duration="+std::to_string(packet->duration)+(packet->duration<=0?" (invalid)":"")+
+                ", time_base="+std::to_string(audio->time_base.num)+"/"+std::to_string(audio->time_base.den));
+        }
         const int64_t shift=av_rescale_q(origin,AV_TIME_BASE_Q,audio->time_base);
         packet->pts-=shift;packet->dts-=shift;
         av_packet_rescale_ts(packet,audio->time_base,outAudio->time_base);
@@ -497,7 +563,8 @@ struct Pipeline {
         if(scan.audioTranscoder)scan.audioTranscoder->finish();
         stopCheck();check(av_write_trailer(scan.output),"Finalize audio preflight");avio_flush(scan.output->pb);
         check(scan.output->pb->error,"Flush audio preflight");
-        const std::string repairs=scan.audioTranscoder?scan.audioTranscoder->repairSummary():"Original audio packets preserved; no transcoding or sample repair";
+        std::string repairs=scan.audioTranscoder?scan.audioTranscoder->repairSummary():"Original audio packets preserved; no transcoding or sample repair";
+        if(scan.restoredAudioDurations)repairs+="; AAC priming packet durations restored="+std::to_string(scan.restoredAudioDurations)+" (timing metadata only)";
         update([&](auto& s){s.audioPreflight="Passed / "+std::to_string(packets)+" audio packets checked";s.audioCheckedSeconds=checked;s.audioRepairs="Preflight: "+repairs;});
         LOG_INFO("Offline SR audio preflight passed: "+repairs);
     }
@@ -555,6 +622,12 @@ struct Pipeline {
         stage("loading","Loading and validating Real-ESRGAN");
         model.load(job.runtime,job.model,job.scale,job.cpu);
         update([&](auto& s){s.device=model.device();});stopCheck();openOutput();
+        const char* serialEncode=std::getenv("FLUX_SR_SERIAL_ENCODE");
+        if(!(serialEncode && std::string(serialEncode)=="1")) {
+            try {frameWriter=std::make_unique<SRSerialWorker>();}
+            catch(const std::system_error& e){LOG_WARN(std::string("Offline SR: using serial encoding: ")+e.what());}
+        }
+        LOG_INFO(std::string("Offline SR encoding: ")+(frameWriter?"bounded one-frame overlap":"serial reference"));
         for (auto& saved:earlyAudio) copyAudio(saved.get());earlyAudio.clear();
         stage("processing","Enhancing every decoded video frame");
         Frame pending; int64_t pendingPts=0,pendingDuration=0;
@@ -562,7 +635,7 @@ struct Pipeline {
             stopCheck();const int64_t pts=source->best_effort_timestamp;
             if (pts==AV_NOPTS_VALUE || (lastPts!=AV_NOPTS_VALUE && pts<=lastPts)) throw std::runtime_error("Missing, duplicate or backwards video PTS");
             if (pending) {
-                setDuration(pending.get(), pts-pendingPts);encodeFrame(pending.get());++frames;
+                setDuration(pending.get(), pts-pendingPts);submitVideo(pending.get());
                 update([&](auto& s){s.frames=frames;s.sourceSeconds=std::max(0.,double(av_rescale_q(pts,video->time_base,AV_TIME_BASE_Q)-origin)/AV_TIME_BASE);s.progress=s.duration>0?std::min(.99,s.sourceSeconds/s.duration):0;});
             }
             pending=convert(source);pendingPts=pts;lastPts=pts;pendingDuration=getDuration(source);
@@ -584,8 +657,9 @@ struct Pipeline {
         receive();
         if (pending) {
             if(pendingDuration<=0) throw std::runtime_error("Last video frame has no reliable duration");
-            setDuration(pending.get(),pendingDuration);encodeFrame(pending.get());++frames;
+            setDuration(pending.get(),pendingDuration);submitVideo(pending.get());
         }
+        waitVideo();frameWriter.reset();
         stage("finalizing","Draining encoder and finalizing MP4");
         if (audioTranscoder) {
             audioTranscoder->finish();
@@ -620,6 +694,9 @@ struct VideoSuperResolutionExporter::Impl {
         std::filesystem::path temporary;
         bool preserveCompleted = false;
         try {
+            std::error_code pathError;
+            const auto inputPath=std::filesystem::absolute(std::filesystem::u8path(job.input),pathError);
+            LOG_INFO("Offline SR input: \""+(pathError?job.input:inputPath.u8string())+"\"");
             srExport::Pipeline pipeline(job,cancelled,[this](const auto& f){update(f);});
             try {
                 pipeline.run();temporary=pipeline.temporary;
@@ -637,7 +714,7 @@ struct VideoSuperResolutionExporter::Impl {
         } catch (const std::exception& e) {
             std::error_code ec;
             if(!preserveCompleted && !temporary.empty())std::filesystem::remove(temporary,ec);
-            LOG_WARN(std::string("Offline SR export: ")+e.what());
+            LOG_WARN(std::string("Offline SR export: ")+e.what()+"; input=\""+job.input+"\"");
             update([&](auto& s){
                 s.phase=!preserveCompleted && cancelled.load()?"cancelled":"failed";
                 s.error=e.what();s.running=false;
