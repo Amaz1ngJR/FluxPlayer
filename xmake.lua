@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.9.1"
+local version = "0.9.2"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -196,6 +196,11 @@ rule("flux.skin.asset")
     set_extensions(".lua", ".svg", ".json")
     on_build_file(function (target, sourcefile) end)
 
+-- 离线 ORT 仅作为运行资源复制，不能使基础播放器产生强链接依赖。
+rule("flux.ort.asset")
+    set_extensions(".dylib")
+    on_build_file(function (target, sourcefile) end)
+
 target("FluxPlayer")
     set_kind("binary")  -- 编译为可执行文件
 
@@ -212,6 +217,11 @@ target("FluxPlayer")
     -- 皮肤资源登记为规则输入：内容变化触发重建，从而带动 after_build 复制。
     add_files("source/UI/skins/**/*.lua", {rule = "flux.skin.asset"})
     add_files("source/UI/skins/**/*.svg", {rule = "flux.skin.asset"})
+    if is_plat("macosx") then
+        add_files("source/onnxruntime/**/*.dylib", {rule = "flux.ort.asset"})
+    elseif is_plat("windows") then
+        add_files("source/onnxruntime/windows-x64/*.dll", {rule = "flux.ort.asset"})
+    end
 
     -- 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)。
     -- Linux 仍需保留 WebLogin_win.cpp：未定义 FLUXPLAYER_HAVE_WEBVIEW2 时，该文件会
@@ -275,6 +285,10 @@ target("FluxPlayer")
     add_includedirs(ffmpeg_root .. "/include")
     add_linkdirs(ffmpeg_root .. "/lib")
     add_links("avformat", "avcodec", "avutil", "swscale", "swresample")
+    if is_plat("windows") or os.isfile(ffmpeg_root .. "/lib/libavfilter.dylib") then
+        add_links("avfilter")
+        add_defines("FLUXPLAYER_HAVE_SR_COLOR_FILTERS")
+    end
 
     -- 平台相关的系统库
     if is_plat("macosx") then
@@ -378,6 +392,16 @@ target("FluxPlayer")
         local resources_dir = path.join(target:targetdir(), "resources")
         os.mkdir(resources_dir)
         cp_if_changed("source/pic2.png", resources_dir)
+        -- 与 CMake 安装布局一致，逐文件增量部署离线超分模型、运行库及许可。
+        for _, resource in ipairs({"models/realesrgan", "onnxruntime"}) do
+            local src_dir = path.join("source", resource)
+            for _, file in ipairs(os.files(path.join(src_dir, "**"))) do
+                local relative = path.relative(file, src_dir)
+                local dst_dir = path.directory(path.join(resources_dir, resource, relative))
+                os.mkdir(dst_dir)
+                cp_if_changed(file, dst_dir)
+            end
+        end
         -- 单文件 Lua 皮肤包内置回退；SVG 资源原样保留。
         -- 清掉整个 skins/ 再重建：避免历史嵌套目录（skins/skins/...）和已删皮肤的残留。
         os.tryrm(path.join(resources_dir, "skins"))

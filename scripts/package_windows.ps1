@@ -214,6 +214,27 @@ foreach ($file in $requiredFiles) {
         throw "Packaging resource missing from staging: $file"
     }
 }
+# 动态加载的 ORT 不在主程序导入表中，不能依赖 GET_RUNTIME_DEPENDENCIES 收集。
+foreach ($resource in @("onnxruntime", "models\realesrgan")) {
+    Remove-StaleFiles "$root\source\$resource" "$stage\resources\$resource"
+}
+$ortManifest = "$root\source\onnxruntime\windows-x64\SHA256SUMS"
+foreach ($line in Get-Content -LiteralPath $ortManifest) {
+    if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Invalid ORT hash manifest line: $line" }
+    $expectedHash = $Matches[1]
+    $dllName = $Matches[2]
+    foreach ($directory in @("$root\source\onnxruntime\windows-x64", "$stage\resources\onnxruntime\windows-x64")) {
+        $dllPath = Join-Path $directory $dllName
+        if ((Get-FileHash -LiteralPath $dllPath -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw "Offline SR runtime hash mismatch: $dllPath"
+        }
+    }
+}
+foreach ($name in @("realesrgan-x2plus.onnx", "realesrgan-x4plus.onnx", "LICENSE")) {
+    if (-not (Test-Path -LiteralPath "$stage\resources\models\realesrgan\$name" -PathType Leaf)) {
+        throw "Offline SR model resource missing: $name"
+    }
+}
 foreach ($directory in @("shaders", "fonts")) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage $directory) -PathType Container)) {
         throw "Packaging directory missing from staging: $directory"

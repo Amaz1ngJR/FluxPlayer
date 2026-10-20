@@ -20,6 +20,7 @@ namespace FluxUI { class ImGuiBackend; }
 struct HomeScreenResult {
     bool shouldQuit = false;
     bool openMerge = false;
+    bool openSuperResolution = false;
     bool openSettings = false;
     std::string mediaPath;
 };
@@ -58,6 +59,7 @@ private:
     bool dropReceived_ = false;
     std::string droppedFile_;
     bool mergeRequested_ = false;
+    bool superResolutionRequested_ = false;
     bool settingsRequested_ = false;
     std::vector<HistoryEntry> history_;
     std::unique_ptr<FluxUI::ImGuiBackend> luaBackend_;

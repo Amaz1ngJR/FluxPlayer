@@ -378,7 +378,7 @@ const SettingEntry kSettings[] = {
                           speed_read, speed_write, nullptr,
                           kSpeedOptions, sizeof(kSpeedOptions)/sizeof(kSpeedOptions[0]), 0.55},
     {"frameInterpolation","Frame Interpolation",   SettingType::Boolean, "playback", "PLAYBACK", 0, 0, 0, false, frameInterp_read, frameInterp_write, "Slow-motion only."},
-    {"hwaccel",           "Hardware Decoding",     SettingType::Boolean, "playback", "PLAYBACK", 0, 0, 0, true,  hwaccel_read,   hwaccel_write,   "Takes effect when you open the next media."},
+    {"hwaccel",           "Hardware Decoding",     SettingType::Boolean, "playback", "PLAYBACK", 0, 0, 0, true,  hwaccel_read,   hwaccel_write,   "Takes effect when you open the next media or start an offline SR task."},
 
     // ── SUBTITLES（旧版在 GENERAL 页内的小节）───────────────────────────
     {"subtitleEnabled",   "Subtitles",             SettingType::Boolean, "subtitle", "SUBTITLES", 0, 0, 0, false, subtitleEnabled_read, subtitleEnabled_write, nullptr},

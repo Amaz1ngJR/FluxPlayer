@@ -9,7 +9,7 @@ local skin = {
     description = "Default neon drive console with cyan, violet and magenta HUD accents.",
     compatibility = {
         skinApi = 1,
-        surfaces = { "home", "opening", "player", "merge", "settings", "subtitle", "toast" },
+        surfaces = { "home", "opening", "player", "merge", "superResolution", "settings", "subtitle", "toast" },
     },
     roles = {
         background = {
@@ -63,6 +63,7 @@ local skin = {
     },
     gradients = {
         primaryRail = { "#00E8FF", "#2DA7FF", "#A855FF", "#FF3DF2" },
+        srProgress = { "#00E8FF", "#A855FF" },
         dockEdge = { "rgba(0, 232, 255, 0)", "#00E8FF", "#A855FF", "rgba(255, 61, 242, 0)" },
         panelHeader = { "rgba(0, 232, 255, 0)", "rgba(0, 232, 255, 0.80)", "rgba(168, 85, 255, 0.80)", "rgba(255, 61, 242, 0)" },
         homeRail = { "rgba(0, 232, 255, 0)", "#00E8FF", "#2DA7FF", "#A855FF", "rgba(255, 61, 242, 0)" },
@@ -405,10 +406,19 @@ local function render_home()
     children[#children + 1] = ui.rect { color = "accentPrimary", x = X(150), y = Y(282), width = S(596), height = S(52),
         rounding = S(3), opacity = 0.24 * pulse, outline = true, thickness = math.max(1, S(1.5)), absolute = true }
     children[#children + 1] = center_text("or drag & drop a file here", "textMuted", S(11), X(150), Y(338), S(580), S(22))
-    -- MERGE VIDEOS button with leading dot decoration
-    children[#children + 1] = rect("accentSecondary", X(159), Y(385), S(8), S(8), S(4), 0.85)
-    children[#children + 1] = ui.button { text = "+  MERGE VIDEOS", action = "openMerge", theme = "secondary", background = "bgMergeButton",
-        x = X(150), y = Y(376), width = S(596), height = S(52), size = F(15), rounding = S(3), absolute = true }
+    -- 合并与离线超分为同级工具入口，保留原有媒体入口。
+    children[#children + 1] = ui.button { text = "+ MERGE VIDEOS", action = "openMerge", theme = "secondary", background = "bgMergeButton",
+        x = X(150), y = Y(376), width = S(290), height = S(52), size = F(13), rounding = S(3), absolute = true }
+    children[#children + 1] = ui.button { text = "VIDEO SUPER RESOLUTION", action = "openSuperResolution", theme = "secondary", background = "bgMergeButton",
+        x = X(456), y = Y(376), width = S(290), height = S(52), size = F(13), rounding = S(3), absolute = true }
+    -- 与本地文件入口的视觉反馈一致：只显示当前悬停按钮的左上角圆点。
+    local toolMouse = ui.getInput()
+    for _, toolX in ipairs({150, 456}) do
+        if toolMouse.x >= X(toolX) and toolMouse.x < X(toolX + 290)
+            and toolMouse.y >= Y(376) and toolMouse.y < Y(428) then
+            children[#children + 1] = rect("accentSecondary", X(toolX + 9), Y(385), S(8), S(8), S(4), 0.85)
+        end
+    end
     add_line("lineCyanHalf", 168, 450, 712, 450, 1)
     children[#children + 1] = center_text("02 / NETWORK STREAM", "textSection", S(10), X(168), Y(458), S(544), S(22))
     children[#children + 1] = ui.input { id = "url", stateKey = "url", value = state.get("url") or "",
@@ -435,19 +445,19 @@ local function render_home()
     children[#children + 1] = rect("bgField", X(150), Y(640), S(596), S(92), S(3), 0.85)
 
     -- Line 1: Decoder with status indicator
-    children[#children + 1] = text("解码器：", "textMuted", S(10), X(164), Y(646), S(76), S(20), "left")
+    children[#children + 1] = text("Decoder:", "textMuted", S(10), X(164), Y(646), S(76), S(20), "left")
     children[#children + 1] = text(hardware.decoder or "Software decode", "accentPrimary", S(10), X(240), Y(646), S(290), S(20), "left")
     if hardware.enabled then
         children[#children + 1] = rect("stateSuccess", X(530), Y(653), S(5), S(5), S(2.5), 1)
-        children[#children + 1] = text("已启用", "stateSuccess", S(9), X(540), Y(646), S(50), S(20), "left")
+        children[#children + 1] = text("Enabled", "stateSuccess", S(9), X(540), Y(646), S(50), S(20), "left")
     end
 
     -- Line 2: Hardware device
-    children[#children + 1] = text("硬件设备：", "textMuted", S(10), X(164), Y(666), S(76), S(20), "left")
+    children[#children + 1] = text("Device:", "textMuted", S(10), X(164), Y(666), S(76), S(20), "left")
     children[#children + 1] = text(hardware.device or "Unknown", "accentSecondary", S(10), X(240), Y(666), S(400), S(20), "left")
 
     -- Line 3: Performance tier with progress bar
-    children[#children + 1] = text("性能档位：", "textMuted", S(10), X(164), Y(686), S(76), S(20), "left")
+    children[#children + 1] = text("Tier:", "textMuted", S(10), X(164), Y(686), S(76), S(20), "left")
     children[#children + 1] = text(hardware.tier or "Unknown", "textPrimary", S(10), X(240), Y(686), S(90), S(20), "left")
     local tierPercent = tonumber(hardware.tierPercent) or 80
     children[#children + 1] = rect("accentPrimary", X(330), Y(692), S(80), S(12), S(2), 0.15)
@@ -455,7 +465,7 @@ local function render_home()
     children[#children + 1] = center_text(tierPercent .. "%", "textPrimary", S(9), X(330), Y(688), S(80), S(16))
 
     -- Line 4: Max speed support
-    children[#children + 1] = text("播放倍数：", "textMuted", S(10), X(164), Y(706), S(76), S(20), "left")
+    children[#children + 1] = text("Speed:", "textMuted", S(10), X(164), Y(706), S(76), S(20), "left")
     children[#children + 1] = text("1080p → " .. (hardware.speed1080 or "2") .. "x", "accentPrimary", S(10), X(240), Y(706), S(100), S(20), "left")
     children[#children + 1] = text("|", "textMuted", S(10), X(340), Y(706), S(20), S(20), "center")
     children[#children + 1] = text("4K → " .. (hardware.speed4k or "2") .. "x", "accentSecondary", S(10), X(360), Y(706), S(90), S(20), "left")
@@ -1517,6 +1527,208 @@ skin.surfaces.settings.render = function()
 
     return c.finish()
 end
+
+-- 独立离线工具：配置、真实任务进度与终态分别绘制。
+local function sr_duration(seconds)
+    local value=tonumber(seconds)
+    if not value or value~=value or value<0 or value==math.huge then return "unknown" end
+    local total=math.floor(value+0.5)
+    if total>=3600 then return string.format("%dh %02dm %02ds",total//3600,(total//60)%60,total%60) end
+    if total>=60 then return string.format("%dm %02ds",total//60,total%60) end
+    return string.format("%ds",total)
+end
+
+local function render_super_resolution()
+    local width,height=ui.getWindowSize()
+    local _,X,Y,S=viewport(width,height)
+    local c=canvas(width,height,X,Y,S)
+    local d=(ui.getData("superResolution") or {})[1] or {}
+    c.add("radialGradient",0,0,1440,900,{colorCenter="bgRadialCenter",colorMiddle="bgRadialMiddle",colorOuter="bgRadialOuter",cx=.5,cy=.5,radiusRatio=.7})
+    c.rail(0,2,1440,"homeRail",2); c.rail(0,898,1440,"homeRail",2)
+    local phase=d.phase or "idle"
+    local running=d.running=="true"
+    if not running then c.button("BACK HOME","srBack",64,42,124,36) end
+    c.text("VIDEO SUPER RESOLUTION",320,66,800,24,"textPrimary","center")
+    if phase~="idle" then
+        local elapsed=tonumber(d.elapsed) or 0
+        local frames=tonumber(d.frames) or 0
+        local source=tonumber(d.sourceSeconds) or 0
+        local duration=tonumber(d.taskDuration) or 0
+        local sizes="Source "..(d.width or "0").." × "..(d.height or "0")..
+            " → Native "..(d.scale or "2").."x model "..(d.intermediateSize or "—").." → Output "..(d.outputSize or "—")
+        local inference=(d.actualDevice or "")~="" and d.actualDevice or "Not initialized"
+        local encoder=(d.encoder or "")~="" and d.encoder or "Not initialized"
+        local audio=(d.audioPolicy or "")~="" and d.audioPolicy or "Pending probe"
+        local function panel(y,h,color)
+            c.rect(180,y,1080,h,"bgPanel",1,false,6)
+            c.rect(180,y,1080,h,color,.7,true,6)
+        end
+        if running then
+            c.text("Offline enhancement / "..string.upper(phase).." / Configuration locked",320,97,800,13)
+            panel(132,646,"accentSecondary")
+            c.rail(204,134,1032,"homeRail",2)
+            c.text(d.fileName,212,174,816,18,"textPrimary")
+            c.rect(1052,151,176,30,"accentSecondary",.12)
+            c.rect(1052,151,176,30,"accentSecondary",.7,true)
+            c.text("ONE LOCAL TASK",1052,171,176,12,"accentSecondary","center")
+            c.text(sizes,212,204,1016,13)
+            c.line(212,226,1228,226,"accentSecondary",1,.5)
+            local step=({probing=1,audio_preflight=1,loading=2,processing=3,finalizing=4})[phase] or 0
+            local xs={340,590,850,1100}
+            local labels={"01 PROBE","02 LOAD MODEL","03 ENHANCE / ENCODE","04 FINALIZE"}
+            c.line(340,267,1100,267,"textMuted",2,.3)
+            if step>1 then c.line(340,267,xs[step],267,"accentPrimary",2) end
+            for i,x in ipairs(xs) do
+                local color=i==step and "accentSecondary" or (i<step and "accentPrimary" or "textMuted")
+                c.dot(x,267,i==step and 10 or 7,color,i>step and .4 or 1)
+                c.text(labels[i],x-120,298,240,13,color,"center")
+            end
+            -- 只有最终提交成功的结果页允许显示100%，包括小数舍入也不能提前到100。
+            local progress=math.max(0,math.min(.999,tonumber(d.progress) or 0))
+            c.text("Progress by source time",212,350,700,15,"textPrimary")
+            c.text(duration>0 and string.format("%.1f%%",progress*100) or "unknown",1008,350,220,30,"accentPrimary","right")
+            c.rect(212,370,1016,14,"bgField",1,false,4)
+            if progress>0 then
+                c.add("gradientLine",212,377,1016*progress,0,{x2=S(1016*progress),y2=0,gradient="srProgress",thickness=S(14)})
+            end
+            c.text(phase=="audio_preflight" and ("Audio checked through "..sr_duration(d.audioCheckedSeconds).." / Model not loaded; no output file created") or
+                ("Source time processed "..sr_duration(source).." / "..(duration>0 and sr_duration(duration) or "unknown").." / Every decoded frame enhanced"),212,411,1016,12)
+            c.rect(212,435,1016,88,"bgField",1,false,4)
+            local eta=phase=="processing" and progress>0 and duration>0 and elapsed>=10 and
+                ("~"..sr_duration(elapsed*(1-progress)/progress)) or "unknown"
+            local titles={"FRAMES COMPLETED","PROCESSING RATE","ELAPSED","EST. REMAINING"}
+            local values={tostring(frames),string.format("%.2f fps",frames/math.max(1,elapsed)),sr_duration(elapsed),eta}
+            for i=1,4 do
+                c.text(titles[i],236+(i-1)*254,460,230,12)
+                c.text(values[i],236+(i-1)*254,494,230,20,"textPrimary")
+            end
+            c.text(string.format("Source-relative speed %.3fx / ETA is an estimate. Slower than real time is normal.",source/math.max(1,elapsed)),212,548,1016,12,"textMuted")
+            c.line(212,568,1228,568,"accentSecondary",1,.5)
+            c.text("Inference: "..inference,212,596,1016,13,"accentSecondary")
+            c.text("Encoder: "..encoder.." / Audio: "..audio,212,623,1016,13)
+            c.text("Output folder: "..(d.outputDir or ""),212,657,1016,12)
+            c.text("Temporary file: "..((d.temporary or "")~="" and d.temporary or "Not created"),212,681,1016,12,"textMuted")
+            c.rect(212,707,1016,43,"accentSecondary",.07)
+            c.text(phase=="cancelling" and "Waiting for worker shutdown and temporary-file cleanup; result actions remain unavailable." or
+                "Encoding must finalize and the file must be committed before progress reaches 100% and PLAY RESULT is available.",228,734,984,12,"accentSecondary")
+            c.text(d.stage,180,817,836,12)
+            c.text("Input and settings are locked. Cancellation waits for safe cleanup.",180,841,836,12,"textMuted")
+            if phase=="cancelling" then
+                c.rect(1040,800,220,48,"textMuted",.5,true)
+                c.text("CANCELLING...",1040,830,220,14,"textMuted","center")
+            else c.button("CANCEL TASK","srCancel",1040,800,220,48,"stateError",nil,nil,14) end
+        elseif phase=="done" then
+            panel(128,480,"accentPrimaryDim")
+            c.dot(720,188,25,"accentPrimary",.08)
+            c.rect(695,163,50,50,"accentPrimary",1,true,25)
+            c.line(707,188,716,197,"accentPrimary",3);c.line(716,197,734,179,"accentPrimary",3)
+            c.text("Enhanced video saved",320,246,800,24,"textPrimary","center")
+            c.text("100% / Encoding finalized and output file committed",320,276,800,13,"accentPrimary","center")
+            c.rect(212,302,1016,98,"bgField",1,false,4)
+            c.text("Final output path / Shared output folder with Merge Videos",232,330,976,12)
+            c.text(d.outputPath,232,358,976,12,"textPrimary")
+            c.text("Source preserved; no file overwritten. H.264 video re-encoded; audio copied unless AAC selected.",232,383,976,12,"textMuted")
+            c.text(sizes,212,431,1016,13,"textPrimary")
+            c.text(string.format("%d frames completed / Source duration %s / File size %.2f MiB / Total time %s",frames,
+                duration>0 and sr_duration(duration) or "unknown",(tonumber(d.bytes) or 0)/1048576,sr_duration(elapsed)),212,459,1016,13)
+            c.text("Inference: "..inference.." / Encoder: "..encoder.." / Audio: "..audio,212,487,1016,12)
+            c.button("OPEN OUTPUT FOLDER","srOpenFolder",212,527,320,48,"accentPrimary",nil,nil,14)
+            c.button("PLAY RESULT","srPlayResult",560,527,320,48,"accentSecondary",nil,.16,14)
+            c.button("PROCESS AGAIN","srAgain",908,527,320,48,"accentSecondary",nil,nil,14)
+            -- 成功页不显示设计稿的失败/取消说明面板，仅展示真实收尾或操作警告。
+            if (d.taskError or "")~="" then c.text(d.taskError,180,650,1080,13,"stateWarning") end
+            if (d.operationError or "")~="" then c.text(d.operationError,180,680,1080,13,"stateError") end
+        else
+            local failed=phase=="failed"
+            local color=failed and "stateError" or "accentSecondary"
+            panel(128,480,color)
+            c.text(failed and "EXPORT FAILED" or "EXPORT CANCELLED",320,210,800,24,color,"center")
+            c.text("No completed output is available",320,246,800,13,"textSecondary","center")
+            c.rect(212,278,1016,180,"bgField")
+            c.text("Last stage: "..(d.stage or "unknown"),232,310,976,13)
+            c.text(d.taskError or d.error,232,346,976,13,color)
+            c.text("Temporary-file cleanup was attempted. Any cleanup failure is included in the diagnostic above.",232,390,976,12)
+            c.text("Use FULL DIAGNOSTICS to scroll and copy the complete error and any remaining temporary path.",232,426,976,12,"textMuted")
+            c.text(string.format("%d frames completed / Elapsed %s",frames,sr_duration(elapsed)),212,490,1016,13)
+            c.button("EDIT AND RETRY","srAgain",212,527,320,48,"accentSecondary",nil,nil,14)
+            c.button("BACK HOME","srBack",908,527,320,48,"accentPrimary",nil,nil,14)
+            c.text("Retry starts a new full task. Select CPU in configuration to retry without GPU acceleration.",180,650,1080,12,"textMuted")
+        end
+        c.button("FULL DIAGNOSTICS / AUDIO REPAIRS","srDetails",180,862,420,30,"accentSecondary")
+        c.text(d.audioRepairs,212,running and 770 or 730,1016,11,"stateWarning")
+        return c.finish()
+    end
+    c.text("Offline enhancement / Enhance each frame and save",320,92,800,13,"textSecondary","center")
+    c.rect(64,112,488,598,"bgPanel",1,false,6); c.rect(64,112,488,598,"accentPrimaryDim",.8,true,6)
+    c.text("01 / SOURCE VIDEO",88,145,280,13,"accentPrimary")
+    c.button("SELECT FILE","srChooseFile",410,126,118,30)
+    c.rect(88,172,440,220,"bgField")
+    if d.previewReady=="true" then
+        local ratio=(tonumber(d.width) or 1)/math.max(1,tonumber(d.height) or 1)
+        local pw=math.min(440,220*ratio); local ph=pw/ratio
+        c.add("image",88+(440-pw)/2,172+(220-ph)/2,pw,ph,{path="texture:srPreview"})
+    else c.text(d.path~="" and "Waiting for preview" or "Select one local video",88,286,440,14,"textMuted","center") end
+    c.text("Drop one local video here, or select a file to replace it",88,419,440,12,"textSecondary","center")
+    c.text(d.fileName,88,454,440,16,"textPrimary")
+    c.text(d.path,88,478,440,11,"textMuted")
+    c.line(88,494,528,494,"accentPrimaryDim")
+    c.text("Source size   "..(d.width or "0").." × "..(d.height or "0"),88,522,440,13)
+    c.text("Duration   "..(d.duration or "—"),88,550,440,13)
+    c.text(d.fps,88,578,440,12)
+    c.text(d.audio,88,612,440,12)
+    c.text(d.sourceStatus,88,646,440,11,"textMuted")
+    c.text(d.geometry,88,678,440,11,"textMuted")
+    c.text("Main video + default audio; no subtitles or attachments",88,679,440,12,"textMuted")
+    c.rect(576,112,800,598,"bgPanel",1,false,6); c.rect(576,112,800,598,"accentSecondary",.45,true,6)
+    c.text("02 / ENHANCEMENT MODEL",600,145,752,13,"accentSecondary")
+    for i,s in ipairs({"2","4"}) do
+        local x=600+(i-1)*384
+        if d["model"..s]=="true" then
+            c.button("Real-ESRGAN x"..s.."plus / Native "..s.."x","srSetModel",x,164,368,54,"accentSecondary",{value=s},d.scale==s and .18 or .04)
+        else
+            c.rect(x,164,368,54,"textMuted",.5,true)
+            c.text(s.."x MODEL NOT INSTALLED",x,196,368,13,"textMuted","center")
+        end
+    end
+    c.text("Intermediate size (read-only)  "..(d.intermediateSize or "—"),600,243,752,13,"accentSecondary")
+    c.line(600,261,1352,261,"accentSecondary",1,.4)
+    c.text("03 / OUTPUT RESOLUTION (independent of model scale)",600,288,752,13,"accentPrimary")
+    local modes={{"source","Keep source size (default)"},{"native","Native model size"},{"720p","720p · 1280 × 720"},{"1080p","1080p · 1920 × 1080"},{"4k","4K · 3840 × 2160"},{"custom","Custom dimensions"}}
+    for i,m in ipairs(modes) do
+        c.button(m[2],"srSetResolution",600+((i-1)%3)*256,302+math.floor((i-1)/3)*44,240,34,"accentPrimary",{value=m[1]},d.resolutionMode==m[1] and .2 or .02)
+    end
+    c.text("Custom W / H",600,410,150,12,"textMuted")
+    if d.resolutionMode=="custom" then
+        c.add("input",760,390,120,30,{id="srWidth",value=d.customWidth,action="srSetWidth",size=S(12),background="bgField",textColor="textPrimary"})
+        c.add("input",910,390,120,30,{id="srHeight",value=d.customHeight,action="srSetHeight",size=S(12),background="bgField",textColor="textPrimary"})
+    else c.text("Select Custom to edit; portrait sizes supported",760,410,580,12,"textMuted") end
+    c.text("Output canvas  "..(d.outputSize or "—").." / Keep aspect ratio; pad if needed",600,444,752,13,"textPrimary")
+    c.text("AI enhancement, then resize. Beyond the intermediate size, extra scaling is interpolation.",600,467,752,11,"textMuted")
+    c.line(600,486,1352,486,"accentSecondary",1,.4)
+    c.text("04 / PROCESSING AND ENCODING",600,513,752,13,"accentSecondary")
+    c.button(d.autoDeviceLabel or "Auto","srSetDevice",600,526,368,34,"accentSecondary",{value="auto"},d.device=="auto" and .18 or .02)
+    c.button("CPU (slow)","srSetDevice",984,526,368,34,"accentSecondary",{value="cpu"},d.device=="cpu" and .18 or .02)
+    c.text("Inference: not initialized; runtime not loaded",600,582,752,12)
+    c.text("Auto MP4/MKV / H.264 libx264 / CRF 18 / Software encoding",600,605,752,12)
+    c.button("Keep original audio / Auto MP4 or MKV","srSetAudio",600,622,368,30,"accentSecondary",{value="copy"},d.audioMode~="aac" and .18 or .02)
+    c.button("Convert audio to AAC / MP4","srSetAudio",984,622,368,30,"accentSecondary",{value="aac"},d.audioMode=="aac" and .18 or .02)
+    c.text("Offline processing may be slow. No promise of lossless restoration or authentic detail.",600,671,752,12,"textMuted")
+    c.rect(64,726,1312,74,"bgPanel"); c.rect(64,726,1312,74,"accentPrimaryDim",.7,true)
+    c.text("Output folder / Shared with Merge Videos",88,752,560,12,"accentPrimary")
+    c.text(d.outputDir,88,780,560,12,"textPrimary")
+    c.text("Planned filename / Never overwrite existing files",680,752,670,12)
+    c.text(d.outputName,680,780,670,12,"textPrimary")
+    c.text(d.status,64,830,1050,13,"stateWarning")
+    c.text(d.error,64,856,1050,12,"stateError")
+    if d.canStart=="true" then
+        c.button("START EXPORT","srStart",1140,820,236,48,"accentSecondary")
+    else
+        c.rect(1140,820,236,48,"textMuted",.4,true)
+        c.text("START EXPORT (unavailable)",1140,850,236,13,"textMuted","center")
+    end
+    return c.finish()
+end
+skin.surfaces.superResolution = { render = render_super_resolution }
 
 skin.surfaces.home.render = render_home
 skin.surfaces.player = skin.surfaces.player or {}

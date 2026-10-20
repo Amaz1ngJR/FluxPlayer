@@ -1,0 +1,52 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Video Super Resolution / Processing</title>
+  <desc>Processing layout reference; runtime follows this layout with live exporter status. Illustrative metrics only. Configuration locked. Cancel waits for worker cleanup. Unknown totals and ETA remain unknown until measurable. Finalizing remains below 100% until file commit succeeds.</desc>
+  <defs>
+    <radialGradient id="bg"><stop stop-color="#071B31"/><stop offset="1" stop-color="#02040E"/></radialGradient>
+    <linearGradient id="rail"><stop stop-color="#00E8FF" stop-opacity="0"/><stop offset=".3" stop-color="#00E8FF"/><stop offset=".7" stop-color="#A855FF"/><stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/></linearGradient>
+    <linearGradient id="progress"><stop stop-color="#00E8FF"/><stop offset="1" stop-color="#A855FF"/></linearGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <path d="M0 2H1440M0 898H1440" stroke="url(#rail)" stroke-width="2"/>
+  <g font-family="Arial, sans-serif">
+    <text x="720" y="70" text-anchor="middle" font-size="24" fill="#EAF8FF">VIDEO SUPER RESOLUTION</text>
+    <text x="720" y="97" text-anchor="middle" font-size="13" fill="#91ADCC">Offline enhancement / Processing / Configuration locked</text>
+    <rect x="180" y="132" width="1080" height="646" rx="6" fill="#070D22" stroke="#6336A4"/>
+    <path d="M204 134H1236" stroke="url(#rail)" stroke-width="2"/>
+    <text x="212" y="174" font-size="18" fill="#EAF8FF">Mountain_Trip.mp4</text>
+    <rect x="1052" y="151" width="176" height="30" rx="3" fill="#A855FF" fill-opacity=".12" stroke="#A855FF"/>
+    <text x="1140" y="171" text-anchor="middle" font-size="12" fill="#C9A6FF">ONE LOCAL TASK</text>
+    <text x="212" y="204" font-size="13" fill="#91ADCC">Source 1280 × 720 → Native 2x model 2560 × 1440 → Output 1280 × 720</text>
+    <path d="M212 226H1228" stroke="#6336A4" stroke-opacity=".5"/>
+    <g id="stage-indicator" font-size="13" text-anchor="middle">
+      <path d="M340 267H1100" stroke="#24384F" stroke-width="2"/>
+      <path d="M340 267H850" stroke="#00E8FF" stroke-width="2"/>
+      <circle cx="340" cy="267" r="7" fill="#00E8FF"/><circle cx="590" cy="267" r="7" fill="#00E8FF"/>
+      <circle cx="850" cy="267" r="10" fill="#A855FF"/><circle cx="1100" cy="267" r="7" fill="#24384F"/>
+      <text x="340" y="298" fill="#00E8FF">01 PROBED</text><text x="590" y="298" fill="#00E8FF">02 MODEL LOADED</text>
+      <text x="850" y="298" fill="#C9A6FF">03 ENHANCE / ENCODE</text><text x="1100" y="298" fill="#6F89A8">04 FINALIZE</text>
+    </g>
+    <text x="212" y="350" font-size="15" fill="#EAF8FF">Progress by source time</text>
+    <text x="1228" y="350" text-anchor="end" font-family="Consolas, monospace" font-size="30" fill="#00E8FF">40.0%</text>
+    <rect x="212" y="370" width="1016" height="14" rx="4" fill="#0A1230"/>
+    <rect x="212" y="370" width="406.4" height="14" rx="4" fill="url(#progress)"/>
+    <text x="212" y="411" font-size="12" fill="#91ADCC">Source time processed 24s / 1m 00s / Every frame enhanced; no dropped or original frames</text>
+    <g id="task-metrics">
+      <rect x="212" y="435" width="1016" height="88" rx="4" fill="#0A1230"/>
+      <g font-size="12" fill="#91ADCC"><text x="236" y="460">FRAMES COMPLETED</text><text x="490" y="460">PROCESSING RATE</text><text x="744" y="460">ELAPSED</text><text x="998" y="460">EST. REMAINING</text></g>
+      <g font-family="Consolas, monospace" font-size="20" fill="#EAF8FF"><text x="236" y="494">720 / ~1800</text><text x="490" y="494">2.0 fps</text><text x="744" y="494">6m 00s</text><text x="998" y="494">~9m 00s</text></g>
+    </g>
+    <text x="212" y="548" font-size="12" fill="#6F89A8">Source-relative speed 0.067x / Total frames and ETA are estimates. Slower than real time is normal.</text>
+    <path d="M212 568H1228" stroke="#6336A4" stroke-opacity=".5"/>
+    <text x="212" y="596" font-size="13" fill="#C9A6FF">Inference: CoreML EP (NeuralNetwork fast; may include CPU operators)</text>
+    <text x="212" y="623" font-size="13" fill="#91ADCC">Encoder: H.264 / libx264 / Audio: original AAC packets / MP4 / Source timing preserved</text>
+    <text x="212" y="657" font-size="12" fill="#91ADCC">Output folder: /Applications/FluxPlayer/Record/</text>
+    <text x="212" y="681" font-family="Consolas, monospace" font-size="12" fill="#6F89A8">Temporary file: FluxPlayer_SR_20261016_173000_a81f.part.mp4</text>
+    <rect x="212" y="707" width="1016" height="43" rx="3" fill="#A855FF" fill-opacity=".07"/>
+    <text x="228" y="734" font-size="12" fill="#C9A6FF">Encoding must finalize and the file must be committed before progress reaches 100% and PLAY RESULT is available.</text>
+    <text x="180" y="817" font-size="12" fill="#91ADCC">Cancellation waits for safe shutdown and temporary-file cleanup. The source remains unchanged.</text>
+    <text x="180" y="841" font-size="12" fill="#6F89A8">Input and settings are locked. Closing the page also requires cancellation and cleanup.</text>
+    <g id="cancel-task"><rect x="1040" y="800" width="220" height="48" rx="4" fill="#FF3B7A" fill-opacity=".08" stroke="#FF3B7A"/><text x="1150" y="830" text-anchor="middle" font-size="14" fill="#FF7AA5">CANCEL TASK</text></g>
+    <a href="mockup_super_resolution_result.svg"><text x="1260" y="878" text-anchor="end" font-size="11" fill="#6F89A8">Mockup navigation: completion / alternative states →</text></a>
+  </g>
+</svg>

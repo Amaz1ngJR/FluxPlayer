@@ -1164,3 +1164,36 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 
 - 通过 `LIBAVCODEC_VERSION_MAJOR` 宏自动适配 FFmpeg 4.x（channels）和 5.x+（ch_layout）API 差异
 - `swr_alloc_set_opts` / `swr_alloc_set_opts2` 自动选择
+
+## 离线视频超分
+
+首页“VIDEO SUPER RESOLUTION”进入独立工具页，两个内置 Lua 皮肤均支持。
+当前可选择/拖入一个本地视频、异步探测源信息及缩略图，设置原生 2x/4x 模型、
+独立输出分辨率、自动/CPU 执行偏好及音频策略，查看与合并共用的 `recordDir`。
+默认保留原音轨，按兼容性输出 MP4/MKV；仅显式选择时将音频转为 AAC。
+已接入逐帧 ORT 增强、H.264 导出与音轨处理；macOS ARM64、Windows x64 固定版本运行库随仓库分发，
+模型与运行库部署到发布资源目录。Windows x64 已完成构建、导出回归及速度优化前后的原始 RGB 一致性验证。
+最终文件采用不覆盖提交；提交失败时保留完整 `.part.mp4` / `.part.mkv` 并显示恢复路径，
+正常取消或处理失败仍清理不完整的临时文件。不要求输出目录支持硬链接。
+Windows 自动模式优先使用 DirectML（高性能显卡），初始化失败时回退 CPU，也可显式选择 CPU。
+离线超分解码沿用设置中的“硬件解码”开关，启动任务时保存开关状态：Windows 使用 D3D11VA，
+macOS 使用 VideoToolbox；设备或视频格式不支持时回退软件解码。超分设备的“自动/CPU”选项仅控制模型推理。
+硬件帧按原始位深读回 CPU 后进入现有色彩转换与 FP32 模型，不跳帧、不降低输入分辨率；
+此路径仍需 CPU/GPU 传输，并非全程零拷贝。实际解码后端可在完整诊断和日志中查看。
+Windows 需安装 Microsoft Visual C++ v14 x64 Redistributable；运行库来源和散列见
+`source/onnxruntime/README.md`。
+
+色彩兼容：BT.709/BT.601 SDR（含 10/12/16-bit 输入）沿用 swscale 快速路径；
+缺失的色彩标记优先按已有标记补齐，完全缺失时按 HD=BT.709、SD=BT.601、YUV 默认有限范围解释，
+并在状态和日志中显示推断。无法从无标记像素可靠判断原素材是否为 HDR。
+Windows 自带 FFmpeg 的 zscale/tonemap 用于 PQ/HLG HDR 色调映射和广色域转换，输出 BT.709 SDR；
+只在需要时启用，每任务复用滤镜链，在原分辨率转换后再超分。输出不保留 HDR。
+Dolby Vision 和缺少 PQ/HLG 标记的 HDR 元数据暂不支持；Mac 构建若无 avfilter 则仅走 SDR 路径。
+
+速度优化保留原始 FP32 权重、256/32 分块与逐帧推理，不使用 FP16、量化或跳帧。
+模型输出转 RGB24 使用 SSE2（其他平台用标量等价路径），与原生 `lroundf` 逐字节对照，
+包含取整边界、SIMD 尾部和非有限值检查。`FLUX_SR_REFERENCE_PACK=1` 可切回旧取整路径做诊断。
+Windows 自动模式按 DXGI 的高性能 GPU 偏好选择适配器，并在实际设备信息中显示 GPU 名称和 FP32。
+RTX 5060 Ti / 1080p→2x 单会话交替对照：原路径平均约 3.13 秒/帧，优化后约 2.88 秒/帧，
+吞吐提升约 8.5%，输出原始 RGB 完全一致。该结果来自确定性的合成纹理帧，不能代表所有视频或显卡。
+模型推理仍是主要瓶颈；未以降低画质换取速度。

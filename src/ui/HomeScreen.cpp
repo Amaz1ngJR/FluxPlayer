@@ -94,9 +94,10 @@ HomeScreenResult HomeScreen::run() {
         UiContext::beginFrame();
         renderUI();
 
-        if (fileSelected_ || mergeRequested_ || settingsRequested_) {
+        if (fileSelected_ || mergeRequested_ || superResolutionRequested_ || settingsRequested_) {
             result.mediaPath = fileSelected_ ? selectedFile_ : std::string{};
             result.openMerge = std::exchange(mergeRequested_, false);
+            result.openSuperResolution = std::exchange(superResolutionRequested_, false);
             result.openSettings = std::exchange(settingsRequested_, false);
             fileSelected_ = false;
             ImGui::EndFrame();
@@ -119,7 +120,7 @@ HomeScreenResult HomeScreen::run() {
     }
 
     result.shouldQuit = window->shouldClose() && result.mediaPath.empty() &&
-                        !result.openMerge && !result.openSettings;
+                        !result.openMerge && !result.openSuperResolution && !result.openSettings;
     return result;
 }
 
@@ -204,6 +205,8 @@ void HomeScreen::handleLuaAction(
         chooseLocalFile();
     } else if (action == "openSettings") {
         settingsRequested_ = true;
+    } else if (action == "openSuperResolution") {
+        superResolutionRequested_ = true;
     } else if (action == "openMerge") {
         mergeRequested_ = true;
     } else if (action == "playUrl") {

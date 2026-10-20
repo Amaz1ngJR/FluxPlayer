@@ -8,7 +8,7 @@ local skin = {
     description = "Lua-driven minimal HomeScreen example.",
     compatibility = {
         skinApi = 1,
-        surfaces = { "home", "opening", "player", "merge", "settings", "subtitle", "toast" },
+        surfaces = { "home", "opening", "player", "merge", "superResolution", "settings", "subtitle", "toast" },
     },
     roles = {
         background = {
@@ -279,6 +279,12 @@ local function render_home()
             height = 44,
             align = "center"
         },
+        ui.button {
+            text = "VIDEO SUPER RESOLUTION",
+            action = "openSuperResolution",
+            theme = "secondary",
+            width = math.min(360, width - 80), height = 42, align = "center"
+        },
         ui.input {
             id = "url",
             stateKey = "url",
@@ -354,6 +360,111 @@ local function render_opening()
     end
     return ui.container { layout = "absolute", width = width, height = height, table.unpack(children) }
 end
+
+-- 独立导出配置页面，保持最简皮肤风格；未接入后端时无可执行开始按钮。
+local function sr_duration(seconds)
+    local value=tonumber(seconds)
+    if not value or value~=value or value<0 or value==math.huge then return "unknown" end
+    local total=math.floor(value+0.5)
+    if total>=3600 then return string.format("%dh %02dm %02ds",total//3600,(total//60)%60,total%60) end
+    if total>=60 then return string.format("%dm %02ds",total//60,total%60) end
+    return string.format("%ds",total)
+end
+
+local function render_super_resolution()
+    local w,h=ui.getWindowSize()
+    local s=math.min(w/1440,h/900)
+    local ox,oy=(w-1440*s)/2,(h-900*s)/2
+    local d=(ui.getData("superResolution") or {})[1] or {}
+    local nodes={ui.rect{color="bgCanvas",width=w,height=h,absolute=true}}
+    local function add(kind,x,y,width,height,p)
+        p=p or {}; p.x=ox+x*s; p.y=oy+y*s; p.width=width*s; p.height=height*s; p.absolute=true
+        if p.size then p.size=p.size*s end
+        nodes[#nodes+1]=ui[kind](p)
+    end
+    local function text(value,x,y,width,color,size)
+        add("text",x,y,width,28,{content=value or "",color=color or "textPrimary",size=size or 15,ellipsis=true})
+    end
+    local function button(label,action,value,x,y,width,selected)
+        add("button",x,y,width,38,{text=label,action=action,payload={value=value},theme=selected and "primary" or "secondary",size=14})
+    end
+    text("VIDEO SUPER RESOLUTION",40,30,900,"textPrimary",28)
+    button("BACK HOME","srBack","",1210,30,190)
+    text("Offline enhancement / Enhance each frame and save",40,76,1200,"textMuted")
+    if d.phase and d.phase~="idle" then
+        text(string.upper(d.phase or "").." / "..(d.stage or ""),40,160,1340)
+        local elapsed=tonumber(d.elapsed) or 0
+        local frames=tonumber(d.frames) or 0
+        local progress=math.max(0,math.min(d.phase=="done" and 1 or .999,tonumber(d.progress) or 0))
+        local eta=d.running=="true" and d.phase=="processing" and progress>0 and progress<1 and elapsed>=10 and sr_duration(elapsed*(1-progress)/progress) or "unknown"
+        text(string.format("%.1f%% / %d frames / %.2f fps / %s elapsed / ETA %s",progress*100,frames,frames/math.max(1,elapsed),sr_duration(elapsed),eta),40,220,1340)
+        text((d.actualDevice or "").." / "..(d.encoder or ""),40,280,1340)
+        text(d.audioPolicy,40,320,1340)
+        text(d.error~="" and d.error or (d.outputPath~="" and d.outputPath or d.temporary),40,380,1340)
+        if d.running=="true" then
+            if d.phase~="cancelling" then button("CANCEL TASK","srCancel","",40,440,260) end
+        elseif d.phase=="done" then
+            button("PLAY RESULT","srPlayResult","",40,440,260)
+            button("OPEN OUTPUT FOLDER","srOpenFolder","",320,440,300)
+            button("PROCESS AGAIN","srAgain","",640,440,260)
+        else button("EDIT AND RETRY","srAgain","",40,440,260) end
+        text(d.audioPreflight,40,510,1340,"textMuted",13)
+        if d.phase=="audio_preflight" then text("Audio checked through "..sr_duration(d.audioCheckedSeconds).." / Model not loaded",40,550,1340) end
+        text(d.audioRepairs,40,590,1340,"textMuted",13)
+        text(d.audioMode=="aac" and "AAC conversion: overlap repair discards new overlapping samples; gaps are filled with silence." or
+            "Original audio packets preserved; no transcoding or sample repair.",40,630,1340,"textMuted",13)
+        button("FULL DIAGNOSTICS / COPY","srDetails","",40,690,380)
+        return ui.container{layout="absolute",width=w,height=h,table.unpack(nodes)}
+    end
+    button("SELECT FILE","srChooseFile","",40,126,460)
+    add("rect",40,182,460,240,{color="bgPanel"})
+    if d.previewReady=="true" then
+        local ratio=(tonumber(d.width) or 1)/math.max(1,tonumber(d.height) or 1)
+        local pw=math.min(460,240*ratio); local ph=pw/ratio
+        add("image",40+(460-pw)/2,182+(240-ph)/2,pw,ph,{path="texture:srPreview"})
+    else text("Select one local video",66,286,410,"textMuted") end
+    text(d.fileName,40,444,460)
+    text(d.path,40,480,460,"textMuted",12)
+    text((d.width or "0").." × "..(d.height or "0").." / "..(d.duration or "—"),40,516,460)
+    text(d.fps,40,552,460)
+    text(d.audio,40,588,460)
+    text(d.sourceStatus,40,632,460,"textMuted",12)
+    text(d.geometry,40,662,460,"textMuted",11)
+    text("02 / ENHANCEMENT MODEL",560,126,820)
+    for i,value in ipairs({"2","4"}) do
+        if d["model"..value]=="true" then
+            button("Real-ESRGAN x"..value.."plus / Native "..value.."x","srSetModel",value,560+(i-1)*420,164,400,d.scale==value)
+        else text(value.."x MODEL NOT INSTALLED",560+(i-1)*420,170,400,"textMuted") end
+    end
+    text("Intermediate size (read-only)  "..(d.intermediateSize or "—"),560,226,820)
+    text("03 / OUTPUT RESOLUTION (independent of model scale)",560,270,820)
+    local modes={{"source","Keep source size (default)"},{"native","Native model size"},{"720p","720p · 1280 × 720"},{"1080p","1080p · 1920 × 1080"},{"4k","4K · 3840 × 2160"},{"custom","Custom dimensions"}}
+    for i,m in ipairs(modes) do
+        button(m[2],"srSetResolution",m[1],560+((i-1)%3)*280,310+math.floor((i-1)/3)*48,260,d.resolutionMode==m[1])
+    end
+    if d.resolutionMode=="custom" then
+        add("input",560,412,200,36,{id="srWidth",value=d.customWidth,action="srSetWidth",size=14})
+        add("input",800,412,200,36,{id="srHeight",value=d.customHeight,action="srSetHeight",size=14})
+    end
+    text("Output canvas  "..(d.outputSize or "—").." / Keep aspect ratio; pad if needed",560,466,820)
+    text("AI enhancement, then resize. Beyond the intermediate size, extra scaling is interpolation.",560,502,820,"textMuted",13)
+    button(d.autoDeviceLabel or "Auto","srSetDevice","auto",560,550,400,d.device=="auto")
+    button("CPU (slow)","srSetDevice","cpu",980,550,400,d.device=="cpu")
+    text("Auto MP4/MKV / H.264 libx264 / CRF 18 / Software encoding",560,610,820,"textMuted",13)
+    button("Keep original / Auto MP4 or MKV","srSetAudio","copy",560,642,400,d.audioMode~="aac")
+    button("Convert to AAC / MP4","srSetAudio","aac",980,642,400,d.audioMode=="aac")
+    text("Output folder / Shared with Merge Videos: "..(d.outputDir or ""),40,708,1340)
+    text(d.outputName,40,744,1340,"textMuted",13)
+    text(d.status,40,800,1040,"textPrimary",14)
+    text(d.error,40,840,1040,"textPrimary",13)
+    if d.canStart=="true" then button("START EXPORT","srStart","",1120,800,260,true)
+    else
+        add("rect",1120,800,260,48,{color="bgPanel"})
+        text("START EXPORT (unavailable)",1130,812,240,"textMuted",13)
+    end
+    return ui.container{layout="absolute",width=w,height=h,table.unpack(nodes)}
+end
+skin.surfaces.superResolution = { render = render_super_resolution }
 
 skin.surfaces.home.render = render_home
 

@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.9.1 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.9.2 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -206,6 +206,10 @@ file(GLOB_RECURSE FLUXPLAYER_SKIN_ASSETS CONFIGURE_DEPENDS
     "source/UI/skins/*.svg"
 )
 
+# 离线 ORT 按资源绝对路径动态加载，不链接到基础播放器；源资源变化触发部署。
+file(GLOB_RECURSE FLUXPLAYER_ORT_ASSETS CONFIGURE_DEPENDS "source/onnxruntime/*")
+list(APPEND FLUXPLAYER_SKIN_ASSETS ${FLUXPLAYER_ORT_ASSETS})
+
 # CMake 的缓存、对象文件和静态库保留在 -B 指定的 build/cmake 中；
 # 只有可直接运行的主程序进入共享的 build/bin。xmake 也把主程序及运行时依赖
 # 输出到同一目录，因此切换构建系统后可以直接运行同一条路径。
@@ -260,6 +264,10 @@ target_link_libraries(FluxPlayer PRIVATE imgui tinyfiledialogs lua_static)
 target_include_directories(FluxPlayer PRIVATE ${FFMPEG_ROOT}/include)
 target_link_directories(FluxPlayer PRIVATE ${FFMPEG_ROOT}/lib)
 target_link_libraries(FluxPlayer PRIVATE avformat avcodec avutil swscale swresample)
+if(WIN32 OR EXISTS "${FFMPEG_ROOT}/lib/libavfilter.dylib")
+    target_link_libraries(FluxPlayer PRIVATE avfilter)
+    target_compile_definitions(FluxPlayer PRIVATE FLUXPLAYER_HAVE_SR_COLOR_FILTERS)
+endif()
 
 # 平台相关的系统库链接
 if(APPLE)
@@ -479,6 +487,9 @@ install(FILES source/pic2.png DESTINATION resources)
 # video_01.mp4 是启动真实解码测速样片，HardwareInfo 通过
 # Config::getResourcePath("video/video_01.mp4") 查找。
 install(FILES source/video/video_01.mp4 DESTINATION resources/video)
+# 离线超分按资源路径动态加载；模型和许可不能只留在开发期 source 副本中。
+install(DIRECTORY source/models/realesrgan/ DESTINATION resources/models/realesrgan)
+install(DIRECTORY source/onnxruntime/ DESTINATION resources/onnxruntime)
 # 安装阶段同步把单文件 Lua 皮肤包放到 resources/skins。
 install(DIRECTORY source/UI/skins/cyberpunk-neon/
     DESTINATION resources/skins/cyberpunk-neon)
@@ -505,7 +516,10 @@ if(WIN32)
             cmake_policy(SET CMP0207 NEW)
         endif()
         file(GET_RUNTIME_DEPENDENCIES
-            EXECUTABLES \"\${CMAKE_INSTALL_PREFIX}/FluxPlayer.exe\"
+            # Analyze the complete POST_BUILD DLL directory. A partially populated
+            # staging directory can resolve avfilter from the source tree and
+            # avcodec from staging, producing false conflicting-dependency paths.
+            EXECUTABLES \"$<TARGET_FILE:FluxPlayer>\"
             RESOLVED_DEPENDENCIES_VAR   _r_deps
             UNRESOLVED_DEPENDENCIES_VAR _u_deps
             DIRECTORIES

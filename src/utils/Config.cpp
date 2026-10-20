@@ -90,16 +90,15 @@ std::string Config::getResourcePath(const std::string& filename) {
         }
     }
 #elif defined(_WIN32)
-    char exePath[MAX_PATH];
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-    std::string dir(exePath);
-    auto pos = dir.rfind('\\');
-    if (pos != std::string::npos) {
-        std::string base = dir.substr(0, pos);
-        std::string resPath = base + "\\resources\\" + filename;
-        if (GetFileAttributesA(resPath.c_str()) != INVALID_FILE_ATTRIBUTES) return resPath;
-        std::string srcPath = base + "\\source\\" + filename;
-        if (GetFileAttributesA(srcPath.c_str()) != INVALID_FILE_ATTRIBUTES) return srcPath;
+    wchar_t exePath[32768];
+    const DWORD length = GetModuleFileNameW(nullptr, exePath, 32768);
+    if (length > 0 && length < 32768) {
+        const auto base = std::filesystem::path(exePath).parent_path();
+        for (const auto* directory : {L"resources", L"source"}) {
+            const auto candidate = base / directory / std::filesystem::u8path(filename);
+            std::error_code ec;
+            if (std::filesystem::exists(candidate, ec)) return candidate.u8string();
+        }
     }
 #else
     char exePath[PATH_MAX];

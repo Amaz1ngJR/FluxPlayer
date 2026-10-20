@@ -1,0 +1,86 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>FluxPlayer / Video Super Resolution / Configuration</title>
+  <desc>Source values illustrate a selected file, not verified export eligibility. Default: native 2x model and keep source output size. Start is enabled when basic configuration is ready; worker validates the complete input contract before exporting. Source path, dimensions and installed model state come from the application.</desc>
+  <defs>
+    <radialGradient id="bg"><stop stop-color="#071B31"/><stop offset="1" stop-color="#02040E"/></radialGradient>
+    <linearGradient id="rail"><stop stop-color="#00E8FF" stop-opacity="0"/><stop offset=".3" stop-color="#00E8FF"/><stop offset=".7" stop-color="#A855FF"/><stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/></linearGradient>
+    <linearGradient id="scene" x2="1" y2="1"><stop stop-color="#173650"/><stop offset="1" stop-color="#16112F"/></linearGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <path d="M0 2H1440M0 898H1440" stroke="url(#rail)" stroke-width="2"/>
+  <g font-family="Arial, sans-serif">
+    <a href="mockup_home.svg"><rect x="64" y="42" width="124" height="36" rx="3" fill="#070D22" stroke="#136C8F"/><text x="126" y="65" text-anchor="middle" font-size="12" fill="#00E8FF">BACK HOME</text></a>
+    <text x="720" y="57" text-anchor="middle" font-size="24" fill="#EAF8FF">VIDEO SUPER RESOLUTION</text>
+    <text x="720" y="82" text-anchor="middle" font-size="13" fill="#91ADCC">Offline enhancement / Enhance each frame and save</text>
+    <g id="source-panel">
+      <rect x="64" y="112" width="488" height="598" rx="6" fill="#070D22" stroke="#136C8F"/>
+      <text x="88" y="145" font-size="13" fill="#00E8FF">01 / SOURCE VIDEO</text>
+      <rect x="410" y="126" width="118" height="30" rx="3" fill="#061329" stroke="#00E8FF" stroke-opacity=".6"/>
+      <text x="469" y="146" text-anchor="middle" font-size="12" fill="#00E8FF">SELECT FILE</text>
+      <rect x="88" y="172" width="440" height="220" rx="4" fill="url(#scene)"/>
+      <path d="M88 360L194 254L277 320L371 222L528 360V392H88Z" fill="#21516A" fill-opacity=".65"/>
+      <path d="M88 377L237 310L332 367L450 288L528 350V392H88Z" fill="#111F37"/>
+      <circle cx="431" cy="220" r="18" fill="#A855FF" fill-opacity=".35"/>
+      <text x="308" y="419" text-anchor="middle" font-size="12" fill="#91ADCC">Drop one local video here, or select a file to replace it</text>
+      <text x="88" y="454" font-size="16" fill="#EAF8FF">Mountain_Trip.mp4</text>
+      <text x="88" y="478" font-size="11" fill="#6F89A8">/Users/demo/Movies/Mountain_Trip.mp4</text>
+      <path d="M88 494H528" stroke="#136C8F" stroke-opacity=".5"/>
+      <g font-size="13" fill="#D0E8F8">
+        <text x="88" y="522">Source size   1280 × 720</text>
+        <text x="88" y="550">Duration   60 sec</text>
+        <text x="88" y="578" font-size="12">30.00 fps (average; VFR not verified)</text>
+        <text x="88" y="612" font-size="12">1 audio track(s); keep default track</text>
+      </g>
+      <text x="88" y="646" font-size="11" fill="#6F89A8">Export eligibility not yet verified</text>
+      <text x="88" y="679" font-size="12" fill="#6F89A8">SAR 1:1 / Dimensions before rotation</text>
+    </g>
+    <g id="enhancement-settings">
+      <rect x="576" y="112" width="800" height="598" rx="6" fill="#070D22" stroke="#6336A4"/>
+      <text x="600" y="145" font-size="13" fill="#A855FF">02 / ENHANCEMENT MODEL</text>
+      <rect x="600" y="164" width="368" height="54" rx="4" fill="#A855FF" fill-opacity=".18" stroke="#A855FF"/>
+      <text x="784" y="195" text-anchor="middle" font-size="12" fill="#A855FF">Real-ESRGAN x2plus / Native 2x</text>
+      <rect x="984" y="164" width="368" height="54" rx="4" fill="#A855FF" fill-opacity=".04" stroke="#A855FF" stroke-opacity=".68"/>
+      <text x="1168" y="195" text-anchor="middle" font-size="12" fill="#A855FF">Real-ESRGAN x4plus / Native 4x</text>
+      <text x="600" y="243" font-size="13" fill="#A855FF">Intermediate size (read-only)  2560 × 1440</text>
+      <path d="M600 261H1352" stroke="#6336A4" stroke-opacity=".6"/>
+      <text x="600" y="288" font-size="13" fill="#00E8FF">03 / OUTPUT RESOLUTION (independent of model scale)</text>
+      <g font-size="12" text-anchor="middle">
+        <rect x="600" y="302" width="240" height="34" rx="3" fill="#00E8FF" fill-opacity=".2" stroke="#00E8FF"/><text x="720" y="324" fill="#00E8FF">Keep source size (default)</text>
+        <rect x="856" y="302" width="240" height="34" rx="3" fill="#0A1230" stroke="#136C8F"/><text x="976" y="324" fill="#00E8FF">Native model size</text>
+        <rect x="1112" y="302" width="240" height="34" rx="3" fill="#0A1230" stroke="#136C8F"/><text x="1232" y="324" fill="#00E8FF">720p · 1280 × 720</text>
+        <rect x="600" y="346" width="240" height="34" rx="3" fill="#0A1230" stroke="#136C8F"/><text x="720" y="368" fill="#00E8FF">1080p · 1920 × 1080</text>
+        <rect x="856" y="346" width="240" height="34" rx="3" fill="#0A1230" stroke="#136C8F"/><text x="976" y="368" fill="#00E8FF">4K · 3840 × 2160</text>
+        <rect x="1112" y="346" width="240" height="34" rx="3" fill="#0A1230" stroke="#136C8F"/><text x="1232" y="368" fill="#00E8FF">Custom dimensions</text>
+      </g>
+      <!-- Selecting Custom reveals width/height inputs at x=760/910, y=390, 120x30. -->
+      <text x="600" y="410" font-size="12" fill="#6F89A8">Custom W / H</text>
+      <text x="760" y="410" font-size="12" fill="#6F89A8">Select Custom to edit; portrait sizes supported</text>
+      <text x="600" y="444" font-size="13" fill="#EAF8FF">Output canvas  1280 × 720 / Keep aspect ratio; pad if needed</text>
+      <text x="600" y="467" font-size="11" fill="#6F89A8">AI enhancement, then resize. Beyond the intermediate size, extra scaling is interpolation.</text>
+      <path d="M600 486H1352" stroke="#6336A4" stroke-opacity=".6"/>
+      <text x="600" y="513" font-size="13" fill="#A855FF">04 / PROCESSING AND ENCODING</text>
+      <rect x="600" y="526" width="368" height="34" rx="3" fill="#A855FF" fill-opacity=".18" stroke="#6336A4"/>
+      <text x="784" y="548" text-anchor="middle" font-size="12" fill="#A855FF">Auto (prefer CoreML)</text>
+      <rect x="984" y="526" width="368" height="34" rx="3" fill="#0A1230" stroke="#6336A4"/>
+      <text x="1168" y="548" text-anchor="middle" font-size="12" fill="#A855FF">CPU (slow)</text>
+      <text x="600" y="582" font-size="12" fill="#D0E8F8">Inference: not initialized; runtime not loaded</text>
+      <text x="600" y="605" font-size="12" fill="#D0E8F8">Auto MP4/MKV / H.264 libx264 / CRF 18 / Software encoding</text>
+      <rect x="600" y="622" width="368" height="30" rx="3" fill="#A855FF" fill-opacity=".18" stroke="#6336A4"/>
+      <text x="784" y="642" text-anchor="middle" font-size="12" fill="#A855FF">Keep original audio / Auto MP4 or MKV</text>
+      <rect x="984" y="622" width="368" height="30" rx="3" fill="#0A1230" stroke="#6336A4"/>
+      <text x="1168" y="642" text-anchor="middle" font-size="12" fill="#A855FF">Convert audio to AAC / MP4</text>
+      <text x="600" y="671" font-size="12" fill="#6F89A8">Offline processing may be slow. No promise of lossless restoration or authentic detail.</text>
+    </g>
+    <g id="output-destination">
+      <rect x="64" y="726" width="1312" height="74" rx="4" fill="#070D22" stroke="#136C8F"/>
+      <text x="88" y="752" font-size="12" fill="#00E8FF">Output folder / Shared with Merge Videos</text>
+      <text x="88" y="780" font-size="12" fill="#EAF8FF">/Applications/FluxPlayer/Record/</text>
+      <text x="680" y="752" font-size="12" fill="#D0E8F8">Planned filename / Never overwrite existing files</text>
+      <text x="680" y="780" font-size="12" fill="#EAF8FF">FluxPlayer_SR_&lt;timestamp&gt;_&lt;task-id&gt;.(mp4/mkv)</text>
+    </g>
+    <text x="64" y="830" font-size="13" fill="#FFB84D">8-bit BT.709/601 SDR; unknown color tags rejected. Extra tracks/subtitles/chapters are not copied.</text>
+    <!-- Runtime validation errors appear at (64,856); no placeholder error in the default state. -->
+    <rect x="1140" y="820" width="236" height="48" rx="4" stroke="#6F89A8" stroke-opacity=".4"/>
+    <text x="1258" y="850" text-anchor="middle" font-size="13" fill="#6F89A8">START EXPORT</text>
+  </g>
+</svg>

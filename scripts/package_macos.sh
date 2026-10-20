@@ -33,15 +33,21 @@ APP_BUNDLE="$BIN_DIR/$APP_NAME.app"
 DMG_OUT="$ROOT/dist/$APP_NAME-$VERSION.dmg"
 FFMPEG_LIB_DIR="$ROOT/third_party/ffmpeg-macos/lib"
 YTDLP="$ROOT/third_party/yt-dlp/yt-dlp_macos"
+ORT_LIBRARY="$ROOT/source/onnxruntime/macos-arm64/libonnxruntime.1.23.2.dylib"
 
 for required in "$FFMPEG_LIB_DIR/libavformat.dylib" "$YTDLP" \
     "$ROOT/source/pic2.png" "$ROOT/source/video/video_01.mp4" \
-    "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua"; do
+    "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua" \
+    "$ROOT/source/models/realesrgan/realesrgan-x2plus.onnx" \
+    "$ROOT/source/models/realesrgan/realesrgan-x4plus.onnx" "$ORT_LIBRARY"; do
     if [ ! -f "$required" ]; then
         echo "Missing packaging input: $required" >&2
         exit 1
     fi
 done
+
+# 固定发行运行库的来源/散列；不能将同名的本机自编译库混入安装包。
+printf '%s  %s\n' 'd306d2bc768540766c7ed8a1e0ff05d2870c77a934ebeee4a7bafa1b732ef299' "$ORT_LIBRARY" | shasum -a 256 -c -
 
 # ── 1. CMake 构建（Release 模式）──────────────────────────────────────────────
 cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
@@ -72,6 +78,11 @@ cp "$ROOT/source/pic2.png" "$APP_BUNDLE/Contents/Resources/pic2.png"
 mkdir -p "$APP_BUNDLE/Contents/Resources/video"
 cp "$ROOT/source/video/video_01.mp4" "$APP_BUNDLE/Contents/Resources/video/video_01.mp4"
 
+# 离线超分按 Resources 下的固定路径查找模型及动态运行库，不依赖开发目录。
+mkdir -p "$APP_BUNDLE/Contents/Resources/models"
+cp -R "$ROOT/source/models/realesrgan" "$APP_BUNDLE/Contents/Resources/models/"
+cp -R "$ROOT/source/onnxruntime" "$APP_BUNDLE/Contents/Resources/"
+
 # 皮肤包：Config::getResourcePath("skins") 在 macOS 优先解析到 ../Resources/skins，
 # 单文件 Lua 皮肤是唯一运行时入口；保留目录内 SVG 预览和设计稿。
 mkdir -p "$APP_BUNDLE/Contents/Resources/skins/cyberpunk-neon"
@@ -86,12 +97,18 @@ cp -R "$ROOT/source/UI/skins/minimal-lua/." \
 cp -R "$FFMPEG_LIB_DIR/." "$APP_BUNDLE/Contents/MacOS/"
 
 # 发布前检查每个 Mach-O 引用：系统库允许外链，其他依赖必须已在包内。
-for binary in "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"*.dylib; do
+for binary in "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"*.dylib \
+    "$APP_BUNDLE/Contents/Resources/onnxruntime/macos-arm64/"*.dylib; do
     [ -e "$binary" ] || { echo "Broken bundled library: $binary" >&2; exit 1; }
     otool -L "$binary" | awk 'NR > 1 { print $1 }' | while IFS= read -r dependency; do
         case "$dependency" in
             @loader_path/*|@executable_path/*)
-                [ -e "$APP_BUNDLE/Contents/MacOS/${dependency#*/}" ] || {
+                if [[ "$dependency" == @loader_path/* ]]; then
+                    dependency_path="$(dirname "$binary")/${dependency#*/}"
+                else
+                    dependency_path="$APP_BUNDLE/Contents/MacOS/${dependency#*/}"
+                fi
+                [ -e "$dependency_path" ] || {
                     echo "Missing dependency for $binary: $dependency" >&2
                     exit 1
                 }

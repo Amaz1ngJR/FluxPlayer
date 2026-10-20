@@ -130,10 +130,24 @@
   <text x="448" y="313" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#00E8FF" letter-spacing="2">&gt;  OPEN LOCAL FILE</text>
   <text x="440" y="352" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#6F89A8">or drag &amp; drop a file here</text>
 
-  <!-- MERGE VIDEOS button -->
-  <circle cx="162" cy="389" r="4" fill="#A855FF" opacity="0.85"/>
-  <rect x="150" y="376" width="596" height="52" rx="3" fill="#0C0820" stroke="#A855FF" stroke-width="1.5"/>
-  <text x="440" y="407" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#A855FF" letter-spacing="2">+  MERGE VIDEOS</text>
+  <!-- Peer tool routes: openMerge / openSuperResolution. SVG navigation previews only. -->
+  <!-- Each tool shows its own corner dot only while hovered. -->
+  <style>
+    #offline-tools .hover-dot { opacity: 0; pointer-events: none; }
+    #offline-tools a:hover .hover-dot { opacity: .85; }
+  </style>
+  <g id="offline-tools" font-family="Consolas,monospace">
+    <a href="mockup_merge.svg" aria-label="Merge Videos">
+      <rect x="150" y="376" width="290" height="52" rx="3" fill="#0C0820" stroke="#A855FF" stroke-width="1.5"/>
+      <text x="295" y="407" text-anchor="middle" font-size="13" fill="#A855FF">+ MERGE VIDEOS</text>
+      <circle class="hover-dot" cx="163" cy="389" r="4" fill="#A855FF"/>
+    </a>
+    <a href="mockup_super_resolution.svg" aria-label="Video Super Resolution">
+      <rect x="456" y="376" width="290" height="52" rx="3" fill="#0C0820" stroke="#A855FF" stroke-width="1.5"/>
+      <text x="601" y="407" text-anchor="middle" font-size="13" fill="#A855FF">VIDEO SUPER RESOLUTION</text>
+      <circle class="hover-dot" cx="469" cy="389" r="4" fill="#A855FF"/>
+    </a>
+  </g>
 
   <!-- Section divider inside panel -->
   <path d="M168 450H712" stroke="#136C8F" stroke-opacity="0.50"/>
@@ -169,29 +183,29 @@
   <!-- Hardware info content -->
   <g font-family="Consolas,monospace" font-size="10">
     <!-- Line 1: Decoder -->
-    <text x="164" y="660" fill="#7792B2">解码器：</text>
+    <text x="164" y="660" fill="#7792B2">Decoder:</text>
     <text x="240" y="660" fill="#00E8FF">H.264/H.265 VideoToolbox</text>
     <circle cx="530" cy="656" r="2.5" fill="#00FF88"/>
-    <text x="540" y="660" fill="#00FF88" font-size="9">已启用</text>
+    <text x="540" y="660" fill="#00FF88" font-size="9">Enabled</text>
 
     <!-- Line 2: Hardware Device -->
-    <text x="164" y="680" fill="#7792B2">硬件设备：</text>
+    <text x="164" y="680" fill="#7792B2">Device:</text>
     <text x="240" y="680" fill="#A855FF">Apple M1 (VideoToolbox)</text>
 
     <!-- Line 3: Performance Tier -->
-    <text x="164" y="700" fill="#7792B2">性能档位：</text>
-    <text x="240" y="700" fill="#EAF8FF">高性能</text>
+    <text x="164" y="700" fill="#7792B2">Tier:</text>
+    <text x="240" y="700" fill="#EAF8FF">High</text>
     <rect x="330" y="692" width="80" height="12" rx="2" fill="#00E8FF" fill-opacity="0.15"/>
     <rect x="330" y="692" width="64" height="12" rx="2" fill="#00E8FF" fill-opacity="0.45"/>
     <text x="370" y="701" text-anchor="middle" fill="#EAF8FF" font-size="9">80%</text>
 
     <!-- Line 4: Max Speed Support -->
-    <text x="164" y="720" fill="#7792B2">播放倍数：</text>
+    <text x="164" y="720" fill="#7792B2">Speed:</text>
     <text x="240" y="720" fill="#00E8FF">1080p → 8x</text>
     <text x="340" y="720" fill="#5A7A94">|</text>
     <text x="360" y="720" fill="#A855FF">4K → 4x</text>
     <circle cx="450" cy="716" r="1.5" fill="#00E8FF" opacity="0.5"/>
-    <text x="458" y="720" fill="#5A7A94" font-size="9">支持高倍数播放</text>
+    <text x="458" y="720" fill="#5A7A94" font-size="9">High-speed playback</text>
   </g>
 
   <!-- Bottom info inside left panel -->
@@ -222,7 +236,7 @@
   <path d="M898 296H1312" stroke="#2A3E54"/>
 
   <text x="898" y="318" font-family="Consolas,monospace" font-size="9" fill="#5A7A94" letter-spacing="1">02</text>
-  <text x="918" y="318" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">&gt; [bilibili] 编曲教程 第三季</text>
+  <text x="918" y="318" font-family="Consolas,monospace" font-size="12" fill="#D0E8F8">[bilibili] Music Tutorial S3</text>
   <text x="918" y="336" font-family="Consolas,monospace" font-size="10" fill="#5A7A94">45:22  ·  bilibili</text>
   <text x="1322" y="318" text-anchor="end" font-family="Consolas,monospace" font-size="11" fill="#FF3B7A" opacity="0.72">×</text>
   <path d="M898 348H1312" stroke="#2A3E54"/>

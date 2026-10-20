@@ -1,0 +1,49 @@
+<svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Video Super Resolution / Completed and Alternative States</title>
+  <desc>Result layout reference; runtime follows this layout with real committed output. Success requires drain, trailer, flush, close and exclusive final file commit. PLAY RESULT explicitly opens the final file in the existing player. Failed/cancelled tasks never expose partial output as complete. Values are illustrative.</desc>
+  <defs>
+    <radialGradient id="bg"><stop stop-color="#071B31"/><stop offset="1" stop-color="#02040E"/></radialGradient>
+    <linearGradient id="rail"><stop stop-color="#00E8FF" stop-opacity="0"/><stop offset=".3" stop-color="#00E8FF"/><stop offset=".7" stop-color="#A855FF"/><stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/></linearGradient>
+  </defs>
+  <rect width="1440" height="900" fill="url(#bg)"/>
+  <path d="M0 2H1440M0 898H1440" stroke="url(#rail)" stroke-width="2"/>
+  <g font-family="Arial, sans-serif">
+    <a href="mockup_home.svg"><rect x="64" y="42" width="124" height="36" rx="3" fill="#070D22" stroke="#136C8F"/><text x="126" y="65" text-anchor="middle" font-size="12" fill="#00E8FF">BACK HOME</text></a>
+    <text x="720" y="66" text-anchor="middle" font-size="24" fill="#EAF8FF">VIDEO SUPER RESOLUTION</text>
+    <rect x="180" y="128" width="1080" height="480" rx="6" fill="#070D22" stroke="#136C8F"/>
+    <circle cx="720" cy="188" r="25" fill="#00E8FF" fill-opacity=".08" stroke="#00E8FF"/>
+    <path d="M707 188L716 197L734 179" stroke="#00E8FF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="720" y="246" text-anchor="middle" font-size="24" fill="#EAF8FF">Enhanced video saved</text>
+    <text x="720" y="276" text-anchor="middle" font-size="13" fill="#00E8FF">100% / Encoding finalized and output file committed</text>
+    <rect x="212" y="302" width="1016" height="98" rx="4" fill="#0A1230"/>
+    <text x="232" y="330" font-size="12" fill="#91ADCC">Final output path / Shared output folder with Merge Videos</text>
+    <text x="232" y="358" font-family="Consolas, monospace" font-size="12" fill="#EAF8FF">/Applications/FluxPlayer/Record/FluxPlayer_SR_20261016_173000_a81f.mp4</text>
+    <text x="232" y="383" font-size="12" fill="#6F89A8">Source preserved; no file overwritten. H.264 video re-encoded; audio copied unless AAC selected.</text>
+    <text x="212" y="431" font-size="13" fill="#EAF8FF">1280 × 720 → Native 2x: 2560 × 1440 → Output: 1280 × 720</text>
+    <text x="212" y="459" font-size="13" fill="#91ADCC">1800 frames completed / Duration 1m 00s / File size 18.6 MiB / Total time 15m 08s</text>
+    <text x="212" y="487" font-size="13" fill="#91ADCC">Inference: CoreML EP (NeuralNetwork fast; may include CPU operators) / Encoder: H.264 libx264 / Audio: original AAC packets / MP4</text>
+    <g id="result-actions" text-anchor="middle" font-size="14">
+      <rect x="212" y="527" width="320" height="48" rx="4" fill="#061329" stroke="#00E8FF"/><text x="372" y="557" fill="#00E8FF">OPEN OUTPUT FOLDER</text>
+      <rect x="560" y="527" width="320" height="48" rx="4" fill="#A855FF" fill-opacity=".16" stroke="#A855FF"/><text x="720" y="557" fill="#EAF8FF">PLAY RESULT</text>
+      <a href="mockup_super_resolution.svg"><rect x="908" y="527" width="320" height="48" rx="4" fill="#0A1230" stroke="#6336A4"/><text x="1068" y="557" fill="#C9A6FF">PROCESS AGAIN</text></a>
+    </g>
+    <!-- Alternative-state notes are not active result panels. -->
+    <g id="alternative-state-spec">
+      <text x="180" y="650" font-size="12" fill="#6F89A8">Alternative-state specifications (not shown alongside a successful result)</text>
+      <rect x="180" y="668" width="524" height="170" rx="4" fill="#070D22" stroke="#FF3B7A" stroke-opacity=".45"/>
+      <text x="200" y="695" font-size="14" fill="#FF7AA5">FAILED / UNSUPPORTED CONFIGURATION</text>
+      <text x="200" y="721" font-size="12" fill="#91ADCC">Examples: intermediate size limit, encoder limit, disk write failure.</text>
+      <text x="200" y="745" font-size="12" fill="#91ADCC">Show failed stage, specific reason and temporary-file cleanup status.</text>
+      <text x="200" y="769" font-size="12" fill="#91ADCC">Actions: edit and retry / restart on CPU / back home.</text>
+      <text x="200" y="793" font-size="12" fill="#6F89A8">No PLAY RESULT; never change model, resize or skip frames silently.</text>
+      <text x="200" y="817" font-size="12" fill="#6F89A8">Runtime EP failure ends the task. CPU retry starts a new full task.</text>
+      <rect x="736" y="668" width="524" height="170" rx="4" fill="#070D22" stroke="#6336A4"/>
+      <text x="756" y="695" font-size="14" fill="#C9A6FF">CANCELLING → CANCELLED</text>
+      <text x="756" y="721" font-size="12" fill="#91ADCC">Cancelling: wait for safe worker shutdown; disable repeated actions.</text>
+      <text x="756" y="745" font-size="12" fill="#91ADCC">Cancelled: show cleanup status; allow reconfiguration or return.</text>
+      <text x="756" y="769" font-size="12" fill="#91ADCC">If cleanup fails, show the remaining temporary path, not a result.</text>
+      <text x="756" y="793" font-size="12" fill="#6F89A8">No pause / resume or recovery from partially processed output.</text>
+      <text x="756" y="817" font-size="12" fill="#6F89A8">Finalizing is still in progress. Show 100% only after successful commit.</text>
+    </g>
+  </g>
+</svg>

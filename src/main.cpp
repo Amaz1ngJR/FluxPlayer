@@ -14,6 +14,9 @@
 #include "FluxPlayer/ui/Controller.h"
 #include "FluxPlayer/ui/HomeScreen.h"
 #include "FluxPlayer/ui/MergeScreen.h"
+#include "FluxPlayer/ui/SuperResolutionScreen.h"
+#include <csignal>
+#include "FluxPlayer/utils/VideoSuperResolutionExporter.h"
 #include "FluxPlayer/ui/OpeningScreen.h"
 #include "FluxPlayer/ui/UiContext.h"
 #include "FluxPlayer/ui/Window.h"
@@ -34,9 +37,11 @@
 #include <ctime>
 #include <cstdio>
 #include <iostream>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <signal.h>
 #endif
@@ -68,6 +73,12 @@ namespace {
  * 使用 Logger 自己的 ofstream，与这里的控制台重定向相互独立。
  */
 void attachParentConsoleForLogging() {
+    const auto redirected = [](DWORD id) {
+        const DWORD type = GetFileType(GetStdHandle(id));
+        return type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK;
+    };
+    const bool stdoutRedirected = redirected(STD_OUTPUT_HANDLE);
+    const bool stderrRedirected = redirected(STD_ERROR_HANDLE);
     if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
         const DWORD error = GetLastError();
         if (error != ERROR_ACCESS_DENIED) {
@@ -79,11 +90,11 @@ void attachParentConsoleForLogging() {
     FILE* stream = nullptr;
 #if defined(_MSC_VER) || defined(__MINGW32__)
     // MSVC 和 MinGW 都提供 freopen_s；保存返回流仅用于满足安全 CRT 接口。
-    freopen_s(&stream, "CONOUT$", "w", stdout);
-    freopen_s(&stream, "CONOUT$", "w", stderr);
+    if (!stdoutRedirected) freopen_s(&stream, "CONOUT$", "w", stdout);
+    if (!stderrRedirected) freopen_s(&stream, "CONOUT$", "w", stderr);
 #else
-    stream = std::freopen("CONOUT$", "w", stdout);
-    stream = std::freopen("CONOUT$", "w", stderr);
+    if (!stdoutRedirected) stream = std::freopen("CONOUT$", "w", stdout);
+    if (!stderrRedirected) stream = std::freopen("CONOUT$", "w", stderr);
 #endif
     (void)stream;
 
@@ -335,8 +346,24 @@ static std::string playMediaCli(const std::string& mediaPath) {
 /**
  * @brief 程序主入口
  */
+namespace {
+volatile std::sig_atomic_t offlineExportInterrupted = 0;
+void interruptOfflineExport(int) { offlineExportInterrupted = 1; }
+}
+
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
+    // MinGW 的窄 argv 使用系统代码页；FFmpeg/文件系统边界统一使用 UTF-8。
+    std::vector<std::string> utf8Args;
+    std::vector<char*> utf8Argv;
+    int wideArgc = 0;
+    if (auto wideArgv = CommandLineToArgvW(GetCommandLineW(), &wideArgc)) {
+        for (int i = 0; i < wideArgc; ++i) utf8Args.push_back(std::filesystem::path(wideArgv[i]).u8string());
+        LocalFree(wideArgv);
+        for (auto& arg : utf8Args) utf8Argv.push_back(arg.data());
+        utf8Argv.push_back(nullptr);
+        argc = wideArgc; argv = utf8Argv.data();
+    }
     // 必须早于 Config::load()：配置加载本身会记录日志，晚附着会丢失启动阶段输出。
     attachParentConsoleForLogging();
 #else
@@ -373,6 +400,40 @@ int main(int argc, char* argv[]) {
 
     int rc = 0;
     do {
+        // 无窗口离线导出入口，复用生产导出器，不创建播放上下文。
+        if (argc >= 2 && std::string(argv[1]) == "--sr-export") {
+            if (argc < 6) {
+                LOG_ERROR("Usage: FluxPlayer --sr-export INPUT OUTPUT_DIR WIDTH HEIGHT [2|4] [cpu|auto] [preserve-sar|square-sar] [copy-audio|aac]");
+                rc=1;break;
+            }
+            try {
+                SuperResolutionJob job;
+                job.hardwareDecode=cfg.hwaccel;
+                job.input=argv[2];job.outputDirectory=argv[3];job.outputWidth=std::stoi(argv[4]);job.outputHeight=std::stoi(argv[5]);
+                job.scale=argc>6?std::stoi(argv[6]):2;job.cpu=argc>7 && std::string(argv[7])=="cpu";
+                job.preserveSourceSar=argc>8 && std::string(argv[8])=="preserve-sar";
+                if(argc>9) {
+                    const std::string mode=argv[9];
+                    if(mode!="copy-audio" && mode!="aac")throw std::invalid_argument("Audio mode must be copy-audio or aac");
+                    job.transcodeAudio=mode=="aac";
+                }
+                job.model=Config::getResourcePath("models/realesrgan/realesrgan-x"+std::to_string(job.scale)+"plus.onnx");
+                job.runtime=VideoSuperResolutionExporter::defaultRuntimePath();
+                VideoSuperResolutionExporter exporter;
+                offlineExportInterrupted=0;
+                const auto previousSignal=std::signal(SIGINT,interruptOfflineExport);
+                exporter.start(job);
+                while(exporter.status().running) {
+                    if(offlineExportInterrupted)exporter.cancel();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                std::signal(SIGINT,previousSignal);
+                const auto result=exporter.status();
+                LOG_INFO("Offline export: "+result.phase+" / "+result.output+" / "+result.error);
+                rc=result.phase=="done"?0:1;
+            } catch(const std::exception& e) {LOG_ERROR(e.what());rc=1;}
+            break;
+        }
         // ── CLI 模式：保留老路径 ──
         if (argc >= 2) {
             std::string mediaPath = argv[1];
@@ -459,7 +520,22 @@ int main(int argc, char* argv[]) {
                 continue;  // 回到 HomeScreen
             }
 
-            pendingPath = hr.mediaPath;
+            // 离线超分为独立工具，不创建 Player 或 OpeningScreen。
+            if (hr.openSuperResolution) {
+                SuperResolutionScreen screen(ui);
+                if (!screen.init()) {
+                    lastError = "Super resolution UI is unavailable in this skin or failed to initialize";
+                    continue;
+                }
+                const auto result = screen.run();
+                screen.destroy();
+                if (result.shouldQuit || ui.shouldClose()) break;
+                pendingPath = result.mediaPath;
+                if (pendingPath.empty()) continue;
+            } else {
+                pendingPath = hr.mediaPath;
+            }
+
             if (pendingPath.empty()) continue;
 
             // ── 2) OpeningScreen + Player（共享窗口同步打开） ──
