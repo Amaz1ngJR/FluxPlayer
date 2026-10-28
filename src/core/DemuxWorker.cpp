@@ -14,6 +14,7 @@
 #include "FluxPlayer/utils/DashMerger.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/MediaSourceResolver.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -31,6 +32,23 @@ constexpr double  kMinQueueDurationSec = 1.0;               // 各流最少缓�
 constexpr int     kBackpressureWaitMs  = 10;                // 背压等待粒度
 constexpr int     kEofParkWaitMs       = 10;                // EOF 停泊轮询粒度（等待 seek / quit）
 constexpr int     kDashSeekDebounceMs  = 300;               // 连续拖动/点击停止后再建立远程连接
+bool compatibleInputs(Demuxer* oldInput, Demuxer* nextInput) {
+    if (!oldInput || !nextInput) return false;
+    auto compatible = [&](int oldIdx, int nextIdx) {
+        if (oldIdx < 0 || nextIdx < 0) return oldIdx == nextIdx;
+        const auto* a = oldInput->getFormatContext()->streams[oldIdx]->codecpar;
+        const auto* b = nextInput->getFormatContext()->streams[nextIdx]->codecpar;
+        return a->codec_id == b->codec_id && a->width == b->width && a->height == b->height &&
+            a->sample_rate == b->sample_rate &&
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+            a->ch_layout.nb_channels == b->ch_layout.nb_channels;
+#else
+            a->channels == b->channels;
+#endif
+    };
+    return compatible(oldInput->getVideoStreamIndex(), nextInput->getVideoStreamIndex()) &&
+        compatible(oldInput->getAudioStreamIndex(), nextInput->getAudioStreamIndex());
+}
 }  // namespace
 
 DemuxWorker::DemuxWorker(Player* player) : player_(player) {}
@@ -43,6 +61,8 @@ DemuxWorker::~DemuxWorker() {
 }
 
 void DemuxWorker::start() {
+    sourceSession_ = player_->getDownloadSession();
+    forceSourceRefresh_ = false;
     thread_ = std::make_unique<std::thread>([this] { run(); });
 }
 
@@ -186,7 +206,32 @@ bool DemuxWorker::processSeekRequest() {
             player_->releaseAudioSeekGateLocked();
         return false;
     }
-    const bool seekOk = player_->demuxer_->seek(seekTimestamp, &seekGeneration_, generation);
+    bool seekOk = !forceSourceRefresh_ && player_->demuxer_->seek(seekTimestamp, &seekGeneration_, generation);
+    if (!seekOk && !player_->shouldQuit_.load() && sourceSession_.resolver != StreamResolverKind::Direct) {
+        forceSourceRefresh_ = false;
+        auto refreshed = sourceSession_;
+        std::string error;
+        if (MediaSourceResolver::refresh(refreshed, error, &player_->shouldQuit_) &&
+            seekGeneration_.load(std::memory_order_acquire) == generation) {
+            auto candidate = std::make_unique<Demuxer>(&player_->shouldQuit_);
+            if (candidate->open(refreshed.videoUrl, refreshed.headers, refreshed.duration, refreshed.httpCookies, refreshed.cctvProtection) &&
+                candidate->seek(seekTimestamp, &seekGeneration_, generation)) {
+                if (compatibleInputs(player_->demuxer_.get(), candidate.get())) {
+                    std::unique_ptr<Demuxer> oldInput;
+                    {
+                        std::lock_guard<std::mutex> lock(seekMutex_);
+                        if (!player_->shouldQuit_.load() && seekGeneration_.load(std::memory_order_acquire) == generation) {
+                            oldInput = std::move(player_->demuxer_);
+                            player_->demuxer_ = std::move(candidate);
+                            sourceSession_ = std::move(refreshed);
+                            player_->publishMediaSession(sourceSession_);
+                            seekOk = true;
+                        }
+                    }
+                }
+            }
+        } else LOG_WARN("Seek 地址刷新失败: " + error);
+    }
     // 与控制线程按相同顺序持锁：先音频回调边界，再请求边界。
     // FFmpeg I/O 不持锁；只在完成发布时锁定，旧结果不能覆盖新目标/解除新门控。
     std::lock_guard<std::mutex> callbackLock(player_->audioCallbackMutex_);
@@ -242,33 +287,48 @@ bool DemuxWorker::restartDashMerger(double seekTime, uint64_t generation) {
     // 清设备缓存，否则会与画质安装/主线程 Pause/Resume 并发操作平台设备。
     if (!player_->audioDeviceFlushReady_.load(std::memory_order_acquire)) return false;
 
+    if (forceSourceRefresh_) {
+        forceSourceRefresh_ = false;
+        std::string error;
+        if (!MediaSourceResolver::refresh(sourceSession_, error, &player_->shouldQuit_))
+            LOG_WARN("DASH 恢复刷新失败: " + error);
+    }
     const auto& cfg = Config::getInstance().get();
     const bool proxyAvailable = cfg.proxyEnabled && !cfg.httpProxy.empty();
-    const int maxRestartAttempts = proxyAvailable ? 2 : 1;
+    const int normalAttempts = proxyAvailable ? 2 : 1;
+    const int maxRestartAttempts = normalAttempts + 1;
     constexpr int kRetryBackoffMs = 150;
-    const auto restartDeadline = restartStart + std::chrono::seconds(12);
+    const auto restartDeadline = restartStart + std::chrono::seconds(30);
     for (int attempt = 1; attempt <= maxRestartAttempts; ++attempt) {
         if (std::chrono::steady_clock::now() >= restartDeadline) {
-            LOG_WARN("restartDashMerger: 已达到 12s 总预算，停止重试");
+            LOG_WARN("restartDashMerger: 已达到 30s 总预算，停止重试");
             break;
         }
         if (player_->shouldQuit_.load() ||
             seekGeneration_.load(std::memory_order_acquire) != generation) return false;
 
+        if (attempt == maxRestartAttempts) {
+            std::string error;
+            if (!MediaSourceResolver::refresh(sourceSession_, error, &player_->shouldQuit_)) {
+                LOG_WARN("DASH 地址刷新失败: " + error);
+                break;
+            }
+            if (seekGeneration_.load(std::memory_order_acquire) != generation) return false;
+        }
         auto candidateMerger = std::make_unique<DashMerger>();
         // 合并器先直连，首次候选允许失败后尝试代理；第二次候选只走直连。
         const bool useProxyThisAttempt = proxyAvailable && attempt == 1;
         LOG_INFO("restartDashMerger: 候选 " + std::to_string(attempt) + "/" +
                  std::to_string(maxRestartAttempts) +
                  (useProxyThisAttempt ? " 直连优先，允许代理回退" : " 仅使用直连"));
-        if (!candidateMerger->start(player_->lastExtractedInfo_.videoUrl,
-                                    player_->lastExtractedInfo_.audioUrl,
-                                    player_->lastExtractedInfo_.headers,
+        if (!candidateMerger->start(sourceSession_.videoUrl,
+                                    sourceSession_.audioUrl,
+                                    sourceSession_.headers,
                                     seekTime,
                                     &player_->dashSeekGeneration_,
                                     dashGeneration,
                                     &player_->shouldQuit_,
-                                    useProxyThisAttempt)) {
+                                    useProxyThisAttempt, sourceSession_.httpCookies)) {
             LOG_WARN("restartDashMerger: 候选启动失败 (尝试 " +
                      std::to_string(attempt) + "/" + std::to_string(maxRestartAttempts) + ")");
             if (attempt < maxRestartAttempts)
@@ -293,7 +353,7 @@ bool DemuxWorker::restartDashMerger(double seekTime, uint64_t generation) {
         auto candidateDemuxer = std::make_unique<Demuxer>(&player_->shouldQuit_);
         const std::string candidatePipeUrl = candidateMerger->getPipeUrl();
         const bool opened = candidateDemuxer->openSelfDescribingPipe(
-            candidatePipeUrl, player_->lastExtractedInfo_.duration);
+            candidatePipeUrl, sourceSession_.duration);
         if (!opened) {
             candidateDemuxer.reset();
             candidateMerger->stop();
@@ -301,6 +361,13 @@ bool DemuxWorker::restartDashMerger(double seekTime, uint64_t generation) {
             LOG_WARN("restartDashMerger: 候选 Demuxer 打开失败 (尝试 " +
                      std::to_string(attempt) + "/" + std::to_string(maxRestartAttempts) + ")");
             continue;
+        }
+
+        if (!compatibleInputs(player_->demuxer_.get(), candidateDemuxer.get())) {
+            LOG_WARN("DASH 刷新后的编码或画质不兼容，保留旧管线");
+            candidateDemuxer.reset();
+            candidateMerger->stop();
+            break;
         }
 
         // 原子验证并交换 owner；旧管线释放可能等待网络，必须在请求锁外完成。
@@ -312,6 +379,7 @@ bool DemuxWorker::restartDashMerger(double seekTime, uint64_t generation) {
             if (player_->shouldQuit_.load() ||
                 seekGeneration_.load(std::memory_order_acquire) != generation) return false;
             candidateMerger->commitPreparedStream();
+            player_->publishMediaSession(sourceSession_);
             oldInput = std::move(player_->demuxer_);
             oldMerger = std::move(player_->dashMerger_);
             player_->demuxer_ = std::move(candidateDemuxer);
@@ -370,6 +438,8 @@ void DemuxWorker::run() {
     AVPacket* packet = av_packet_alloc();
     int readRetryCount = 0;    // 当前连续读取失败次数
     int retryDelayMs = 100;    // 当前退避间隔（ms），每次失败翻倍
+    int recoveryAttempts = 0;
+    auto lastRecovery = std::chrono::steady_clock::time_point::min();
 
     while (!shouldQuit_.load()) {
         // 处理录制请求：录制器创建/销毁全归 demux 线程串行
@@ -530,6 +600,21 @@ void DemuxWorker::run() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
+            if (!isLiveStream_ && ioResult != Demuxer::IoResult::EndOfFile &&
+                sourceSession_.resolver != StreamResolverKind::Direct) {
+                const auto now = std::chrono::steady_clock::now();
+                if (lastRecovery != std::chrono::steady_clock::time_point::min() && now - lastRecovery > std::chrono::seconds(60)) recoveryAttempts = 0;
+                if (recoveryAttempts++ < 2) {
+                    lastRecovery = now;
+                    forceSourceRefresh_ = true;
+                    // The public seek queue performs device gating on the UI thread.
+                    // Never reset audio hardware directly from this I/O worker.
+                    player_->seek(std::max(0.0, clockController_->avSync()->getMasterClock()));
+                    for (int i = 0; i < 100 && !shouldQuit_.load() && !seekRequest_.pending.load(); ++i)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    if (seekRequest_.pending.load()) continue;
+                }
+            }
             const bool postSeekTransient = !isDash && clockController_->isDecodingToTarget();
             if ((!isDash && isLiveStream_) ||
                 (postSeekTransient && ioResult != Demuxer::IoResult::EndOfFile)) {
@@ -564,9 +649,22 @@ void DemuxWorker::run() {
                                  std::to_string(readRetryCount) + ")");
                         if (recordingService_) recordingService_->finishForStreamReplacement();
                         demuxer_->close();
-                        bool reopened = player_->liveReopenHeaders_.empty() && player_->liveReopenDuration_ == 0.0
+                        bool reopened = player_->liveReopenHeaders_.empty() && player_->liveReopenCookies_.empty() && player_->liveReopenCctvProtection_ == CctvProtectionMode::None && player_->liveReopenDuration_ == 0.0
                             ? demuxer_->open(player_->liveReopenPath_)
-                            : demuxer_->open(player_->liveReopenPath_, player_->liveReopenHeaders_, player_->liveReopenDuration_);
+                            : demuxer_->open(player_->liveReopenPath_, player_->liveReopenHeaders_, player_->liveReopenDuration_, player_->liveReopenCookies_, player_->liveReopenCctvProtection_);
+                        if (!reopened && !shouldQuit_.load() && sourceSession_.resolver != StreamResolverKind::Direct) {
+                            std::string error;
+                            if (MediaSourceResolver::refresh(sourceSession_, error, &shouldQuit_)) {
+                                reopened = demuxer_->open(sourceSession_.videoUrl, sourceSession_.headers,
+                                    sourceSession_.duration, sourceSession_.httpCookies, sourceSession_.cctvProtection);
+                                if (reopened) {
+                                    player_->liveReopenPath_ = sourceSession_.videoUrl;
+                                    player_->liveReopenHeaders_ = sourceSession_.headers;
+                                    player_->liveReopenCookies_ = sourceSession_.httpCookies;
+                                    player_->publishMediaSession(sourceSession_);
+                                }
+                            } else LOG_WARN("Live stream: 地址刷新失败: " + error);
+                        }
                         if (shouldQuit_.load() || demuxer_->isCancelled()) break;
                         if (reopened) {
                             LOG_INFO("Live stream: reopen succeeded, resuming playback");

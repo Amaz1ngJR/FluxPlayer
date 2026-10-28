@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.9.3 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.9.4 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -184,7 +184,10 @@ file(GLOB_RECURSE FLUXPLAYER_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 if(APPLE)
     list(REMOVE_ITEM FLUXPLAYER_SOURCES "${CMAKE_SOURCE_DIR}/src/utils/WebLogin_win.cpp")
     list(APPEND FLUXPLAYER_SOURCES src/utils/WebLogin_mac.mm)
+    list(APPEND FLUXPLAYER_SOURCES src/utils/BrowserRefresh_mac.mm)
     set_source_files_properties(src/utils/WebLogin_mac.mm
+        PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+    set_source_files_properties(src/utils/BrowserRefresh_mac.mm
         PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
 elseif(WIN32)
     # WebLogin_win.cpp 已被 glob 收录，WebLogin_mac.mm 是 .mm 不在 glob 里，无需处理
@@ -225,6 +228,7 @@ foreach(_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         "RUNTIME_OUTPUT_DIRECTORY_${_config}" "${FLUXPLAYER_RUNTIME_OUTPUT_DIR}"
     )
 endforeach()
+
 
 # yt-dlp 打包路径：编译时固定，避免运行时路径推算失败
 if(APPLE)
@@ -381,6 +385,7 @@ endif()
 file(GLOB_RECURSE FLUXPLAYER_SHADER_ASSETS CONFIGURE_DEPENDS "assets/shaders/*")
 file(GLOB_RECURSE FLUXPLAYER_FONT_ASSETS   CONFIGURE_DEPENDS "assets/fonts/*")
 file(GLOB_RECURSE FLUXPLAYER_SOURCE_ASSETS CONFIGURE_DEPENDS "source/*")
+file(GLOB FLUXPLAYER_CCTV_NOTICES CONFIGURE_DEPENDS "third_party/cctv_h5e/*")
 
 set(FLUXPLAYER_RESOURCE_STAMP "${CMAKE_CURRENT_BINARY_DIR}/fluxplayer_resources.stamp")
 add_custom_command(
@@ -391,6 +396,9 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/fonts
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cctv_h5e
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/licenses/cctv_h5e
     # source/ 全拷贝（开发期依赖，含字幕测试、封面兜底图）
     # 先删目标再拷：copy_directory 只做覆盖，不会清除已删除的旧皮肤或
     # 历史嵌套目录（source/source/...），残留旧文件会被运行时误加载。
@@ -399,6 +407,24 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/source
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source
+    # 只在部署副本中清理模型；源码 x4 保留供外部选择。
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/realesrgan
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/realesrgan
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/realesrgan-x2plus.onnx
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/LICENSE
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/README.md
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/realesrgan-x2plus.onnx
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/LICENSE
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/README.md
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/realesrgan
     # 皮肤包内置回退路径：与开发期 source/UI/skins 解耦，
     # 让发布版即便缺失开发目录也能从 resources/skins 加载到内置 cyberpunk-neon。
     # 单文件 Lua 是唯一皮肤入口；SVG 仅作预览/设计参考。
@@ -421,6 +447,7 @@ add_custom_command(
         ${FLUXPLAYER_SHADER_ASSETS}
         ${FLUXPLAYER_FONT_ASSETS}
         ${FLUXPLAYER_SOURCE_ASSETS}
+        ${FLUXPLAYER_CCTV_NOTICES}
     COMMENT "Copying runtime resources..."
     VERBATIM
 )
@@ -478,6 +505,17 @@ endif()
 #   按 PE 导入表递归解析 DLL 依赖闭包（FFmpeg + 其 codec 子依赖 + MinGW 运行时），
 #   排除 Windows 系统 DLL。两台机器装出来的内容一致，Inno Setup 只需抓 staging。
 install(TARGETS FluxPlayer RUNTIME DESTINATION .)
+# yt-dlp 可执行文件：发布版必须随程序分发到 exe 同级，
+# 否则安装到目标机后 StreamExtractor 找不到 yt-dlp（运行时报「找不到 dlp」）。
+# 运行期由 getYtDlpPath() 优先在 exe 同级目录查找。
+if(WIN32)
+    install(PROGRAMS third_party/yt-dlp/yt-dlp.exe DESTINATION .)
+elseif(APPLE)
+    install(PROGRAMS third_party/yt-dlp/yt-dlp_macos DESTINATION .)
+endif()
+
+
+install(DIRECTORY third_party/cctv_h5e/ DESTINATION licenses/cctv_h5e)
 install(DIRECTORY assets/shaders/ DESTINATION shaders)
 install(DIRECTORY assets/fonts/   DESTINATION fonts)
 # source/ 安装策略：仅安装运行时必需文件，不安装整个 UI/ 设计目录。
@@ -488,7 +526,17 @@ install(FILES source/pic2.png DESTINATION resources)
 # Config::getResourcePath("video/video_01.mp4") 查找。
 install(FILES source/video/video_01.mp4 DESTINATION resources/video)
 # 离线超分按资源路径动态加载；模型和许可不能只留在开发期 source 副本中。
-install(DIRECTORY source/models/realesrgan/ DESTINATION resources/models/realesrgan)
+# 发行包只内置已验证的 x2 模型；清理增量 staging 的旧模型，不触碰源码。
+install(CODE [[
+    file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/resources/models/realesrgan")
+    file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/source/models/realesrgan")
+]])
+# x4/其他模型由用户按兼容契约自行选择。
+install(FILES
+    source/models/realesrgan/realesrgan-x2plus.onnx
+    source/models/realesrgan/README.md
+    source/models/realesrgan/LICENSE
+    DESTINATION resources/models/realesrgan)
 install(DIRECTORY source/onnxruntime/ DESTINATION resources/onnxruntime)
 # 安装阶段同步把单文件 Lua 皮肤包放到 resources/skins。
 install(DIRECTORY source/UI/skins/cyberpunk-neon/
@@ -497,14 +545,7 @@ install(DIRECTORY source/UI/skins/minimal-lua/
     DESTINATION resources/skins/minimal-lua
     PATTERN "mockup_*" EXCLUDE)
 
-# yt-dlp 可执行文件：发布版必须随程序分发到 exe 同级，
-# 否则安装到目标机后 StreamExtractor 找不到 yt-dlp（运行时报「找不到 dlp」）。
-# 运行期由 getYtDlpPath() 优先在 exe 同级目录查找。
-if(WIN32)
-    install(PROGRAMS third_party/yt-dlp/yt-dlp.exe DESTINATION .)
-elseif(APPLE)
-    install(PROGRAMS third_party/yt-dlp/yt-dlp_macos DESTINATION .)
-endif()
+
 
 if(WIN32)
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
@@ -555,4 +596,10 @@ if(WIN32)
         list(REMOVE_DUPLICATES _runtime_dll_names)
         file(WRITE \"\${CMAKE_INSTALL_PREFIX}/runtime-dlls.txt\" \"\${_runtime_dll_names}\")
     ")
+endif()
+
+if(EXISTS "${YTDLP_BUNDLED_PATH}")
+    add_custom_command(TARGET FluxPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${YTDLP_BUNDLED_PATH}" $<TARGET_FILE_DIR:FluxPlayer>
+        VERBATIM)
 endif()

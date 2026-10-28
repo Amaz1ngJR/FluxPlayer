@@ -3,7 +3,7 @@
  * @brief 媒体打开过程中的过渡界面（共享 UiContext，避免可视空窗）
  *
  * 用户在 HomeScreen 选择媒体后，到 Player::open 返回的这段时间，
- * 历史上窗口是被销毁→重建的，导致几秒钟的可视空窗（特别是 yt-dlp 网页提取）。
+ * 历史上窗口是被销毁→重建的，导致几秒钟的可视空窗（特别是 浏览器捕获 网页提取）。
  * 引入 UiContext 后，OpeningScreen 在同一窗口内显示「OPENING / RESOLVING SOURCE…」
  * 半透明覆盖层，等 Player::open 返回再让位给 Controller。
  *

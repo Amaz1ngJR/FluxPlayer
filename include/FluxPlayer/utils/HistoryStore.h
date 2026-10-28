@@ -26,7 +26,7 @@ namespace FluxPlayer {
 /// 媒体来源类型：决定 UI 图标与重播路径处理方式
 enum class HistorySourceType {
     LocalFile,   ///< 本地文件（path 为文件系统绝对路径）
-    WebVideo,    ///< 网页视频（path 为原始网页 URL，重播时重新走 yt-dlp 提取）
+    WebVideo,    ///< 网页视频（path 为原始网页 URL，重播时重新走 浏览器捕获 提取）
     NetworkUrl   ///< 直链 / RTSP / RTMP 等（path 为可直接喂给 FFmpeg 的 URL）
 };
 

@@ -24,7 +24,7 @@
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/PathUtils.h"
-#include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/MediaSource.h"
 #include "FluxPlayer/utils/HistoryStore.h"
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -134,11 +134,11 @@ const char* stateName(PlayerState s) {
  *
  * 在 player.play() 成功后调用。根据来源类型组装 HistoryEntry：
  * - 网页视频（needsExtraction 为真）：title/uploader/platform 取自 Player 提取结果，
- *   path 存原始网页 URL（重播时重新走 yt-dlp，临时流地址会过期）。
+ *   path 存原始网页 URL（重播时重新走 浏览器捕获，临时流地址会过期）。
  * - 网络直链 / RTSP / RTMP：title 用 URL 本身，sourceType=NetworkUrl。
  * - 本地文件：title 取文件名，sourceType=LocalFile。
  *
- * @param mediaPath 用户原始输入路径 / URL（未经 yt-dlp 改写）
+ * @param mediaPath 用户原始输入路径 / URL（未经 浏览器捕获 改写）
  * @param player    已打开并开始播放的 Player（用于取提取信息与时长）
  */
 static void recordHistory(const std::string& mediaPath, const Player& player) {
@@ -147,7 +147,7 @@ static void recordHistory(const std::string& mediaPath, const Player& player) {
     entry.lastPlayedAt = static_cast<int64_t>(std::time(nullptr));
     entry.duration = player.getDuration();
 
-    if (StreamExtractor::needsExtraction(mediaPath)) {
+    if (MediaSource::needsCapture(mediaPath)) {
         // 网页视频：复用 Player 已缓存的提取结果填充展示信息
         const ExtractedStream& info = player.getLastExtractedInfo();
         entry.sourceType = HistorySourceType::WebVideo;
@@ -203,7 +203,7 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
     // - 本地文件：直接探测文件
     // - 网络流 / 网页流：复用 Player 已打开的 AVFormatContext，避免重复连接
     MediaInfo mediaInfo;
-    if (!FluxPlayer::isNetworkUrl(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
+    if (!FluxPlayer::isNetworkUrl(mediaPath) && !MediaSource::needsCapture(mediaPath)) {
         if (!mediaInfo.extractFromFile(mediaPath)) {
             LOG_WARN("Failed to extract media info; UI may show incomplete fields");
         }
@@ -300,7 +300,7 @@ static std::string playMediaCli(const std::string& mediaPath) {
     }
 
     MediaInfo mediaInfo;
-    if (!FluxPlayer::isNetworkUrl(mediaPath) && !StreamExtractor::needsExtraction(mediaPath)) {
+    if (!FluxPlayer::isNetworkUrl(mediaPath) && !MediaSource::needsCapture(mediaPath)) {
         mediaInfo.extractFromFile(mediaPath);
     } else if (AVFormatContext* fmtCtx = player.getFormatContext()) {
         mediaInfo.extractFromContext(fmtCtx);
@@ -403,21 +403,25 @@ int main(int argc, char* argv[]) {
         // 无窗口离线导出入口，复用生产导出器，不创建播放上下文。
         if (argc >= 2 && std::string(argv[1]) == "--sr-export") {
             if (argc < 6) {
-                LOG_ERROR("Usage: FluxPlayer --sr-export INPUT OUTPUT_DIR WIDTH HEIGHT [2|4] [cpu|auto] [preserve-sar|square-sar] [copy-audio|aac]");
+                LOG_ERROR("Usage: FluxPlayer --sr-export INPUT OUTPUT_DIR WIDTH HEIGHT [auto|2] [cpu|auto] [preserve-sar|square-sar] [copy-audio|aac] [TRUSTED_MODEL.onnx] (WIDTH=HEIGHT=0: native output)");
                 rc=1;break;
             }
             try {
                 SuperResolutionJob job;
                 job.hardwareDecode=cfg.hwaccel;
                 job.input=argv[2];job.outputDirectory=argv[3];job.outputWidth=std::stoi(argv[4]);job.outputHeight=std::stoi(argv[5]);
-                job.scale=argc>6?std::stoi(argv[6]):2;job.cpu=argc>7 && std::string(argv[7])=="cpu";
+                job.nativeOutput=job.outputWidth==0 && job.outputHeight==0;
+                job.scale=argc>6 && std::string(argv[6])!="auto"?std::stoi(argv[6]):2;job.cpu=argc>7 && std::string(argv[7])=="cpu";
                 job.preserveSourceSar=argc>8 && std::string(argv[8])=="preserve-sar";
                 if(argc>9) {
                     const std::string mode=argv[9];
                     if(mode!="copy-audio" && mode!="aac")throw std::invalid_argument("Audio mode must be copy-audio or aac");
                     job.transcodeAudio=mode=="aac";
                 }
-                job.model=Config::getResourcePath("models/realesrgan/realesrgan-x"+std::to_string(job.scale)+"plus.onnx");
+                job.externalModel=argc>10;
+                if (!job.externalModel && job.scale!=2)
+                    throw std::invalid_argument("Only x2 is bundled; specify MODEL.onnx for external models");
+                job.model=job.externalModel?argv[10]:Config::getResourcePath("models/realesrgan/realesrgan-x2plus.onnx");
                 job.runtime=VideoSuperResolutionExporter::defaultRuntimePath();
                 VideoSuperResolutionExporter exporter;
                 offlineExportInterrupted=0;

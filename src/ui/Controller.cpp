@@ -1011,9 +1011,7 @@ void Controller::startDownload() {
         downloadZeroCopy_ = "N/A";
     }
     downloader_ = std::make_unique<Downloader>();
-    std::string height;
-    for (char c : currentQualityLabel_) if (std::isdigit(c)) height += c;
-    downloader_->start(currentSourceUrl_, dir, height,
+    downloader_->start(player_.getDownloadSession(), dir,
         [this](const DownloadProgress& progress) {
             downloadProgress_.store(progress.progress, std::memory_order_relaxed);
             std::lock_guard<std::mutex> lk(downloadMutex_);

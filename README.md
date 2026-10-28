@@ -55,8 +55,8 @@
 - 🚀 高倍速智能抽帧（≥2x）：本地文件 + 硬件加速时自动启用，按固定间隔保留帧（8x 时每 8 帧保留 1 帧），保持原视频 fps 渲染，避免性能瓶颈；永不丢弃 I 帧，优先丢弃 B 帧，按间隔保留 P 帧
 - 💬 内嵌字幕流解码渲染（SRT / ASS / WebVTT / mov_text），ImGui 底部居中叠加，支持 CJK 字体自动探测
 - 🌍 网页视频播放（B站、YouTube 等 1000+ 平台），自动提取真实流地址，支持 DASH 分离流合并
-- 🍪 Cookie 由 `CookieStore` 和 `StreamExtractor` 统一管理；Lua Home 只提交 `playUrl` action，不直接打开网页或承担网页登录 UI。macOS 登录网页要求用户主动播放媒体，Windows 登录网页在导航前静音；退出时分别销毁 WKWebView 或关闭 WebView2 控制器，拒绝迟到的异步结果，避免隐藏页面继续播放。Windows 静音接口不可用时明确报错；复用已有 Cookie 不覆盖凭据。
-- 📥 通用网络媒体保存：网页视频通过 yt-dlp 重新提取，MP4/HLS/DASH/RTSP/RTMP 等直链不依赖 yt-dlp；VOD 显示百分比/速度/大小/ETA，取消删除 `.part`，Live 显示保存时长并在 Stop 后封口保留；网络中断自动指数退避重连，输出文件冲突时追加序号且禁止覆盖
+- 🍪 Cookie 由 `CookieStore` 和 `MediaSource` 统一管理；Lua Home 只提交 `playUrl` action，不直接打开网页或承担网页登录 UI。macOS 登录网页要求用户主动播放媒体，Windows 登录网页在导航前静音；退出时分别销毁 WKWebView 或关闭 WebView2 控制器，拒绝迟到的异步结果，避免隐藏页面继续播放。Windows 静音接口不可用时明确报错；保存已有 Cookie 存储。
+- 📥 网络媒体保存：复用当前播放会话的媒体地址、画质和鉴权，支持分离音视频合并、暂停恢复、地址刷新；VOD 取消删除 `.part`，Live 停止后封口保留，禁止覆盖已有文件。
 - 🎯 画质切换（360P / 480P / 720P / 1080P）：统一命令入口，成功安装后更新画质标签及媒体快照，保持播放/暂停意图；替换前停止旧回调并重建音频格式、字幕和硬件互操作。候选提取/打开失败保留旧管线，替换后的初始化失败明确报错。候选准备已后台化，期间旧流继续播放并响应 Pause/Resume/Seek；新请求取消旧候选，仅主线程安装最新结果。安装及旧 Worker join 可能等待网络 I/O 退出。
 - 🔒 网络代理支持（HTTP/SOCKS5），默认 127.0.0.1:7890，可配置开关
 - 🎨 Lua 驱动的可编程皮肤系统：每个 `<id>.lua` 是完整皮肤实现，同时定义语义 token、布局参数和可执行 Surface（`home` / `player` / `merge` / `subtitle` / `settings` / `toast`）；C++ 经 FluxUI 抽象层只提供沙箱运行时、控件描述与 ImGui/OpenGL 后端，不做 UI 兜底绘制。支持白名单 action、数据提供器、皮肤目录资源解析、运行时热重载和上一有效 VM 回退。内置 `cyberpunk-neon` 与 `minimal-lua` 两套官方皮肤
@@ -272,7 +272,7 @@ FluxPlayer/
 │   │   ├── SkinManager.cpp     # 候选发现、热重载、原子快照交换
 │   │   ├── SettingsSchema.cpp  # 设置项注册表：键名 → 类型 + 读 + 写（驱动设置面板）
 │   │   └── SkinRenderer.cpp    # 非 Lua 页面仍使用的通用 ImGui helper
-│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, SystemSound, StreamExtractor, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, HWAccelDevice, HardwareInfo, Downloader, HistoryStore)
+│   └── utils/            # 工具 (Config, Logger, Timer, Screenshot, SystemSound, MediaSource, CookieStore, WebLogin, DashMerger, VideoMerger, VideoFramePreviewer, HWAccelDevice, HardwareInfo, Downloader, HistoryStore)
 ├── include/FluxPlayer/   # 头文件
 ├── source/UI/skins/      # Lua 皮肤包；每个目录以 <id>.lua 作为入口，SVG/PNG 为预览或皮肤资源
 ├── assets/shaders/       # GLSL 着色器
@@ -720,13 +720,23 @@ https://www.bilibili.com/video/BV1xx...
 https://www.youtube.com/watch?v=...
 ```
 
-**依赖：** 需要 `yt-dlp`（已内置在 `third_party/yt-dlp/` 中，无需手动安装）
+**浏览器捕获播放（默认推荐，macOS / Windows）：** 打开网页地址后，Opening 流程会弹出内置网页窗口。先在网页中点播放，在底部列表选择捕获到的视频流，再点 **播放捕获视频**。此路径直接将媒体 URL、Referer、User-Agent 和浏览器 Cookie 交给 FFmpeg。多个结果可能包含广告或不同画质，需要自行选择。支持常见 HLS（m3u8）、DASH（mpd）、MP4 / WebM；会观察媒体元素、资源加载、fetch / XHR 和 iframe 中的请求，不保证捕获所有网站。`blob:` 地址、单独的音视频分片、DRM 和需要额外私有请求头的资源不能保证直接播放。
 
-**Cookie 支持：** `StreamExtractor` 会自动检查 `CookieStore` 中与目标站点匹配的 Cookie，并在调用 yt-dlp 时附带。当前 Lua Home 的 `OPEN URL` 只发送 `playUrl` action 并进入 Opening 流程，不会主动弹出网页登录窗口。
+**两种播放方式共存：** 点击 **播放捕获视频** 使用当前选择的浏览器媒体流；点击 **完成登录** 保存 Cookie 后由 yt-dlp 提取，无需先捕获到媒体；**使用已有 Cookie 继续** 不覆盖已有凭据，直接使用 yt-dlp。工具随 macOS / Windows 构建和安装包提供。两条路径共享原生播放、画质切换与下载管线，地址刷新沿用当前会话的来源，下载复用当前媒体地址、画质和鉴权。退出登录窗口后销毁网页，不能留在后台播放。
+
+**央视原生处理：** 已识别的央视 H.264 `cdrm` 直播与 `h5e` 模式会标记为 **央视原生**，由独立 `H264NalTransformer` 模块在解复用后、解码前处理 NAL，随后使用现有硬件/软件解码和渲染管线。音频、包时间戳与录制数据经过同一播放管线，重连和 Seek 会重置处理会话。直播经典模式包含最后一个完整加密块的处理；HLS 分片的成批到达不会直接触发大量追赶丢帧。`enc2`、通用 EME/DRM 及非 H.264 内容仍不在原生支持范围内。部分主播放列表不带保护标记，后续分片出现标记时会更新捕获结果。
+
+**央视/HLS 清晰度切换：** 浏览器捕获 HLS 后，后台读取真实主清单，将可用档位接入原有清晰度菜单。捕获主清单时默认选择最高可用档；明确捕获某个子清单时保留该档位，并从同次浏览器会话查找包含它的主清单。相同分辨率的不同码率会分别标注；没有分辨率信息时显示清单声明的码率。切换继续使用后台候选准备流程，保留 Cookie、Referer 和央视处理模式；过期地址通过刷新主清单重试，准备失败不替换旧播放。当前央视原生模块只列出 H.264 档位；无法找到主清单或使用外部分离音轨的 HLS 不生成不可靠的清晰度选项。
+
+**B站浏览器捕获：** 登录窗口读取网页已获得的 `__playinfo__` 和播放接口的 fetch/XHR 响应，不额外发起签名接口请求。普通 `.m4s` 分片仍不单独作为视频列出；只有播放数据中完整的视频/音频轨道配对后，才生成 **B站音视频** 选项并交给现有 DASH 合并器。已返回的画质接入原有清晰度菜单，同档位优先 AVC、音频优先 AAC；不会列出只有文字说明、没有实际媒体地址的会员档位。Cookie jar 随两路输入及 Seek 重建传递。地址失效时，后台用同一浏览器登录状态重载原始网页并匹配同一个画质 ID；网页不能自动返回所选档位或需要交互验证时，提示重新打开网页；多段旧式 durl 与其他未识别的播放结构暂不支持原生播放。
+
+**央视模块来源与许可：** 参考了 [VipVideo](https://github.com/iodefog/VipVideo) 的网页播放组织方式；实际 NAL 处理引用 [CCTVVideoDownloader](https://github.com/letr007/CCTVVideoDownloader) 的 C++ 实现，来源、修改范围及 GPL-3.0 许可证位于 `third_party/cctv_h5e/`。该 GPL 代码链接进程序，分发组合后的程序须遵守 GPL-3.0 并提供对应源码；构建和打包会携带第三方许可文件。
+
+**Cookie 支持：** 捕获播放也会读取并保存网页及媒体域名相关 Cookie，播放时通过 FFmpeg Cookie jar 按域名/路径匹配，供分片和重连复用。原有 `CookieStore` 文件仍保留。下载也复用当前会话的 Cookie jar 和请求头；音视频两路、暂停恢复及重连均传递相同鉴权信息。
 
 播放网页视频时，工具栏会出现：
 - **画质按钮**：切换 360P / 480P / 720P / 1080P，切换后自动 seek 到原位置
-- **Download 按钮**：所有网络来源均显示；网页视频走 yt-dlp，媒体直链直接由 FFmpeg 保存。VOD 显示百分比/速度/大小/ETA，支持暂停/恢复及取消删除；Live 显示 `LIVE SAVE` 和已保存时长，Stop 后写 trailer 并保留文件；当前 packet remux 管线显示 `D:BYPASS E:BYPASS ZC:N/A`
+- **Download 按钮**：所有网络来源均显示；直接复制当前播放会话的媒体地址、所选画质和鉴权，由 FFmpeg 保存；分离音视频合并为 MKV。地址过期时沿当前来源刷新：浏览器会话优先更新 HLS 主清单，必要时后台重载网页。刷新不能匹配原画质时保持失败状态，续写前还会检查编码与分辨率，避免生成混合画质文件。VOD 显示百分比/速度/大小/ETA，支持暂停/恢复及取消删除；Live 显示 `LIVE SAVE` 和已保存时长，Stop 后写 trailer 并保留文件；当前 packet remux 管线显示 `D:BYPASS E:BYPASS ZC:N/A`
 
 ### 多视频合并与片段截取
 
@@ -1174,8 +1184,10 @@ ffmpeg -re -stream_loop -1 -i test.mp4 -c copy -f flv rtmp://localhost:1935/stre
 ## 离线视频超分
 
 首页“VIDEO SUPER RESOLUTION”进入独立工具页，两个内置 Lua 皮肤均支持。
-当前可选择/拖入一个本地视频、异步探测源信息及缩略图，设置原生 2x/4x 模型、
-独立输出分辨率、自动/CPU 执行偏好及音频策略，查看与合并共用的 `recordDir`。
+当前可选择/拖入一个本地视频，内置仅提供已验证的 `realesrgan-x2plus.onnx`；原 x4 入口改为“选择外部 ONNX 模型”。
+外部模型不是任意 ONNX 或 `.pth`：必须是可信来源、单个 FP32 RGB NCHW 输入，能够接受 `[1,3,256,256]` 分块，并产生单个同类型 RGB 输出。加载时校验数量、dtype 和 shape，再执行一次真实推理，根据输出空间尺寸自动识别等比整数倍率（当前安全范围 1–16x，输出 tile 边长不超过 4096）；不限定 2x/4x，也无需手动选择 Native 4x。动态维度仅在实际接受该输入并输出兼容形状时可用，不符合时明确报错。
+独立输出分辨率、自动/CPU 执行偏好及音频策略均可设置，输出目录沿用与合并共用的 `recordDir`。
+模型还需兼容 RGB `[0,1]` 归一化、tile=256/halo=32/Reflect-101 分块和当前 ORT 算子；形状通过不保证语义或画质。外部模型校验和倍率识别在任务加载阶段、创建输出文件前进行；双皮肤在此前显示待识别，识别后展示实际倍率与中间尺寸。源尺寸、模型中间尺寸、最终画布及 512 MiB 图像缓冲估算仍受安全检查。源码中的 x4 模型保留，但 CMake/xmake 部署与安装包仅分发 x2、模型 README 和 LICENSE；外部模型不复用 CoreML 持久编译缓存。
 默认保留原音轨，按兼容性输出 MP4/MKV；仅显式选择时将音频转为 AAC。
 已接入逐帧 ORT 增强、H.264 导出与音轨处理；macOS ARM64、Windows x64 固定版本运行库随仓库分发，
 模型与运行库部署到发布资源目录。Windows x64 已完成构建、导出回归及速度优化前后的原始 RGB 一致性验证。
@@ -1207,3 +1219,9 @@ RTX 5060 Ti / 1080p→2x 单会话交替对照：原路径平均约 3.13 秒/帧
 保持原有模型、精度和编码参数，音频写入与视频写入互斥，取消时安全等待写线程。
 `FLUX_SR_SERIAL_ENCODE=1` 可切回串行参考路径。Windows 短样本对照完整输出 SHA-256 一致；
 实际素材的收益较小，编码负载重时收益更明显，详见[技术方案第 8.5 节](docs/v0.9.2超分技术方案.md)。
+
+### 浏览器已处理的媒体鉴权
+
+YouTube 播放数据会与当前视频成功返回的 GET 媒体请求关联，复用网页原播放器处理后的签名、n 参数和 URL 内 PO Token。仅观察到成功请求并完成音视频配对的档位才交给原生播放；未观察到的档位、cipher-only、DRM、分片请求和需要 POST 请求体的流不作为完整媒体直链。签名参数原样保留，仅移除未被签名覆盖的 range 参数。浏览器来源的地址刷新在禁止后台媒体播放的隐藏页面中尝试重捕获，无法得到数据时提示重新打开网页；yt-dlp 来源则通过 yt-dlp 重新提取当前档位。结束或超时后销毁刷新页面。
+
+此实现依赖网页原播放器完成挑战，未内置独立的签名算法或 PO Token 生成器。已通过本地模拟验证，真实网站播放、Token 跨客户端复用及 Windows 行为仍需实测，不能保证所有 YouTube 视频可播放。

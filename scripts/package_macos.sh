@@ -39,7 +39,7 @@ for required in "$FFMPEG_LIB_DIR/libavformat.dylib" "$YTDLP" \
     "$ROOT/source/pic2.png" "$ROOT/source/video/video_01.mp4" \
     "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua" \
     "$ROOT/source/models/realesrgan/realesrgan-x2plus.onnx" \
-    "$ROOT/source/models/realesrgan/realesrgan-x4plus.onnx" "$ORT_LIBRARY"; do
+    "$ROOT/source/models/realesrgan/LICENSE" "$ROOT/source/models/realesrgan/README.md" "$ORT_LIBRARY"; do
     if [ ! -f "$required" ]; then
         echo "Missing packaging input: $required" >&2
         exit 1
@@ -63,6 +63,8 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 # 复制 build/bin 中的共享可执行文件
 cp "$BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
+mkdir -p "$APP_BUNDLE/Contents/Resources/licenses"
+cp -R "$ROOT/third_party/cctv_h5e" "$APP_BUNDLE/Contents/Resources/licenses/"
 
 # shaders/fonts 必须与可执行文件同目录：
 # GLRenderer 用 getExeDir()+"/shaders/..." 定位着色器，字体按可执行文件同级 fonts/
@@ -79,8 +81,10 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/video"
 cp "$ROOT/source/video/video_01.mp4" "$APP_BUNDLE/Contents/Resources/video/video_01.mp4"
 
 # 离线超分按 Resources 下的固定路径查找模型及动态运行库，不依赖开发目录。
-mkdir -p "$APP_BUNDLE/Contents/Resources/models"
-cp -R "$ROOT/source/models/realesrgan" "$APP_BUNDLE/Contents/Resources/models/"
+mkdir -p "$APP_BUNDLE/Contents/Resources/models/realesrgan"
+for model_resource in realesrgan-x2plus.onnx LICENSE README.md; do
+    cp "$ROOT/source/models/realesrgan/$model_resource" "$APP_BUNDLE/Contents/Resources/models/realesrgan/"
+done
 cp -R "$ROOT/source/onnxruntime" "$APP_BUNDLE/Contents/Resources/"
 
 # 皮肤包：Config::getResourcePath("skins") 在 macOS 优先解析到 ../Resources/skins，
@@ -122,8 +126,7 @@ for binary in "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/MacOS
     done
 done
 
-# yt-dlp：网页流提取依赖，必须与可执行文件同级（getYtDlpPath 优先在 exe 同级查找），
-# 否则装到目标机后运行时报「找不到 dlp」。保留可执行权限。
+# 与播放器同级部署，移动安装包后仍可找到工具。
 cp "$YTDLP" "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
 chmod +x "$APP_BUNDLE/Contents/MacOS/yt-dlp_macos"
 

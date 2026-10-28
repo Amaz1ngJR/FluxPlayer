@@ -12,7 +12,9 @@
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
 #include <tinyfiledialogs.h>
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
@@ -123,7 +125,7 @@ struct SuperResolutionScreen::Impl {
     std::future<SourceInfo> probe;
     std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
     SourceInfo source;
-    std::string path, error, mode = "source", device = "auto";
+    std::string path, error, mode = "source", device = "auto", externalModel;
     int scale = 2, customWidth = 1280, customHeight = 720;
     bool transcodeAudio = false;
     unsigned texture = 0;
@@ -139,7 +141,8 @@ struct SuperResolutionScreen::Impl {
             const auto task=exporter.status();
             const std::string details="Stage: "+task.stage+"\nPreflight: "+task.audioPreflight+
                 "\n"+task.audioRepairs+"\nDecoder: "+task.decoder+"\nColor: "+task.color+"\nError: "+task.error+"\nOperation: "+error+
-                "\nTemporary: "+task.temporary+"\nOutput: "+task.output;
+                "\nModel: "+modelPath()+"\nModel source: "+(externalModel.empty()?"builtin":"external")+
+                "\nNative scale: "+(scale>0?std::to_string(scale)+"x":"auto-detect at export")+"\nTemporary: "+task.temporary+"\nOutput: "+task.output;
             if(ImGui::Button("COPY ALL"))ImGui::SetClipboardText(details.c_str());
             ImGui::Separator();
             ImGui::BeginChild("srDiagnosticText",ImVec2(0,0),false,ImGuiWindowFlags_HorizontalScrollbar);
@@ -156,10 +159,12 @@ struct SuperResolutionScreen::Impl {
         if (texture) glDeleteTextures(1, &texture);
         texture = 0;
     }
-    bool modelAvailable(int value) const {
+    std::string modelPath() const {
+        return externalModel.empty() ? Config::getResourcePath("models/realesrgan/realesrgan-x2plus.onnx") : externalModel;
+    }
+    bool modelAvailable() const {
         std::error_code ec;
-        return std::filesystem::is_regular_file(std::filesystem::u8path(Config::getResourcePath(
-            "models/realesrgan/realesrgan-x" + std::to_string(value) + "plus.onnx")), ec);
+        return std::filesystem::is_regular_file(std::filesystem::u8path(modelPath()), ec);
     }
     void selectFile(const std::string& selected) {
         if (exporter.status().running) return;
@@ -173,7 +178,10 @@ struct SuperResolutionScreen::Impl {
         cancel->store(false);
         probe = std::async(std::launch::async, probeSource, path, cancel);
     }
+    std::string taskModel;
     void poll() {
+        const auto task=exporter.status();
+        if(!externalModel.empty() && taskModel==externalModel && task.modelScale>0)scale=task.modelScale;
         if (probe.valid() && probe.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             try { source = probe.get(); error = source.error; }
             catch (const std::exception& e) { error = e.what(); }
@@ -230,12 +238,13 @@ struct SuperResolutionScreen::Impl {
         const int64_t iw = int64_t(source.width) * scale, ih = int64_t(source.height) * scale;
         if (warning.empty() && (iw > kMaxDimension || ih > kMaxDimension || iw * ih > kMaxPixels))
             warning = "Intermediate size exceeds safety limits; select another model";
-        else if (warning.empty() && source.width > 0 && (w <= 0 || h <= 0 || w > kMaxDimension || h > kMaxDimension || int64_t(w) * h > kMaxPixels || w % 2 || h % 2))
+        else if (warning.empty() && source.width > 0 && !(mode=="native" && scale==0) && (w <= 0 || h <= 0 || w > kMaxDimension || h > kMaxDimension || int64_t(w) * h > kMaxPixels || w % 2 || h % 2))
             warning = path.empty() ? "" : "Output dimensions must be even and no larger than 8192 per side";
         const auto task = exporter.status();
         std::error_code runtimeError;
         const bool runtimeReady = !runtimePath().empty() && std::filesystem::is_regular_file(std::filesystem::u8path(runtimePath()), runtimeError);
-        const bool ready = !probe.valid() && source.width > 0 && warning.empty() && modelAvailable(scale) && runtimeReady && !task.running;
+        if (warning.empty() && !modelAvailable()) warning = "Selected model file is missing; choose a model";
+        const bool ready = !probe.valid() && source.width > 0 && warning.empty() && modelAvailable() && runtimeReady && !task.running;
         if(warning.empty() && iw>0 && ih>0 && w>0 && h>0) {
             const double effectiveW=source.width*((mode=="source" || mode=="native")?1:source.sar);
             const double ratio=std::min(double(w)/effectiveW,double(h)/source.height);
@@ -248,9 +257,12 @@ struct SuperResolutionScreen::Impl {
             {"duration", source.duration}, {"fps", source.fps}, {"audio", source.audio},
             {"sourceStatus", probe.valid() ? "Probing..." : "Export eligibility not yet verified"},
             {"previewReady", texture ? "true" : "false"}, {"scale", std::to_string(scale)},
-            {"model2", modelAvailable(2) ? "true" : "false"}, {"model4", modelAvailable(4) ? "true" : "false"},
+            {"modelSource", externalModel.empty() ? "builtin" : "external"},
+            {"modelName", std::filesystem::u8path(modelPath()).filename().u8string()},
+            {"modelPath", modelPath()},
+            {"modelScaleLabel", scale>0 ? "Native scale: "+std::to_string(scale)+"x" : "Native scale: auto-detect at export"},
             {"resolutionMode", mode}, {"customWidth", std::to_string(customWidth)}, {"customHeight", std::to_string(customHeight)},
-            {"intermediateSize", dimensions(iw, ih)}, {"outputSize", path.empty() ? "—" : dimensions(w, h)},
+            {"intermediateSize", scale>0 ? dimensions(iw, ih) : "Pending model inference"}, {"outputSize", path.empty() ? "—" : (mode=="native" && scale==0 ? "Pending model inference" : dimensions(w, h))},
             {"device", device}, {"outputDir", Config::getInstance().get().recordDir},
 #ifdef _WIN32
             {"autoDeviceLabel", "Auto (prefer DirectML)"},
@@ -316,10 +328,12 @@ struct SuperResolutionScreen::Impl {
             SuperResolutionJob job;
             job.hardwareDecode=Config::getInstance().get().hwaccel;
             job.input=path;job.outputDirectory=Config::getInstance().get().recordDir;
-            job.model=Config::getResourcePath("models/realesrgan/realesrgan-x"+std::to_string(scale)+"plus.onnx");
+            job.model=modelPath();job.externalModel=!externalModel.empty();
             job.runtime=runtimePath();job.scale=scale;job.outputWidth=w;job.outputHeight=h;job.cpu=device=="cpu";
+            job.nativeOutput=mode=="native";
             job.preserveSourceSar=mode=="source"||mode=="native";
             job.transcodeAudio=transcodeAudio;
+            taskModel=externalModel;
             error.clear();editingResult=false;exporter.start(job);return;
         }
         auto value = payload.find("value");
@@ -328,9 +342,44 @@ struct SuperResolutionScreen::Impl {
         else if (action == "srChooseFile") {
             const char* filters[] = {"*.mp4", "*.mkv", "*.mov", "*.avi", "*.webm", "*.m4v", "*.ts"};
             if (const char* p = tinyfd_openFileDialog("Select one local video", "", 7, filters, "Video", 0)) selectFile(p);
-        } else if (action == "srSetModel" && (v == "2" || v == "4")) {
-            if (modelAvailable(v == "4" ? 4 : 2)) scale = v == "4" ? 4 : 2;
-            else error = "Selected model is not installed";
+        } else if (action == "srChooseModel") {
+#ifdef __APPLE__
+            // tinyfiledialogs 将 *.onnx 转成 AppleScript of type {"onnx"}；
+            // 四字符类型可能被当作旧 OSType，导致合法文件置灰。选中后校验扩展名。
+            const char* selected = tinyfd_openFileDialog(
+                "Select a trusted FP32 RGB NCHW ONNX model", "", 0, nullptr,
+                nullptr, 0);
+#else
+            const char* filters[] = {"*.onnx"};
+            const char* selected = tinyfd_openFileDialog(
+                "Select a trusted FP32 RGB NCHW ONNX model", "", 1, filters,
+                "ONNX model", 0);
+#endif
+            if (!selected) return;
+            std::error_code ec;
+            const auto file = std::filesystem::u8path(selected);
+            if (!std::filesystem::is_regular_file(file, ec)) {
+                error = "Select one local ONNX model file";
+                return;
+            }
+            std::string extension=file.extension().u8string();
+            std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+            if (extension!=".onnx") {
+                error = "External models must use the .onnx file format";
+                return;
+            }
+            if (!tinyfd_messageBox("External model compatibility",
+                "Only use a trusted ONNX file. The model must accept one FP32 RGB NCHW [1,3,256,256] tile and produce one FP32 RGB tensor with equal integer spatial scale (1-16x; output tile at most 4096). Scale is detected from actual inference before output creation; no manual scale selection is needed. Dynamic dimensions are accepted only when this tile works. RGB [0,1] and tile256/halo32 Reflect-101 processing are required. Shape checks cannot verify RGB semantics or quality. PTH is unsupported. Continue?",
+                "yesno", "warning", 0)) return;
+            externalModel = file.u8string();
+            taskModel.clear();
+            scale = 0;
+            error.clear();
+        } else if (action == "srSetModel" && v == "2") {
+            externalModel.clear();
+            scale = 2;
+            error.clear();
+
         } else if (action == "srSetResolution") {
             if (v == "source" || v == "native" || v == "720p" || v == "1080p" || v == "4k" || v == "custom") mode = v;
         } else if (action == "srSetDevice" && (v == "auto" || v == "cpu")) device = v;

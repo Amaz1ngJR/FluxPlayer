@@ -161,7 +161,8 @@ bool DashMerger::start(const std::string& videoUrl,
                        const std::atomic<uint64_t>* cancelGeneration,
                        uint64_t expectedGeneration,
                        const std::atomic<bool>* externalStop,
-                       bool useConfiguredProxy) {
+                       bool useConfiguredProxy,
+                       const std::string& httpCookies) {
     if (running_.load() || thread_.joinable()) {
         LOG_WARN("DashMerger: 已启动，请先 stop 再重新启动");
         return false;
@@ -223,7 +224,7 @@ bool DashMerger::start(const std::string& videoUrl,
         thread_ = std::thread(&DashMerger::mergeLoop, this,
                               videoUrl, audioUrl, headers, startSeconds,
                               cancelGeneration, expectedGeneration, externalStop,
-                              useConfiguredProxy);
+                              useConfiguredProxy, httpCookies);
     } catch (const std::exception& error) {
         running_.store(false);
 #ifdef _WIN32
@@ -295,7 +296,8 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
                             const std::atomic<uint64_t>* cancelGeneration,
                             uint64_t expectedGeneration,
                             const std::atomic<bool>* externalStop,
-                            bool useConfiguredProxy) {
+                            bool useConfiguredProxy,
+                            const std::string& httpCookies) {
     LOG_INFO("DashMerger: 调用 avformat_network_init...");
     avformat_network_init();
     LOG_INFO("DashMerger: avformat_network_init 完成");
@@ -387,6 +389,7 @@ void DashMerger::mergeLoop(const std::string& videoUrl,
         ic->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(openTimeoutSecs);
         AVDictionary* opts = nullptr;
         if (!headers.empty()) av_dict_set(&opts, "headers", headers.c_str(), 0);
+        if (!httpCookies.empty()) av_dict_set(&opts, "cookies", httpCookies.c_str(), 0);
         // 空值显式禁用环境代理；不能仅省略选项，否则 FFmpeg 仍可能继承 http_proxy。
         av_dict_set(&opts, "http_proxy", useProxy ? proxyUrl.c_str() : "", 0);
         LOG_INFO(std::string("DashMerger: ") + tag + (useProxy ? "流尝试配置代理" : "流尝试直连"));

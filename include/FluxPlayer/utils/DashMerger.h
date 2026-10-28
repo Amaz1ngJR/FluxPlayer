@@ -34,6 +34,7 @@ public:
      * @param startSeconds  从该位置开始下载（>0 时通过 FFmpeg "ss" 选项让上游
      *                      利用 HTTP Range 跳过前面的数据，用于 seek 重启场景）
      * @param useConfiguredProxy 允许直连失败后尝试配置代理；false 时仅显式直连
+     * @param httpCookies   域名/路径受限的 Cookie jar，分别用于两路输入及重连
      * @return 成功返回 true
      */
     bool start(const std::string& videoUrl,
@@ -43,7 +44,8 @@ public:
                const std::atomic<uint64_t>* cancelGeneration = nullptr,
                uint64_t expectedGeneration = 0,
                const std::atomic<bool>* externalStop = nullptr,
-               bool useConfiguredProxy = true);
+               bool useConfiguredProxy = true,
+               const std::string& httpCookies = "");
 
     /**
      * @brief 将已准备好的候选 merger 提交为当前播放源。
@@ -91,7 +93,8 @@ private:
                    const std::atomic<uint64_t>* cancelGeneration,
                    uint64_t expectedGeneration,
                    const std::atomic<bool>* externalStop,
-                   bool useConfiguredProxy);
+                   bool useConfiguredProxy,
+                   const std::string& httpCookies);
 
     std::thread thread_;
     std::atomic<bool> running_{false};

@@ -4,7 +4,7 @@
  *
  * Netscape cookie 文件格式（7 字段，TAB 分隔）：
  *   domain  include_subdomains  path  secure  expires  name  value
- * HttpOnly cookie 在行首加 "#HttpOnly_" 前缀（yt-dlp / curl 兼容写法）。
+ * HttpOnly cookie 在行首加 "#HttpOnly_" 前缀（浏览器捕获 / curl 兼容写法）。
  */
 
 #include "FluxPlayer/utils/CookieStore.h"
@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include "FluxPlayer/utils/MediaSource.h"
 #include <sstream>
 #include <unordered_map>
 
@@ -138,6 +139,20 @@ std::string CookieStore::getCookieFilePath() {
 bool CookieStore::exists() {
     std::error_code ec;
     return std::filesystem::exists(getCookieFilePath(), ec);
+}
+
+std::vector<NetscapeCookie> CookieStore::loadForMediaSession(const ExtractedStream& stream) {
+    std::vector<std::string> hosts;
+    auto add=[&](const std::string& url) { if(!url.empty())hosts.push_back(extractHost(url)); };
+    add(stream.videoUrl);add(stream.audioUrl);
+    for(const auto& q:stream.qualities) {add(q.videoUrl);add(q.audioUrl);}
+    for(const auto& url:stream.mediaCookieUrls)add(url);
+    std::lock_guard<std::mutex> lock(globalMutex());
+    auto cookies=loadAll();
+    cookies.erase(std::remove_if(cookies.begin(),cookies.end(),[&](const auto& c){
+        return std::none_of(hosts.begin(),hosts.end(),[&](const auto& host){return cookieMatchesHost(c,host);});
+    }),cookies.end());
+    return cookies;
 }
 
 std::string CookieStore::extractHost(const std::string& url) {

@@ -6,16 +6,18 @@
  * 不依赖 ffmpeg.exe CLI 工具，复用项目已集成的 FFmpeg 库。
  *
  * 流程：
- * 1. StreamExtractor::extract() 获取流 URL
+ * 1. 复制当前播放会话的地址、画质和鉴权信息
  * 2. avformat_open_input() 打开视频/音频流
  * 3. avformat_alloc_output_context2() + avio_open() 创建输出文件
  * 4. 逐 packet 读取并写入，通过 PTS 计算进度
  */
 
 #include "FluxPlayer/utils/Downloader.h"
-#include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/MediaSource.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/MediaSourceResolver.h"
+#include "FluxPlayer/utils/H264NalTransformer.h"
 
 #include <chrono>
 #include <thread>
@@ -58,6 +60,7 @@ static constexpr const char* kPartSuffix = ".part";
 struct DlInterruptCtx {
     std::chrono::steady_clock::time_point deadline;
     std::atomic<bool>* cancelled;
+    int lastError = 0;
 };
 
 static int dlInterruptCb(void* opaque) {
@@ -69,35 +72,38 @@ static int dlInterruptCb(void* opaque) {
 // 打开网络流，注入 headers 和代理
 static AVFormatContext* openStream(const std::string& url,
                                    const std::string& headers,
-                                   DlInterruptCtx& intCtx) {
-    AVFormatContext* ctx = avformat_alloc_context();
-    if (!ctx) return nullptr;
-    ctx->interrupt_callback = {dlInterruptCb, &intCtx};
-
-    AVDictionary* opts = nullptr;
-    if (!headers.empty())
-        av_dict_set(&opts, "headers", headers.c_str(), 0);
-
+                                   DlInterruptCtx& intCtx,
+                                   const std::string& cookies = "") {
     const auto& cfg = Config::getInstance().get();
-    if (cfg.proxyEnabled && !cfg.httpProxy.empty())
-        av_dict_set(&opts, "http_proxy", cfg.httpProxy.c_str(), 0);
-
-    av_dict_set(&opts, "reconnect", "1", 0);
-    av_dict_set(&opts, "reconnect_streamed", "1", 0);
-
-    intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
-    int ret = avformat_open_input(&ctx, url.c_str(), nullptr, &opts);
-    av_dict_free(&opts);
-
-    if (ret < 0) {
-        char errbuf[128];
-        av_strerror(ret, errbuf, sizeof(errbuf));
-        LOG_ERROR("Downloader: 打开流失败 " + url.substr(0, 80) + " - " + errbuf);
-        avformat_free_context(ctx);
-        return nullptr;
+    const bool proxy = cfg.proxyEnabled && !cfg.httpProxy.empty();
+    for (int route = 0; route < (proxy ? 2 : 1) && !intCtx.cancelled->load(); ++route) {
+        AVFormatContext* ctx = avformat_alloc_context();
+        if (!ctx) { intCtx.lastError = AVERROR(ENOMEM); return nullptr; }
+        ctx->interrupt_callback = {dlInterruptCb, &intCtx};
+        AVDictionary* opts = nullptr;
+        if (url.rfind("data:application/vnd.apple.mpegurl;base64,",0)==0)
+            av_dict_set(&opts,"protocol_whitelist","data,http,https,tcp,tls,crypto,httpproxy",0);
+        if (!headers.empty()) av_dict_set(&opts, "headers", headers.c_str(), 0);
+        if (!cookies.empty()) av_dict_set(&opts, "cookies", cookies.c_str(), 0);
+        av_dict_set(&opts, "http_proxy", route == 0 ? "" : cfg.httpProxy.c_str(), 0);
+        av_dict_set(&opts, "reconnect", "1", 0);
+        av_dict_set(&opts, "reconnect_delay_max", "1", 0);
+        av_dict_set(&opts, "rw_timeout", "10000000", 0);
+        intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
+        int ret = avformat_open_input(&ctx, url.c_str(), nullptr, &opts);
+        av_dict_free(&opts);
+        if (ret >= 0) ret = avformat_find_stream_info(ctx, nullptr);
+        intCtx.lastError = ret;
+        if (ret >= 0) return ctx;
+        if (ctx) avformat_close_input(&ctx);
+        if (ret == AVERROR_HTTP_UNAUTHORIZED || ret == AVERROR_HTTP_FORBIDDEN) break;
     }
-    avformat_find_stream_info(ctx, nullptr);
-    return ctx;
+    LOG_WARN("Downloader: 输入暂不可用 code=" + std::to_string(intCtx.lastError));
+    return nullptr;
+}
+
+static bool authorizationFailure(int error) {
+    return error == AVERROR_HTTP_UNAUTHORIZED || error == AVERROR_HTTP_FORBIDDEN || error == AVERROR_HTTP_NOT_FOUND;
 }
 
 // 从标题生成合法文件名（去除非法字符 + 截断长度 + 处理 Windows 边界）
@@ -147,17 +153,17 @@ static std::string formatEta(double secs) {
     return buf;
 }
 
-void Downloader::start(const std::string& sourceUrl,
+void Downloader::start(ExtractedStream session,
                        const std::string& outputDir,
-                       const std::string& formatId,
                        ProgressCallback onProgress,
                        FinishCallback   onFinish) {
     if (running_.load()) return;
+    if (thread_.joinable()) thread_.join();
     cancelled_.store(false);
     paused_.store(false);
     running_.store(true);
     thread_ = std::thread(&Downloader::downloadLoop, this,
-                          sourceUrl, outputDir, formatId,
+                          std::move(session), outputDir,
                           std::move(onProgress), std::move(onFinish));
 }
 
@@ -175,55 +181,6 @@ void Downloader::cancel() {
     cancelled_.store(true);
     paused_.store(false);
     if (thread_.joinable()) thread_.join();
-}
-
-// ── 辅助：提取流 URL，按目标高度选择最佳画质 ──
-static bool extractStream(const std::string& sourceUrl,
-                           const std::string& heightStr,
-                           ExtractedStream& out,
-                           const std::atomic<bool>& cancelled) {
-    if (cancelled.load()) return false;
-    // 已确认的媒体直链不依赖 yt-dlp。duration/filesize 在打开 FFmpeg 输入后补齐；
-    // 标题只用于生成文件名，因此移除 query/fragment，避免把鉴权 token 写入磁盘。
-    if (!StreamExtractor::needsExtraction(sourceUrl)) {
-        out = ExtractedStream{};
-        out.videoUrl = sourceUrl;
-        out.platform = "Direct";
-        std::string clean = sourceUrl.substr(0, sourceUrl.find_first_of("?#"));
-        size_t slash = clean.find_last_of("/\\");
-        out.title = slash == std::string::npos ? clean : clean.substr(slash + 1);
-        if (out.title.empty()) out.title = "stream";
-        return true;
-    }
-
-    std::string error;
-    if (!StreamExtractor::extract(sourceUrl, "", out, error, &cancelled)) {
-        LOG_ERROR("Downloader: 提取流失败: " + error);
-        return false;
-    }
-    if (heightStr.empty() || out.qualities.empty()) return true;
-
-    int targetHeight = 0;
-    try { targetHeight = std::stoi(heightStr); } catch (...) {}
-    if (targetHeight <= 0) return true;
-
-    // 找最接近目标高度的画质
-    std::string bestFmtId;
-    int bestDiff = INT_MAX;
-    for (const auto& q : out.qualities) {
-        int diff = std::abs(q.height - targetHeight);
-        if (diff < bestDiff) { bestDiff = diff; bestFmtId = q.formatId; }
-    }
-    if (bestFmtId.empty() || bestFmtId == out.selectedFormatId) return true;
-
-    ExtractedStream refined;
-    if (StreamExtractor::extract(sourceUrl, bestFmtId, refined, error, &cancelled)) {
-        out = refined;
-    } else {
-        if (cancelled.load()) return false;
-        LOG_WARN("Downloader: 指定画质提取失败，使用默认画质: " + error);
-    }
-    return true;
 }
 
 // ── 跨平台文件操作（Windows 需要 UTF-8 → UTF-16 转码后调 W 系列 API）──
@@ -305,12 +262,14 @@ static OutputStreams addOutputStreams(AVFormatContext* outCtx,
                                       AVFormatContext* audioSrcCtx, int audioStreamIn) {
     OutputStreams s;
     s.video = avformat_new_stream(outCtx, nullptr);
+    if (!s.video) return s;
     avcodec_parameters_copy(s.video->codecpar, videoCtx->streams[videoStreamIn]->codecpar);
     s.video->codecpar->codec_tag = 0;
     s.video->time_base = videoCtx->streams[videoStreamIn]->time_base;
 
-    if (audioStreamIn >= 0 && audioSrcCtx) {
+    if (audioStreamIn >= 0 && audioSrcCtx && !(audioSrcCtx == videoCtx && audioStreamIn == videoStreamIn)) {
         s.audio = avformat_new_stream(outCtx, nullptr);
+        if (!s.audio) return s;
         s.audioIdx = s.audio->index;
         avcodec_parameters_copy(s.audio->codecpar, audioSrcCtx->streams[audioStreamIn]->codecpar);
         s.audio->codecpar->codec_tag = 0;
@@ -341,9 +300,9 @@ static int computeBackoffSecs(int retryCount) {
 }
 
 // ── 辅助：单流 packet 写入 ──
-// 写入前更新 lastInputDts（原始输入时间基下的 DTS，单位 1us），用于断网/暂停后 seek 续流。
+// 写入成功后更新 lastInputDts（原始输入时间基下的 DTS，单位 1us），用于断网/暂停后 seek 续流。
 // 跳过在 seek 续流后读到的"已写入区间"重复包（dts <= skipUntilUs 时丢弃）
-static void writeSingleStreamPacket(AVPacket* pkt,
+static int writeSingleStreamPacket(AVPacket* pkt,
                                      AVFormatContext* videoCtx,
                                      int videoStreamIn, int audioStreamIn,
                                      const OutputStreams& out,
@@ -359,16 +318,17 @@ static void writeSingleStreamPacket(AVPacket* pkt,
     } else if (out.audioIdx >= 0 && pkt->stream_index == audioStreamIn) {
         inStream = videoCtx->streams[audioStreamIn]; outStream = out.audio; outIdx = out.audioIdx;
     } else {
-        return;
+        return 0;
     }
     int64_t dtsUs = (pkt->dts != AV_NOPTS_VALUE)
         ? av_rescale_q(pkt->dts, inStream->time_base, AV_TIME_BASE_Q) : -1;
-    if (skipUntilUs > 0 && dtsUs >= 0 && dtsUs <= skipUntilUs) return;
-    if (dtsUs >= 0) lastInputDtsUs = dtsUs;
+    if (skipUntilUs > 0 && dtsUs >= 0 && dtsUs <= skipUntilUs) return 0;
     av_packet_rescale_ts(pkt, inStream->time_base, outStream->time_base);
     pkt->stream_index = outIdx;
-    bytesWritten += pkt->size;
-    av_interleaved_write_frame(outCtx, pkt);
+    const int size = pkt->size;
+    int ret = av_interleaved_write_frame(outCtx, pkt);
+    if (ret >= 0) { bytesWritten += size; if (dtsUs >= 0) lastInputDtsUs = dtsUs; }
+    return ret;
 }
 
 // ── 辅助：DASH 双流读+写一步 ──
@@ -384,11 +344,11 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
                           bool& videoReady, bool& audioReady,
                           int64_t& bytesWritten,
                           int64_t& lastVideoDtsUs, int64_t& lastAudioDtsUs,
-                          int64_t skipVideoUntilUs, int64_t skipAudioUntilUs) {
+                          int64_t skipVideoUntilUs, int64_t skipAudioUntilUs, bool& outputFailed) {
     if (!videoReady && !videoEof) {
         int ret = av_read_frame(videoCtx, videoPkt);
         if (ret == AVERROR_EOF) { videoEof = true; }
-        else if (ret < 0) { return -1; }
+        else if (ret < 0) { return ret; }
         else if (videoPkt->stream_index == videoStreamIn) {
             AVStream* in = videoCtx->streams[videoStreamIn];
             int64_t dtsUs = (videoPkt->dts != AV_NOPTS_VALUE)
@@ -396,7 +356,6 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
             if (skipVideoUntilUs > 0 && dtsUs >= 0 && dtsUs <= skipVideoUntilUs) {
                 av_packet_unref(videoPkt);
             } else {
-                if (dtsUs >= 0) lastVideoDtsUs = dtsUs;
                 av_packet_rescale_ts(videoPkt, in->time_base, streams.video->time_base);
                 videoPkt->stream_index = 0;
                 videoReady = true;
@@ -406,7 +365,7 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
     if (!audioReady && !audioEof) {
         int ret = av_read_frame(audioCtx, audioPkt);
         if (ret == AVERROR_EOF) { audioEof = true; }
-        else if (ret < 0) { return -1; }
+        else if (ret < 0) { return ret; }
         else if (audioPkt->stream_index == audioStreamIn) {
             AVStream* in = audioCtx->streams[audioStreamIn];
             int64_t dtsUs = (audioPkt->dts != AV_NOPTS_VALUE)
@@ -414,7 +373,6 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
             if (skipAudioUntilUs > 0 && dtsUs >= 0 && dtsUs <= skipAudioUntilUs) {
                 av_packet_unref(audioPkt);
             } else {
-                if (dtsUs >= 0) lastAudioDtsUs = dtsUs;
                 av_packet_rescale_ts(audioPkt, in->time_base, streams.audio->time_base);
                 audioPkt->stream_index = streams.audioIdx;
                 audioReady = true;
@@ -426,15 +384,17 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
     bool writeVideo = videoReady && (!audioReady ||
         av_compare_ts(videoPkt->dts, streams.video->time_base,
                       audioPkt->dts, streams.audio->time_base) <= 0);
-    if (writeVideo) {
-        bytesWritten += videoPkt->size;
-        av_interleaved_write_frame(outCtx, videoPkt);
-        av_packet_unref(videoPkt); videoReady = false;
-    } else {
-        bytesWritten += audioPkt->size;
-        av_interleaved_write_frame(outCtx, audioPkt);
-        av_packet_unref(audioPkt); audioReady = false;
-    }
+    AVPacket* packet = writeVideo ? videoPkt : audioPkt;
+    AVStream* stream = writeVideo ? streams.video : streams.audio;
+    const int64_t dts = packet->dts == AV_NOPTS_VALUE ? -1
+        : av_rescale_q(packet->dts, stream->time_base, AV_TIME_BASE_Q);
+    const int size = packet->size;
+    const int ret = av_interleaved_write_frame(outCtx, packet);
+    av_packet_unref(packet);
+    (writeVideo ? videoReady : audioReady) = false;
+    if (ret < 0) { outputFailed = true; return ret; }
+    bytesWritten += size;
+    if (dts >= 0) (writeVideo ? lastVideoDtsUs : lastAudioDtsUs) = dts;
     return 0;
 }
 
@@ -444,8 +404,9 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
 static AVFormatContext* reopenAndSeek(const std::string& url,
                                        const std::string& headers,
                                        int64_t targetDtsUs,
-                                       DlInterruptCtx& intCtx) {
-    AVFormatContext* ctx = openStream(url, headers, intCtx);
+                                       DlInterruptCtx& intCtx,
+                                       const std::string& cookies) {
+    AVFormatContext* ctx = openStream(url, headers, intCtx, cookies);
     if (!ctx) return nullptr;
     if (targetDtsUs > 0) {
         intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
@@ -465,16 +426,17 @@ struct WriteContext {
     int audioStreamIn;
     OutputStreams streams;
     std::string outputPath;
+    std::unique_ptr<H264NalTransformer> transform;
 };
 
 // 写入循环：逐 packet 读取并写入，定期回调进度
 using ProgressCb = Downloader::ProgressCallback;
 
-static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
+static bool runWriteLoop(WriteContext& wc, ExtractedStream& info,
                           DownloadMode mode,
                           DlInterruptCtx& intCtx,
                           std::atomic<bool>& running, std::atomic<bool>& cancelled,
-                          std::atomic<bool>& paused, ProgressCb& onProgress) {
+                          std::atomic<bool>& paused, ProgressCb& onProgress, std::string& failure) {
     int64_t bytesWritten = 0;
     auto startTime = std::chrono::steady_clock::now();
     auto lastProgressTime = startTime;
@@ -492,6 +454,24 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
     // 退避状态：retryCount 为连续失败次数，retryUntil 为下次允许重连的时间点
     int retryCount = 0;
     auto retryUntil = std::chrono::steady_clock::now();
+    auto lastRefresh = std::chrono::steady_clock::time_point::min();
+    bool fatal = false;
+    auto resetTransform = [&]() {
+        wc.transform.reset();
+        if (info.cctvProtection != CctvProtectionMode::None)
+            wc.transform = std::make_unique<H264NalTransformer>(info.cctvProtection);
+    };
+    resetTransform();
+    auto refreshSource = [&]() {
+        const auto now = std::chrono::steady_clock::now();
+        if (info.resolver == StreamResolverKind::Direct || cancelled.load() ||
+            (lastRefresh != std::chrono::steady_clock::time_point::min() && now - lastRefresh < std::chrono::seconds(15))) return;
+        lastRefresh = now;
+        std::string error;
+        if (MediaSourceResolver::refresh(info, error, &cancelled))
+            LOG_INFO("Downloader: 已刷新当前画质的播放地址和鉴权信息");
+        else LOG_WARN("Downloader: 地址刷新未完成: " + error);
+    };
 
     // ── 状态机内部动作：把两路连接都关掉（进入暂停或网络失败时调用）──
     auto closeInputs = [&]() {
@@ -508,12 +488,37 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
         // 造成重复内容。只有有自然完成点的 VOD 才执行关键帧回退和重复包过滤。
         const int64_t videoTarget = mode == DownloadMode::VodDownload ? lastVideoDtsUs : 0;
         const int64_t audioTarget = mode == DownloadMode::VodDownload ? lastAudioDtsUs : 0;
-        wc.videoCtx = reopenAndSeek(info.videoUrl, info.headers, videoTarget, intCtx);
+        wc.videoCtx = reopenAndSeek(info.videoUrl, info.headers, videoTarget, intCtx, info.httpCookies);
         if (!wc.videoCtx) return false;
         if (!singleStream && !info.audioUrl.empty()) {
-            wc.audioCtx = reopenAndSeek(info.audioUrl, info.headers, audioTarget, intCtx);
+            wc.audioCtx = reopenAndSeek(info.audioUrl, info.headers, audioTarget, intCtx, info.httpCookies);
             if (!wc.audioCtx) { avformat_close_input(&wc.videoCtx); return false; }
         }
+        // A refreshed URL must still contain the same codecs and dimensions.
+        const int video = av_find_best_stream(wc.videoCtx, wc.streams.video->codecpar->codec_type, -1, -1, nullptr, 0);
+        AVFormatContext* audioSource = wc.audioCtx ? wc.audioCtx : wc.videoCtx;
+        const int audio = av_find_best_stream(audioSource, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        auto compatible = [](AVCodecParameters* a, AVCodecParameters* b) {
+            return a->codec_id == b->codec_id && a->codec_type == b->codec_type &&
+                a->width == b->width && a->height == b->height &&
+                a->sample_rate == b->sample_rate &&
+#if LIBAVCODEC_VERSION_MAJOR >= 59
+                        a->ch_layout.nb_channels == b->ch_layout.nb_channels;
+#else
+                        a->channels == b->channels;
+#endif
+        };
+        if (video < 0 || !compatible(wc.videoCtx->streams[video]->codecpar, wc.streams.video->codecpar) ||
+            (wc.streams.audio && (audio < 0 || !compatible(audioSource->streams[audio]->codecpar, wc.streams.audio->codecpar)))) {
+            failure = "刷新后的编码或画质发生变化，无法续写同一文件";
+            fatal = true;
+            closeInputs();
+            return false;
+        }
+        wc.videoStreamIn = video;
+        wc.audioStreamIn = audio;
+        videoEof = audioEof = false;
+        resetTransform();
         skipVideoUntilUs = videoTarget;
         skipAudioUntilUs = audioTarget;
         return true;
@@ -548,6 +553,7 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
 
         // ── 态 3：连接未打开（刚暂停恢复 / 退避到期），重开 ──
         if (!wc.videoCtx) {
+            if (authorizationFailure(intCtx.lastError) || retryCount >= 2) refreshSource();
             if (onProgress) {
                 DownloadProgress progress;
                 progress.mode = mode;
@@ -556,7 +562,9 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
                 onProgress(progress);
             }
             if (!reopenAll()) {
+                if (fatal) break;
                 retryCount++;
+                if (authorizationFailure(intCtx.lastError) || retryCount >= 2) refreshSource();
                 int backoff = computeBackoffSecs(retryCount);
                 retryUntil = std::chrono::steady_clock::now() + std::chrono::seconds(backoff);
                 LOG_WARN("Downloader: 重连失败（第 " + std::to_string(retryCount) + " 次），"
@@ -569,34 +577,43 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
         }
 
         // ── 态 4：正常读写 ──
-        intCtx.deadline = now + std::chrono::seconds(kNetworkTimeoutSecs);
+        intCtx.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs);
 
         if (singleStream) {
             AVPacket* pkt = av_packet_alloc();
             int ret = av_read_frame(wc.videoCtx, pkt);
-            if (ret == AVERROR_EOF) { av_packet_free(&pkt); break; }
+            if (ret == AVERROR_EOF && mode == DownloadMode::VodDownload) { av_packet_free(&pkt); break; }
             if (ret < 0) {
                 // 网络失败（含 interrupt 超时）：关连接进退避
                 av_packet_free(&pkt);
                 if (cancelled.load()) break;
                 LOG_WARN("Downloader: 读包失败 ret=" + std::to_string(ret) + "，进入退避重连");
+                intCtx.lastError = ret;
                 closeInputs();
                 retryCount++;
                 retryUntil = std::chrono::steady_clock::now()
                            + std::chrono::seconds(computeBackoffSecs(retryCount));
                 continue;
             }
-            writeSingleStreamPacket(pkt, wc.videoCtx, wc.videoStreamIn, wc.audioStreamIn,
+            if (wc.transform && pkt->stream_index == wc.videoStreamIn && !wc.transform->process(pkt, failure)) {
+                av_packet_free(&pkt); fatal = true; break;
+            }
+            ret = writeSingleStreamPacket(pkt, wc.videoCtx, wc.videoStreamIn, wc.audioStreamIn,
                                     wc.streams, wc.outCtx, bytesWritten,
-                                    lastVideoDtsUs, skipVideoUntilUs);
+                                    pkt->stream_index == wc.videoStreamIn ? lastVideoDtsUs : lastAudioDtsUs,
+                                    pkt->stream_index == wc.videoStreamIn ? skipVideoUntilUs : skipAudioUntilUs);
             av_packet_free(&pkt);
+            if (ret < 0) { failure = "写入下载文件失败"; fatal = true; break; }
         } else {
+            bool outputFailed = false;
             int ret = writeDashStep(wc.videoCtx, wc.audioCtx, wc.videoStreamIn, wc.audioStreamIn,
                                     wc.streams, wc.outCtx, videoPkt, audioPkt,
                                     videoEof, audioEof, videoReady, audioReady, bytesWritten,
                                     lastVideoDtsUs, lastAudioDtsUs,
-                                    skipVideoUntilUs, skipAudioUntilUs);
+                                    skipVideoUntilUs, skipAudioUntilUs, outputFailed);
             if (ret < 0) {
+                if (outputFailed) { failure = "写入下载文件失败"; fatal = true; break; }
+                intCtx.lastError = ret;
                 if (cancelled.load()) break;
                 LOG_WARN("Downloader: DASH 读包失败，进入退避重连");
                 closeInputs();
@@ -612,7 +629,7 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
         }
 
         // 定期回调进度
-        // 总大小优先用 yt-dlp 提供的 filesize（权威），fallback 到 duration*bitrate 估算
+        // 总大小优先用 浏览器捕获 提供的 filesize（权威），fallback 到 duration*bitrate 估算
         // HLS manifest 的 videoCtx->bit_rate 常为 0，不能作为主要估算来源
         now = std::chrono::steady_clock::now();
         if (std::chrono::duration<double>(now - lastProgressTime).count() >= kProgressIntervalSecs
@@ -658,22 +675,21 @@ static void runWriteLoop(WriteContext& wc, const ExtractedStream& info,
         }
     }
 
-    if (videoReady) { av_interleaved_write_frame(wc.outCtx, videoPkt); av_packet_unref(videoPkt); }
-    if (audioReady) { av_interleaved_write_frame(wc.outCtx, audioPkt); av_packet_unref(audioPkt); }
+
     av_packet_free(&videoPkt);
     av_packet_free(&audioPkt);
+    return !fatal;
 }
 
-void Downloader::downloadLoop(const std::string& sourceUrl,
+void Downloader::downloadLoop(ExtractedStream info,
                                const std::string& outputDir,
-                               const std::string& formatId,
                                ProgressCallback onProgress,
                                FinishCallback   onFinish) {
-    // ── 第一步：提取流 URL ──
-    ExtractedStream info;
-    if (!extractStream(sourceUrl, formatId, info, cancelled_)) {
+    // Use the exact active session: never guess quality from a UI label or
+    // silently re-extract the webpage through another backend.
+    if (info.videoUrl.empty()) {
         running_.store(false);
-        if (onFinish) onFinish(false, "", "提取流失败");
+        if (onFinish) onFinish(false, "", "当前没有可下载的媒体会话");
         return;
     }
     if (cancelled_.load()) {
@@ -707,23 +723,25 @@ void Downloader::downloadLoop(const std::string& sourceUrl,
     DlInterruptCtx intCtx{std::chrono::steady_clock::now() + std::chrono::seconds(kNetworkTimeoutSecs), &cancelled_};
 
     WriteContext wc{};
-    wc.videoCtx = openStream(info.videoUrl, info.headers, intCtx);
-    if (!wc.videoCtx) {
-        running_.store(false);
-        if (onFinish) onFinish(false, "", "无法打开视频流");
-        return;
-    }
-    if (info.isDash && !info.audioUrl.empty()) {
-        wc.audioCtx = openStream(info.audioUrl, info.headers, intCtx);
-        if (!wc.audioCtx) {
-            avformat_close_input(&wc.videoCtx);
+    auto openInputs = [&]() {
+        wc.videoCtx = openStream(info.videoUrl, info.headers, intCtx, info.httpCookies);
+        if (!wc.videoCtx) return false;
+        if (info.isDash && !info.audioUrl.empty()) {
+            wc.audioCtx = openStream(info.audioUrl, info.headers, intCtx, info.httpCookies);
+            if (!wc.audioCtx) { avformat_close_input(&wc.videoCtx); return false; }
+        }
+        return true;
+    };
+    if (!openInputs()) {
+        std::string refreshError;
+        if (cancelled_.load() || !MediaSourceResolver::refresh(info, refreshError, &cancelled_) || !openInputs()) {
             running_.store(false);
-            if (onFinish) onFinish(false, "", "无法打开音频流");
+            if (onFinish) onFinish(false, "", "无法打开当前画质的音视频流。" + refreshError);
             return;
         }
     }
 
-    // FFmpeg 的容器 duration 比 URL/yt-dlp 缺省值更接近实际输入；仅在未明确直播时补齐。
+    // FFmpeg 的容器 duration 比 URL/浏览器捕获 缺省值更接近实际输入；仅在未明确直播时补齐。
     if (!info.isLive && info.duration <= 0 && wc.videoCtx->duration != AV_NOPTS_VALUE && wc.videoCtx->duration > 0)
         info.duration = static_cast<double>(wc.videoCtx->duration) / AV_TIME_BASE;
 
@@ -773,7 +791,7 @@ void Downloader::downloadLoop(const std::string& sourceUrl,
     wc.streams = addOutputStreams(wc.outCtx, wc.videoCtx, wc.videoStreamIn,
                                   audioSrcCtx, wc.audioStreamIn);
 
-    if (avformat_write_header(wc.outCtx, nullptr) < 0) {
+    if (!wc.streams.video || (wc.audioCtx && !wc.streams.audio) || avformat_write_header(wc.outCtx, nullptr) < 0) {
         avformat_close_input(&wc.videoCtx);
         if (wc.audioCtx) avformat_close_input(&wc.audioCtx);
         avio_closep(&wc.outCtx->pb); avformat_free_context(wc.outCtx);
@@ -787,15 +805,16 @@ void Downloader::downloadLoop(const std::string& sourceUrl,
            + " duration=" + std::to_string(info.duration));
 
     // ── 第四步：写入循环（含暂停关连接 / 网络失败退避重连 / seek 续流）──
-    runWriteLoop(wc, info, mode, intCtx, running_, cancelled_, paused_, onProgress);
-
-    av_write_trailer(wc.outCtx);
+    std::string failure;
+    bool written = runWriteLoop(wc, info, mode, intCtx, running_, cancelled_, paused_, onProgress, failure);
+    if (av_write_trailer(wc.outCtx) < 0) { written = false; failure = "写入文件尾失败"; }
     if (wc.videoCtx) avformat_close_input(&wc.videoCtx);
     if (wc.audioCtx) avformat_close_input(&wc.audioCtx);
-    if (!(wc.outCtx->oformat->flags & AVFMT_NOFILE)) avio_closep(&wc.outCtx->pb);
+    if (!(wc.outCtx->oformat->flags & AVFMT_NOFILE) && avio_closep(&wc.outCtx->pb) < 0) { written = false; failure = "关闭下载文件失败"; }
     avformat_free_context(wc.outCtx);
     running_.store(false);
 
+    if (!written) { if (onFinish) onFinish(false, "", failure); return; }
     if (cancelled_.load() && mode == DownloadMode::VodDownload) {
         // VOD 的 Cancel 明确表示放弃任务，PartFileGuard 负责删除临时文件。
         if (onFinish) onFinish(false, "", "已取消");

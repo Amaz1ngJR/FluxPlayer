@@ -2,7 +2,7 @@
  * @file CookieStore.h
  * @brief FluxPlayer 专用 cookie 存储器
  *
- * 维护一份 Netscape 格式的 cookie 文件，供 yt-dlp 通过 --cookies 参数读取。
+ * 维护一份 Netscape 格式的 cookie 文件，用于保留网页登录 Cookie。
  * 文件路径固定在 fluxplayer.ini 所在目录的 cookies/web_cookies.txt，
  * 不暴露给用户配置，避免误改和路径混乱。
  *
@@ -17,6 +17,7 @@
 #include <cstdint>
 
 namespace FluxPlayer {
+struct ExtractedStream;
 
 /**
  * @brief Netscape 格式 cookie 项
@@ -59,6 +60,9 @@ public:
      * 且未过期的 cookie 至少一项。
      */
     static bool hasCookiesForUrl(const std::string& url);
+
+    /// Only cookies belonging to the active media and its quality URLs.
+    static std::vector<NetscapeCookie> loadForMediaSession(const ExtractedStream& stream);
 
     /**
      * @brief 合并写入一批 cookie

@@ -8,8 +8,10 @@ namespace FluxPlayer {
 struct SuperResolutionJob {
     std::string input, outputDirectory, model, runtime;
     int scale = 2;
+    bool nativeOutput = false; ///< Use the model's detected native dimensions after model validation.
     int outputWidth = 0, outputHeight = 0;
     bool cpu = false;
+    bool externalModel = false;    ///< 用户明确选择的外部 ONNX；内置模型始终固定散列校验。
     bool hardwareDecode = true;    ///< Snapshot of settings.hwaccel when the task starts.
     bool preserveSourceSar = false; // 保持源/原生尺寸模式；自定义画布使用 SAR=1。
     bool transcodeAudio = false;    ///< 默认无损复制音轨；仅用户明确选择时转换为 AAC。
@@ -18,6 +20,7 @@ struct SuperResolutionJob {
 struct SuperResolutionStatus {
     std::string phase = "idle", stage, error, output, temporary, device, encoder, audio;
     std::string audioRepairs, audioPreflight, color, decoder;
+    int modelScale = 0; ///< Detected from the validated model output; zero before model load.
     double audioCheckedSeconds = 0;
     uint64_t frames = 0, bytes = 0;
     double progress = 0, elapsed = 0, sourceSeconds = 0, duration = 0;

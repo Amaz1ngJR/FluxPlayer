@@ -172,9 +172,11 @@ struct Pipeline {
     void openInput(bool openVideoDecoder = true) {
         stage("probing", "Probing source and validating export configuration");
         if (!fs::is_regular_file(fs::u8path(job.input))) throw std::runtime_error("Input must be one local regular file");
-        if (job.scale != 2 && job.scale != 4) throw std::runtime_error("Native model scale must be 2 or 4");
-        sizeCheck(job.outputWidth,job.outputHeight);
-        if (job.outputWidth%2 || job.outputHeight%2) throw std::runtime_error("Output dimensions must be even");
+        if (!job.externalModel && job.scale!=2)throw std::runtime_error("Bundled model must use native scale 2");
+        if (!job.nativeOutput) {
+            sizeCheck(job.outputWidth,job.outputHeight);
+            if (job.outputWidth%2 || job.outputHeight%2) throw std::runtime_error("Output dimensions must be even");
+        }
         input = avformat_alloc_context(); if (!input) throw std::bad_alloc();
         input->interrupt_callback = {[](void* p){ return static_cast<Pipeline*>(p)->cancelled.load()?1:0; },this};
         AVDictionary* options=nullptr;
@@ -190,7 +192,7 @@ struct Pipeline {
         if (!video) throw std::runtime_error("No main video stream");
         if(!video->time_base.num||video->time_base.den<=0)throw std::runtime_error("Invalid video time base");
         sizeCheck(video->codecpar->width,video->codecpar->height);
-        sizeCheck(video->codecpar->width*job.scale,video->codecpar->height*job.scale);
+        if (!job.externalModel) sizeCheck(video->codecpar->width*job.scale,video->codecpar->height*job.scale);
         // 仅接受单位正交旋转；镜像、平移、缩放、透视不能作为普通方向信息复制。
         const uint8_t* matrix=nullptr;
         size_t bytes=0;
@@ -238,8 +240,16 @@ struct Pipeline {
         validateFrame(first);
         first = colors.prepare(first, video->codecpar, video->time_base);
         update([&](auto& s){s.color=colors.description();});
-        sizeCheck(first->width*job.scale,first->height*job.scale);
         sourceW=first->width; sourceH=first->height; sourceFormat=first->format;
+        sizeCheck(sourceW,sourceH);
+        const int modelScale=model.scale();
+        if(modelScale<1 || modelScale>16)throw std::runtime_error("Detected model scale is outside supported safety limits");
+        const int64_t intermediateWidth=int64_t(sourceW)*modelScale, intermediateHeight=int64_t(sourceH)*modelScale;
+        sizeCheck(static_cast<int>(intermediateWidth),static_cast<int>(intermediateHeight));
+        job.scale=modelScale;
+        if(job.nativeOutput) {job.outputWidth=static_cast<int>(intermediateWidth);job.outputHeight=static_cast<int>(intermediateHeight);}
+        sizeCheck(job.outputWidth,job.outputHeight);
+        if(job.outputWidth%2 || job.outputHeight%2)throw std::runtime_error("Output dimensions must be even");
         sourceSar=av_guess_sample_aspect_ratio(input,video,const_cast<AVFrame*>(first));
         if(sourceSar.num==0)sourceSar={1,1};
         if(sourceSar.num<=0||sourceSar.den<=0||av_q2d(sourceSar)<.01||av_q2d(sourceSar)>100)throw std::runtime_error("Invalid source SAR");
@@ -614,14 +624,14 @@ struct Pipeline {
         if(container!="mp4" && hasDisplayMatrix)
             throw std::runtime_error("Original audio needs MKV, but display-matrix preservation is not validated for MKV; explicitly select AAC/MP4");
         if(origin<originalOrigin)update([&](auto& s){if(s.duration>0)s.duration+=double(originalOrigin-origin)/AV_TIME_BASE;});
-        openEncoder(frame.get());
         preflightAudio();
         update([&](auto& s){s.audio+=" / "+std::string(container=="mp4"?"MP4":"MKV");});
         if(fs::file_size(fs::u8path(job.input))!=inputSize || fs::last_write_time(fs::u8path(job.input))!=inputModified)
             throw std::runtime_error("Input changed during audio preflight; restart with a stable local file");
         stage("loading","Loading and validating Real-ESRGAN");
-        model.load(job.runtime,job.model,job.scale,job.cpu);
-        update([&](auto& s){s.device=model.device();});stopCheck();openOutput();
+        model.load(job.runtime,job.model,job.scale,job.cpu,job.externalModel);
+        update([&](auto& s){s.device=model.device();s.modelScale=model.scale();});
+        stopCheck();openEncoder(frame.get());openOutput();
         const char* serialEncode=std::getenv("FLUX_SR_SERIAL_ENCODE");
         if(!(serialEncode && std::string(serialEncode)=="1")) {
             try {frameWriter=std::make_unique<SRSerialWorker>();}

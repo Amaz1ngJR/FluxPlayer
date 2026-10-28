@@ -1555,7 +1555,7 @@ local function render_super_resolution()
         local source=tonumber(d.sourceSeconds) or 0
         local duration=tonumber(d.taskDuration) or 0
         local sizes="Source "..(d.width or "0").." × "..(d.height or "0")..
-            " → Native "..(d.scale or "2").."x model "..(d.intermediateSize or "—").." → Output "..(d.outputSize or "—")
+            " → "..(d.modelScaleLabel or "Native scale: pending").." model "..(d.intermediateSize or "—").." → Output "..(d.outputSize or "—")
         local inference=(d.actualDevice or "")~="" and d.actualDevice or "Not initialized"
         local encoder=(d.encoder or "")~="" and d.encoder or "Not initialized"
         local audio=(d.audioPolicy or "")~="" and d.audioPolicy or "Pending probe"
@@ -1678,18 +1678,12 @@ local function render_super_resolution()
     c.text(d.audio,88,612,440,12)
     c.text(d.sourceStatus,88,646,440,11,"textMuted")
     c.text(d.geometry,88,678,440,11,"textMuted")
-    c.text("Main video + default audio; no subtitles or attachments",88,679,440,12,"textMuted")
     c.rect(576,112,800,598,"bgPanel",1,false,6); c.rect(576,112,800,598,"accentSecondary",.45,true,6)
     c.text("02 / ENHANCEMENT MODEL",600,145,752,13,"accentSecondary")
-    for i,s in ipairs({"2","4"}) do
-        local x=600+(i-1)*384
-        if d["model"..s]=="true" then
-            c.button("Real-ESRGAN x"..s.."plus / Native "..s.."x","srSetModel",x,164,368,54,"accentSecondary",{value=s},d.scale==s and .18 or .04)
-        else
-            c.rect(x,164,368,54,"textMuted",.5,true)
-            c.text(s.."x MODEL NOT INSTALLED",x,196,368,13,"textMuted","center")
-        end
-    end
+    c.button("Built-in Real-ESRGAN x2plus / Native 2x","srSetModel",600,164,368,34,"accentSecondary",{value="2"},d.modelSource=="builtin" and .18 or .04)
+    c.button("CHOOSE EXTERNAL ONNX MODEL","srChooseModel",984,164,368,34,"accentSecondary",nil,d.modelSource=="external" and .18 or .04)
+    c.text("Selected: "..(d.modelName or "—"),600,220,370,12,"accentSecondary")
+    c.text(d.modelScaleLabel or "Native scale: auto-detect at export",984,220,368,12,"textMuted")
     c.text("Intermediate size (read-only)  "..(d.intermediateSize or "—"),600,243,752,13,"accentSecondary")
     c.line(600,261,1352,261,"accentSecondary",1,.4)
     c.text("03 / OUTPUT RESOLUTION (independent of model scale)",600,288,752,13,"accentPrimary")

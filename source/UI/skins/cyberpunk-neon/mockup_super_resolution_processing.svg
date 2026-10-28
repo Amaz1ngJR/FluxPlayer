@@ -16,7 +16,7 @@
     <text x="212" y="174" font-size="18" fill="#EAF8FF">Mountain_Trip.mp4</text>
     <rect x="1052" y="151" width="176" height="30" rx="3" fill="#A855FF" fill-opacity=".12" stroke="#A855FF"/>
     <text x="1140" y="171" text-anchor="middle" font-size="12" fill="#C9A6FF">ONE LOCAL TASK</text>
-    <text x="212" y="204" font-size="13" fill="#91ADCC">Source 1280 × 720 → Native 2x model 2560 × 1440 → Output 1280 × 720</text>
+    <text x="212" y="204" font-size="13" fill="#91ADCC">Source 1280 × 720 → Native scale: 2x model 2560 × 1440 → Output 1280 × 720</text>
     <path d="M212 226H1228" stroke="#6336A4" stroke-opacity=".5"/>
     <g id="stage-indicator" font-size="13" text-anchor="middle">
       <path d="M340 267H1100" stroke="#24384F" stroke-width="2"/>

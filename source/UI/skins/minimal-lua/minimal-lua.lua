@@ -400,6 +400,7 @@ local function render_super_resolution()
         text(string.format("%.1f%% / %d frames / %.2f fps / %s elapsed / ETA %s",progress*100,frames,frames/math.max(1,elapsed),sr_duration(elapsed),eta),40,220,1340)
         text((d.actualDevice or "").." / "..(d.encoder or ""),40,280,1340)
         text(d.audioPolicy,40,320,1340)
+        text((d.modelName or "—").." / "..(d.modelScaleLabel or "Native scale: pending").." / Intermediate: "..(d.intermediateSize or "—"),40,350,1340,"textMuted",13)
         text(d.error~="" and d.error or (d.outputPath~="" and d.outputPath or d.temporary),40,380,1340)
         if d.running=="true" then
             if d.phase~="cancelling" then button("CANCEL TASK","srCancel","",40,440,260) end
@@ -431,13 +432,12 @@ local function render_super_resolution()
     text(d.sourceStatus,40,632,460,"textMuted",12)
     text(d.geometry,40,662,460,"textMuted",11)
     text("02 / ENHANCEMENT MODEL",560,126,820)
-    for i,value in ipairs({"2","4"}) do
-        if d["model"..value]=="true" then
-            button("Real-ESRGAN x"..value.."plus / Native "..value.."x","srSetModel",value,560+(i-1)*420,164,400,d.scale==value)
-        else text(value.."x MODEL NOT INSTALLED",560+(i-1)*420,170,400,"textMuted") end
-    end
-    text("Intermediate size (read-only)  "..(d.intermediateSize or "—"),560,226,820)
-    text("03 / OUTPUT RESOLUTION (independent of model scale)",560,270,820)
+    button("Built-in Real-ESRGAN x2plus / Native 2x","srSetModel","2",560,164,400,d.modelSource=="builtin")
+    button("CHOOSE EXTERNAL ONNX MODEL","srChooseModel","",980,164,400,d.modelSource=="external")
+    text("Selected: "..(d.modelName or "—"),560,204,390,"textMuted",12)
+    text(d.modelScaleLabel or "Native scale: auto-detect at export",980,204,400,"textMuted",12)
+    text("Intermediate size (read-only)  "..(d.intermediateSize or "—"),560,246,820)
+    text("03 / OUTPUT RESOLUTION (independent of model scale)",560,280,820)
     local modes={{"source","Keep source size (default)"},{"native","Native model size"},{"720p","720p · 1280 × 720"},{"1080p","1080p · 1920 × 1080"},{"4k","4K · 3840 × 2160"},{"custom","Custom dimensions"}}
     for i,m in ipairs(modes) do
         button(m[2],"srSetResolution",m[1],560+((i-1)%3)*280,310+math.floor((i-1)/3)*48,260,d.resolutionMode==m[1])

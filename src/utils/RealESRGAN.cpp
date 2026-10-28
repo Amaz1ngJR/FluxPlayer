@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -106,11 +107,45 @@ struct RealESRGAN::Impl {
     OrtMemoryInfo* memory = nullptr;
     OrtAllocator* allocator = nullptr;
     std::string inputName, outputName, provider, digest, runtimeVersion;
+    bool externalModel = false;
     std::vector<float> inputBuffer, outputBuffer;
     OrtValue *inputTensor = nullptr, *outputTensor = nullptr;
     std::array<float,256> normalized{};
     std::vector<std::array<int,kTile>> reflectedX, reflectedY;
     int indexedWidth = 0, indexedHeight = 0;
+    static int scaleFromShape(const std::array<int64_t,4>& shape) {
+        if (shape[0]!=1 || shape[1]!=3 || shape[2]<=0 || shape[2]!=shape[3] || shape[2]%kTile)
+            throw std::runtime_error("External model output must be a fixed square RGB tile with an integer scale");
+        if(shape[2]>4096)throw std::runtime_error("External model output tile exceeds the 4096-pixel safety limit");
+        return static_cast<int>(shape[2]/kTile);
+    }
+    void detectScale() {
+        // Let ORT allocate the probe output; never assume the user's model is x2/x4.
+        std::vector<float> pixels(3*kTile*kTile,0.5f);
+        const int64_t shape[]={1,3,kTile,kTile};
+        OrtValue* rawInput=nullptr;
+        check(api->CreateTensorWithDataAsOrtValue(memory,pixels.data(),pixels.size()*sizeof(float),
+            shape,4,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&rawInput));
+        auto input=std::unique_ptr<OrtValue,void(*)(OrtValue*)>(rawInput,api->ReleaseValue);
+        const char* in=inputName.c_str(); const char* out=outputName.c_str();
+        const OrtValue* inputs[]={input.get()};
+        OrtValue* rawOutput=nullptr;
+        auto* status=api->Run(session,nullptr,&in,inputs,1,&out,1,&rawOutput);
+        auto output=std::unique_ptr<OrtValue,void(*)(OrtValue*)>(rawOutput,api->ReleaseValue);
+        check(status);
+        OrtTensorTypeAndShapeInfo* rawInfo=nullptr;
+        check(api->GetTensorTypeAndShape(output.get(),&rawInfo));
+        auto info=std::unique_ptr<OrtTensorTypeAndShapeInfo,void(*)(OrtTensorTypeAndShapeInfo*)>(rawInfo,api->ReleaseTensorTypeAndShapeInfo);
+        size_t count=0; ONNXTensorElementDataType dtype;
+        check(api->GetDimensionsCount(info.get(),&count));
+        check(api->GetTensorElementType(info.get(),&dtype));
+        if(count!=4 || dtype!=ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+            throw std::runtime_error("External model must produce one FP32 NCHW RGB tensor");
+        std::array<int64_t,4> actual{};
+        check(api->GetDimensions(info.get(),actual.data(),actual.size()));
+        scale=scaleFromShape(actual);
+        LOG_INFO("Offline SR: external model native scale detected from inference: "+std::to_string(scale)+"x");
+    }
     void prepareInput(int width,int height) {
         if(!inputTensor) {
             inputBuffer.resize(3*kTile*kTile);
@@ -212,11 +247,14 @@ struct RealESRGAN::Impl {
             // 编译缓存以真实 ORT 版本、已校验模型及固定 EP/shape 配置隔离。
             auto cache=std::filesystem::u8path(Config::getAppDataDir())/"sr-coreml"/
                 (runtimeVersion+"-"+digest+"-256-"+coremlFormat+"-"+computeUnits+"-static-acc32");
-            std::error_code ec;std::filesystem::create_directories(cache,ec);
+            std::error_code ec;
+            if (!externalModel) std::filesystem::create_directories(cache,ec);
             const std::string cachePath=cache.u8string();
             const char* keys[6] = {"ModelFormat", "MLComputeUnits", "RequireStaticInputShapes", "ModelCacheDirectory"};
             const char* values[6] = {coremlFormat.c_str(), computeUnits.c_str(), "1", cachePath.c_str()};
-            size_t optionCount=ec?3:4;
+            // 外部 ONNX 可能引用独立权重文件；仅主文件散列不足以标识整个模型。
+            // 不复用其持久编译缓存，避免权重变化后命中旧缓存。
+            size_t optionCount=(ec || externalModel)?3:4;
             keys[optionCount]="AllowLowPrecisionAccumulationOnGPU";values[optionCount++]="0";
             const char* computePlan=std::getenv("FLUX_SR_COREML_COMPUTE_PLAN");
             if(computePlan && std::string(computePlan)=="1") {
@@ -288,7 +326,18 @@ struct RealESRGAN::Impl {
         std::array<int64_t,4> shape{};
         check(api->GetDimensions(tensor, shape.data(), shape.size()));
         const int side = output ? kTile * scale : kTile;
-        if (shape != std::array<int64_t,4>{1,3,side,side}) throw std::runtime_error("Model shape does not match native scale");
+        if (!externalModel) {
+            if (shape != std::array<int64_t,4>{1,3,side,side}) throw std::runtime_error("Bundled model shape is invalid");
+        } else if (!output) {
+            const std::array<int64_t,4> expected{1,3,kTile,kTile};
+            for (size_t i=0;i<shape.size();++i)
+                if (shape[i]>0 && shape[i]!=expected[i])
+                    throw std::runtime_error("External model must accept FP32 RGB NCHW [1,3,256,256] tiles");
+        } else {
+            if ((shape[0]>0 && shape[0]!=1) || (shape[1]>0 && shape[1]!=3))
+                throw std::runtime_error("External model output must be batch 1 with 3 RGB channels");
+            if (shape[2]>0 && shape[3]>0) scaleFromShape({1,3,shape[2],shape[3]});
+        }
         char* name = nullptr;
         check(output ? api->SessionGetOutputName(session, 0, allocator, &name) : api->SessionGetInputName(session, 0, allocator, &name));
         (output ? outputName : inputName) = name;
@@ -297,15 +346,24 @@ struct RealESRGAN::Impl {
 };
 RealESRGAN::RealESRGAN() : impl_(std::make_unique<Impl>()) {}
 RealESRGAN::~RealESRGAN() = default;
-void RealESRGAN::load(const std::string& library, const std::string& model, int scale, bool cpu) {
+void RealESRGAN::load(const std::string& library, const std::string& model, int scale, bool cpu, bool externalModel) {
     const auto loadStart=SRClock::now();
     impl_ = std::make_unique<Impl>();
-    auto& p = *impl_; p.scale = scale;
-    if (scale != 2 && scale != 4) throw std::runtime_error("Unsupported native model scale");
-    const std::string expected = scale == 2 ? "872bff6e0e5a7b28f2f9ecdeb5b941f8b79b7ea26cefe01664ec8a81fc687ec0" :
-        "c4776b0aabaf24894450ed5cbffb06537aed13392211c09752c02e14e5bd8613";
-    if (modelHash(model) != expected) throw std::runtime_error("Model SHA-256 mismatch");
-    p.digest=expected;
+    auto& p = *impl_; p.scale = scale; p.externalModel = externalModel;
+    std::error_code modelError;
+    const auto modelPath=std::filesystem::u8path(model);
+    if (!std::filesystem::is_regular_file(modelPath, modelError) || modelError)
+        throw std::runtime_error("Select one local regular ONNX model file");
+    std::string extension=modelPath.extension().u8string();
+    std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+    if (extension!=".onnx") throw std::runtime_error("External models must use the .onnx file format");
+    if (!externalModel && scale != 2) throw std::runtime_error("Bundled model must be the verified x2 model");
+    const std::string digest=modelHash(model);
+    if (!externalModel) {
+        if (scale != 2 || digest != "872bff6e0e5a7b28f2f9ecdeb5b941f8b79b7ea26cefe01664ec8a81fc687ec0")
+            throw std::runtime_error("Bundled model must be the verified x2 model");
+    }
+    p.digest=digest;
 #ifdef _WIN32
     const auto nativeLibrary = std::filesystem::absolute(std::filesystem::u8path(library));
     p.libraryDirectory = nativeLibrary.parent_path();
@@ -350,19 +408,42 @@ void RealESRGAN::load(const std::string& library, const std::string& model, int 
         if(!p.session)LOG_WARN("Offline SR: accelerated initialization unavailable; retrying CPU before output");
     }
 #endif
-    if (!p.session) p.createSession(model, false);
-    p.validate(false); p.validate(true);
-    LOG_INFO("Offline SR: ORT " + std::string(entry()->GetVersionString()) + ", " + p.provider + ", tile=256 halo=32, load ms="+std::to_string(milliseconds(loadStart,SRClock::now())));
+        auto inspect=[&] {
+            p.validate(false); p.validate(true);
+            if(p.externalModel)p.detectScale();
+            else if(scale!=2)throw std::runtime_error("Bundled model must be the verified x2 model");
+        };
+        if(p.externalModel) {
+            p.scale=0;
+            if(p.session) {
+                try { inspect(); }
+                catch(const std::exception& e) {
+                    LOG_WARN(std::string("Accelerated external model validation failed; retrying CPU: ")+e.what());
+                    p.api->ReleaseSession(p.session);p.session=nullptr;
+                    p.profiling=false;
+                }
+            }
+            if(!p.session) {
+                p.createSession(model,false);
+                inspect();
+            }
+        } else {
+            if(!p.session)p.createSession(model,false);
+            p.validate(false);p.validate(true);
+        }
+    LOG_INFO("Offline SR: ORT " + std::string(entry()->GetVersionString()) + ", " + p.provider + ", tile=256 halo=32, detected scale="+std::to_string(p.scale)+"x, load ms="+std::to_string(milliseconds(loadStart,SRClock::now())));
 }
+int RealESRGAN::scale() const { return impl_->scale; }
 std::string RealESRGAN::device() const { return impl_->provider; }
 uint64_t RealESRGAN::reusedTiles() const { return impl_->reusedTileCount; }
 void RealESRGAN::enhance(const std::vector<uint8_t>& rgb, int width, int height, std::vector<uint8_t>& result, const std::atomic<bool>& cancelled,
                         const std::vector<uint8_t>& previousRgb) {
     auto& p = *impl_;
-    if (!p.session || width <= 0 || height <= 0 || rgb.size() != size_t(width) * height * 3)
+    if (!p.session || p.scale<1 || p.scale>16 || width <= 0 || height <= 0 || rgb.size() != size_t(width) * height * 3)
         throw std::runtime_error("Invalid RGB input");
-    const int ow = width * p.scale, oh = height * p.scale, side = kTile * p.scale;
-    if (ow > 8192 || oh > 8192 || int64_t(ow) * oh > 7680LL * 4320) throw std::runtime_error("Intermediate size limit exceeded");
+    const int64_t wide=int64_t(width)*p.scale, high=int64_t(height)*p.scale;
+    if (wide > 8192 || high > 8192 || wide * high > 7680LL * 4320) throw std::runtime_error("Intermediate size limit exceeded");
+    const int ow=static_cast<int>(wide), oh=static_cast<int>(high), side=kTile*p.scale;
     const auto prepareStart=SRClock::now();
     double prepare=0,run=0,stitch=0;
     int tiles=0;

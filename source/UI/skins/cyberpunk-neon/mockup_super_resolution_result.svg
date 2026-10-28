@@ -19,7 +19,7 @@
     <text x="232" y="330" font-size="12" fill="#91ADCC">Final output path / Shared output folder with Merge Videos</text>
     <text x="232" y="358" font-family="Consolas, monospace" font-size="12" fill="#EAF8FF">/Applications/FluxPlayer/Record/FluxPlayer_SR_20261016_173000_a81f.mp4</text>
     <text x="232" y="383" font-size="12" fill="#6F89A8">Source preserved; no file overwritten. H.264 video re-encoded; audio copied unless AAC selected.</text>
-    <text x="212" y="431" font-size="13" fill="#EAF8FF">1280 × 720 → Native 2x: 2560 × 1440 → Output: 1280 × 720</text>
+    <text x="212" y="431" font-size="13" fill="#EAF8FF">Source 1280 × 720 → Native scale: 2x model 2560 × 1440 → Output 1280 × 720</text>
     <text x="212" y="459" font-size="13" fill="#91ADCC">1800 frames completed / Duration 1m 00s / File size 18.6 MiB / Total time 15m 08s</text>
     <text x="212" y="487" font-size="13" fill="#91ADCC">Inference: CoreML EP (NeuralNetwork fast; may include CPU operators) / Encoder: H.264 libx264 / Audio: original AAC packets / MP4</text>
     <g id="result-actions" text-anchor="middle" font-size="14">

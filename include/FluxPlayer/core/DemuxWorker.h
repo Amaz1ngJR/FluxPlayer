@@ -5,6 +5,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstdint>
+#include "FluxPlayer/utils/MediaSource.h"
 
 namespace FluxPlayer {
 
@@ -67,6 +68,8 @@ private:
      * Demux 主循环
      */
     void run();
+    bool forceSourceRefresh_ = false;
+    ExtractedStream sourceSession_; // Worker-owned refreshed URLs; no mutation of UI metadata.
 
     /**
      * 处理 seek 请求

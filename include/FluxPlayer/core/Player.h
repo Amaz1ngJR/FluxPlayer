@@ -7,7 +7,7 @@
 #include <atomic>
 #include <mutex>
 
-#include "FluxPlayer/utils/StreamExtractor.h"  // ExtractedStream（DASH 流 seek 重启复用）
+#include "FluxPlayer/utils/MediaSource.h"  // ExtractedStream（DASH 流 seek 重启复用）
 #include "FluxPlayer/core/PlayerState.h"        // PlayerState 枚举
 #include "FluxPlayer/core/LiveLatencyTracker.h"
 #include "FluxPlayer/core/FrameQueue.h"
@@ -124,16 +124,14 @@ public:
     /**
      * @brief 注入由调用方在工作线程预先完成的网页流提取结果
      *
-     * 配合 OpeningScreen：yt-dlp 是阻塞操作（10–30 秒），主线程跑会让窗口
-     * 卡死；让 OpeningScreen 在工作线程上跑 StreamExtractor::extract，
-     * 再用本接口把结果交给 Player，然后在主线程调用 open() 完成 demuxer +
-     * 解码器 + GL 渲染器构造（这部分必须主线程，因为 GLFW context 亲和）。
+     * OpeningScreen 在主线程展示浏览器，后台解析主清单和准备网络输入。
+     * 本接口接收已捕获的会话；调用者在工作结束后由主线程安装播放管线。
      *
      * 调用本接口后下一次 open() 会跳过自身的提取阶段，直接使用注入的 info。
      * 注入的状态仅一次有效，open() 消费后清空。
      *
      * @param pageUrl 原始网页 URL（即将传给 open() 的 filePath）
-     * @param info    StreamExtractor::extract 返回的 ExtractedStream
+     * @param info    浏览器捕获 返回的 ExtractedStream
      */
     void setPreExtractedInfo(const std::string& pageUrl, const ExtractedStream& info);
 
@@ -226,7 +224,7 @@ public:
     /**
      * @brief 获取当前媒体的原始输入来源。
      *
-     * 返回用户传给 open() 的 URL，而不是 yt-dlp 临时地址或 DASH pipe；下载器据此
+     * 返回用户传给 open() 的 URL，而不是 浏览器捕获 临时地址或 DASH pipe；下载器据此
      * 可在签名过期后重新提取。媒体关闭后返回空字符串。
      */
     const std::string& getCurrentSourceUrl() const { return currentSourceUrl_; }
@@ -244,6 +242,8 @@ public:
 
     /// 获取最近一次提取的流信息（含画质列表、上传者等）
     const ExtractedStream& getLastExtractedInfo() const { return lastExtractedInfo_; }
+    /// Main/UI thread only. Returns an owned snapshot, never references live playback objects.
+    ExtractedStream getDownloadSession() const;
 
     /**
      * 是否正在播放
@@ -574,7 +574,9 @@ private:
     std::string filePath_;
     std::string currentSourceUrl_;          ///< 当前用户输入的原始来源，不保存提取后的临时 URL
     bool currentSourceIsNetwork_ = false;   ///< 与 currentSourceUrl_ 同步，由 open/cleanup 维护
-    std::string liveReopenPath_;     ///< 实时流重连用：实际打开 demuxer 的 URL（可能来自 yt-dlp 提取）
+    std::string liveReopenPath_;     ///< 实时流重连用：实际打开 demuxer 的 URL（可能来自 浏览器捕获 提取）
+    CctvProtectionMode liveReopenCctvProtection_ = CctvProtectionMode::None;
+    std::string liveReopenCookies_;  ///< 域名/路径受限的浏览器 Cookie jar
     std::string liveReopenHeaders_;  ///< 实时流重连用：HTTP 头
     double liveReopenDuration_{0.0}; ///< 实时流重连用：已知时长，0 表示无
     double duration_;
@@ -665,12 +667,18 @@ private:
 
     std::unique_ptr<AudioOutput> audioOutput_;
     std::unique_ptr<DashMerger> dashMerger_;  ///< DASH 流合并器（非 DASH 时为空）
+    mutable std::mutex mediaSessionMutex_;
+    ExtractedStream activeMediaSession_; // Published snapshots, shared with the downloader.
+    void publishMediaSession(const ExtractedStream& session) {
+        std::lock_guard<std::mutex> lock(mediaSessionMutex_);
+        activeMediaSession_ = session;
+    }
     ExtractedStream lastExtractedInfo_;       ///< DASH 流提取结果，seek 时重启 merger 复用
 
     // 网页视频提取相关
     std::string lastPageUrl_;   ///< 最近一次打开的网页 URL（用于下载功能）
 
-    // 预先提取的流信息（由 OpeningScreen 在工作线程跑完 yt-dlp 后注入；
+    // 预先提取的流信息（由 OpeningScreen 在工作线程跑完 浏览器捕获 后注入；
     // 下一次 open() 消费后清空）
     bool             hasPreExtracted_ = false;
     ExtractedStream  preExtractedInfo_;

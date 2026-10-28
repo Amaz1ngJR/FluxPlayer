@@ -7,7 +7,7 @@ namespace FluxPlayer {
  */
 enum class PlayerState {
     IDLE,        // 空闲状态（未加载任何媒体）
-    EXTRACTING,  // 正在通过 yt-dlp 提取网页视频流信息
+    EXTRACTING,  // 正在通过 浏览器捕获 提取网页视频流信息
     OPENING,     // 正在打开媒体文件
     PLAYING,     // 播放中
     PAUSED,      // 暂停

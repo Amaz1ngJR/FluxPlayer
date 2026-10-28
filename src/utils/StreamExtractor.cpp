@@ -11,6 +11,7 @@
 #include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/CookieStore.h"
+#include "FluxPlayer/utils/BrowserCapture.h"
 
 #include <nlohmann/json.hpp>
 
@@ -157,8 +158,10 @@ std::string StreamExtractor::getExecutablePath() {
  * @param timeoutSec 超时秒数，0 表示无超时
  * @return 命令输出，超时或失败返回空字符串
  */
-static std::string runCommand(const std::string& cmd, int timeoutSec,
+static std::string runCommand(const std::vector<std::string>& args, int timeoutSec,
                               const std::atomic<bool>* cancelled) {
+    if (args.empty()) return {};
+    for (const auto& arg : args) if (arg.find(char(0)) != std::string::npos) return {};
     std::string result;
     const auto started = std::chrono::steady_clock::now();
     const auto deadline = started + std::chrono::seconds(timeoutSec);
@@ -191,7 +194,22 @@ static std::string runCommand(const std::string& cmd, int timeoutSec,
                                    &sa, OPEN_EXISTING, 0, nullptr);
     si.hStdInput = nullInput;
     PROCESS_INFORMATION process{};
-    const std::string command = "cmd.exe /d /s /c \"" + cmd + "\"";
+    // CreateProcess receives an argv-quoted command directly, without cmd.exe.
+    std::string command;
+    for (const auto& arg : args) {
+        if (!command.empty()) command += " ";
+        command += char(34);
+        size_t slashes=0;
+        for (char c : arg) {
+            if (c==char(92)) { ++slashes; continue; }
+            command.append(slashes * (c==char(34) ? 2 : 1),char(92));
+            slashes=0;
+            if (c==char(34)) command += char(92);
+            command += c;
+        }
+        command.append(slashes*2,char(92));
+        command += char(34);
+    }
     int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, command.c_str(), -1, nullptr, 0);
     std::vector<wchar_t> wideCommand(length > 0 ? length : 1);
     bool created = nullInput != INVALID_HANDLE_VALUE && length > 0 &&
@@ -256,8 +274,10 @@ static std::string runCommand(const std::string& cmd, int timeoutSec,
     setup |= posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
     setup |= posix_spawnattr_setpgroup(&attr, 0);
     pid_t pid = -1;
-    char* argv[] = {const_cast<char*>("sh"), const_cast<char*>("-c"), const_cast<char*>(cmd.c_str()), nullptr};
-    const int spawnError = setup ? setup : posix_spawn(&pid, "/bin/sh", &actions, &attr, argv, environ);
+    std::vector<char*> argv;
+    for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+    const int spawnError = setup ? setup : posix_spawnp(&pid, argv[0], &actions, &attr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
     posix_spawnattr_destroy(&attr);
     close(fds[1]);
@@ -494,6 +514,7 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         out.originalUrl = pageUrl;
         out.videoUrl = pageUrl;
         out.platform = "Direct";
+        out.resolver = StreamResolverKind::Direct;
         std::string clean = pageUrl.substr(0, pageUrl.find_first_of("?#"));
         const size_t slash = clean.find_last_of("/\\");
         out.title = slash == std::string::npos ? clean : clean.substr(slash + 1);
@@ -512,36 +533,28 @@ bool StreamExtractor::extract(const std::string& pageUrl,
         return false;
     }
 
-    // 构造 yt-dlp 命令
-    // -j: 输出 JSON，不下载
-    // --no-playlist: 只处理单个视频
-    // --no-warnings: 减少干扰输出
-    // 初始提取不指定 -f，让 yt-dlp 返回默认格式信息（formats 数组始终完整）
-    // 指定 formatId 时才用 -f 精确选择
-    std::string fmtPart;
-    if (formatId.empty()) {
-        // 不指定 -f，获取完整 JSON 后自行从 formats 数组选最佳格式
-        fmtPart = "";
-    } else if (formatId.find("hls-") == 0) {
-        fmtPart = " -f \"" + formatId + "\"";
-    } else {
-        fmtPart = " -f \"" + formatId + "+bestaudio/" + formatId + "\"";
+    std::vector<std::string> arguments{getYtDlpPath(), "-j", "--no-playlist", "--no-warnings",
+        "--socket-timeout", "10", "--retries", "0", "--extractor-retries", "0"};
+    const auto impersonate = getImpersonateArg();
+    if (!impersonate.empty()) {
+        std::string target;
+        for (const auto* name : {"edge", "firefox", "chrome"})
+            if (impersonate.find(name)!=std::string::npos) target=name;
+        arguments.insert(arguments.end(), {"--impersonate", target});
     }
-
-    // Cookie：仅当 CookieStore 命中目标 URL 主机时才挂载 --cookies
-    std::string cookieArg = prepareCookieArgForUrl(pageUrl);
-
-    const auto& cfg = Config::getInstance().get();
-    const bool proxyAvailable = cfg.proxyEnabled && !cfg.httpProxy.empty();
-    const std::string baseCmd = "\"" + getYtDlpPath() + "\" -j --no-playlist --no-warnings"
-        + " --socket-timeout 10 --retries 0 --extractor-retries 0"
-        + getImpersonateArg() + fmtPart + cookieArg;
+    if (!formatId.empty()) {
+        arguments.push_back("-f");
+        arguments.push_back(formatId.rfind("hls-",0)==0 ? formatId : formatId+"+bestaudio/"+formatId);
+    }
+    if (CookieStore::hasCookiesForUrl(pageUrl))
+        arguments.insert(arguments.end(), {"--cookies", CookieStore::getCookieFilePath()});
+    const auto& cfg=Config::getInstance().get();
+    const bool proxyAvailable=cfg.proxyEnabled && !cfg.httpProxy.empty();
     auto request = [&](const std::string& proxy) {
-        // 空代理显式禁用环境变量/系统代理，确保这次真的是直连。
-        const std::string cmd = baseCmd + " --proxy \"" + proxy + "\""
-            + " \"" + pageUrl + "\" 2>&1";
-        LOG_INFO(std::string("StreamExtractor: ") + (proxy.empty() ? "直连" : "使用配置代理"));
-        return runCommand(cmd, 60, cancelled);
+        auto invocation=arguments;
+        invocation.insert(invocation.end(), {"--proxy", proxy, "--", pageUrl});
+        LOG_INFO(std::string("StreamExtractor: ")+(proxy.empty()?"直连":"使用配置代理"));
+        return runCommand(invocation,60,cancelled);
     };
     auto isJsonObject = [](const std::string& output) {
         return json::parse(output, nullptr, false).is_object();
@@ -571,7 +584,10 @@ bool StreamExtractor::extract(const std::string& pageUrl,
     // 使用 nlohmann/json 解析
     try {
         auto j = json::parse(jsonStr);
+        out = ExtractedStream{};
+        out.resolver = StreamResolverKind::YtDlp;
         out.originalUrl = pageUrl;
+        out.mediaIdentity = j.value("extractor_key",std::string{}) + ":" + j.value("id",std::string{});
 
         // 直播标志优先于 duration：滑动窗口也可能报告有限时长，不能据此误判 VOD。
         if (j.contains("is_live") && j["is_live"].is_boolean())
@@ -781,6 +797,11 @@ bool StreamExtractor::extract(const std::string& pageUrl,
             totalSize = static_cast<int64_t>(totalTbr * out.duration * 125);
         }
         out.filesize = totalSize;
+
+        // Keep the common session contract used by playback and downloads.
+        const auto selected=std::find_if(out.qualities.begin(),out.qualities.end(),[&](const auto& q){return q.formatId==out.selectedFormatId;});
+        if (selected!=out.qualities.end() && !selected->headers.empty()) out.headers=selected->headers;
+        out.httpCookies=browserCaptureCookies(CookieStore::loadForMediaSession(out),out.videoUrl);
 
         LOG_INFO("StreamExtractor: 提取成功 title=" + out.title
                + " isDash=" + (out.isDash ? "true" : "false")

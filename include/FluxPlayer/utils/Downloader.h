@@ -13,6 +13,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include "FluxPlayer/utils/MediaSource.h"
 
 namespace FluxPlayer {
 
@@ -61,15 +62,13 @@ public:
 
     /**
      * @brief 异步启动下载
-     * @param sourceUrl  原始网络来源 URL（网页或媒体直链）
+     * @param session    当前播放会话的完整快照，保持所选画质、两路 URL 和鉴权
      * @param outputDir  输出目录
-     * @param formatId   画质高度字符串（如 "1080"），空则下载最佳画质
      * @param onProgress 进度回调（在下载线程调用）
      * @param onFinish   完成回调（在下载线程调用）
      */
-    void start(const std::string& sourceUrl,
+    void start(ExtractedStream session,
                const std::string& outputDir,
-               const std::string& formatId,
                ProgressCallback onProgress,
                FinishCallback   onFinish);
 
@@ -90,12 +89,11 @@ private:
      * @brief 下载线程入口。
      *
      * 该函数独占 FFmpeg 输入/输出上下文，并保证每条退出路径都关闭资源、恢复
-     * running_，最后至多触发一次完成回调。sourceUrl 始终保留用户输入的原始
-     * 网络来源，避免把带时效签名的提取 URL 错当作可重试来源。
+     * running_，最后至多触发一次完成回调。session 同时保留当前媒体地址和原始
+     * 网页来源，过期后按用户选择的来源刷新，保持画质与鉴权。
      */
-    void downloadLoop(const std::string& sourceUrl,
+    void downloadLoop(ExtractedStream session,
                       const std::string& outputDir,
-                      const std::string& formatId,
                       ProgressCallback onProgress,
                       FinishCallback   onFinish);
 

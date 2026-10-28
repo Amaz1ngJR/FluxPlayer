@@ -35,6 +35,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include "FluxPlayer/utils/MediaSource.h"
+#include "FluxPlayer/utils/HlsStreamResolver.h"
+#include "FluxPlayer/utils/MediaSourceResolver.h"
 #include "FluxPlayer/utils/StreamExtractor.h"
 #include "FluxPlayer/utils/DashMerger.h"
 
@@ -249,27 +252,62 @@ void Player::cancelOpenPreparation() {
     shouldQuit_.store(true, std::memory_order_release);
 }
 
+ExtractedStream Player::getDownloadSession() const {
+    ExtractedStream session;
+    { std::lock_guard<std::mutex> lock(mediaSessionMutex_); session = activeMediaSession_; }
+    if (session.videoUrl.empty()) {
+        session = ExtractedStream{};
+        session.videoUrl = currentSourceUrl_;
+        session.resolver = StreamResolverKind::Direct;
+        session.platform = "Direct";
+        const auto clean = currentSourceUrl_.substr(0, currentSourceUrl_.find_first_of("?#"));
+        session.title = clean.substr(clean.find_last_of('/') + 1);
+    }
+    if (session.originalUrl.empty()) session.originalUrl = currentSourceUrl_;
+    session.isLive = isLiveStream_;
+    if (duration_ > 0 && !isLiveStream_) session.duration = duration_;
+    if (session.cctvProtection == CctvProtectionMode::None)
+        session.cctvProtection = H264NalTransformer::detect(session.videoUrl);
+    return session;
+}
+
 bool Player::prepareOpenInput(const std::string& path, std::string& error) {
     if (isImageFile(path)) return true; // 单帧图片无输入候选，仍由主线程安装。
     // 不改播放状态，不调用外部回调，不创建 GL/设备。调用者必须 join 后再 open/close。
     std::unique_ptr<DashMerger> merger;
     std::unique_ptr<Demuxer> input;
     try {
-        input = std::make_unique<Demuxer>(&shouldQuit_);
-        const bool extracted = hasPreExtracted_ && preExtractedPageUrl_ == path;
-        const auto& info = preExtractedInfo_;
-        std::string url = extracted ? info.videoUrl : path;
-        if (extracted && info.isDash) {
-            merger = std::make_unique<DashMerger>();
-            if (!merger->start(info.videoUrl, info.audioUrl, info.headers, 0.0,
-                    nullptr, 0, &shouldQuit_) || !merger->waitReady()) {
-                error = "DASH 输入准备失败"; return false;
-            }
-            url = merger->getPipeUrl();
+        bool extracted = hasPreExtracted_ && preExtractedPageUrl_ == path;
+        if (!extracted && MediaSource::needsCapture(path)) {
+            ExtractedStream resolved;
+            if (!StreamExtractor::extract(path,"",resolved,error,&shouldQuit_)) return false;
+            preExtractedInfo_ = std::move(resolved);
+            preExtractedPageUrl_ = path;
+            hasPreExtracted_ = true;
+            extracted = true;
         }
-        const bool ok = merger ? input->openSelfDescribingPipe(url, info.duration)
-            : input->open(url, extracted ? info.headers : "", extracted ? info.duration : 0.0);
-        if (!ok || shouldQuit_.load()) { error = "输入打开或探测失败/已取消"; return false; }
+        auto& info = preExtractedInfo_;
+        auto prepare = [&]() {
+            input = std::make_unique<Demuxer>(&shouldQuit_);
+            merger.reset();
+            std::string url = extracted ? info.videoUrl : path;
+            if (extracted && info.isDash) {
+                merger = std::make_unique<DashMerger>();
+                if (!merger->start(info.videoUrl, info.audioUrl, info.headers, 0.0,
+                        nullptr, 0, &shouldQuit_, true, info.httpCookies) || !merger->waitReady()) return false;
+                url = merger->getPipeUrl();
+            }
+            return merger ? input->openSelfDescribingPipe(url, info.duration)
+                : input->open(url, extracted ? info.headers : "", extracted ? info.duration : 0.0,
+                    extracted ? info.httpCookies : "", extracted ? info.cctvProtection : CctvProtectionMode::None);
+        };
+        bool ok = prepare();
+        if (!ok && extracted && !shouldQuit_.load()) {
+            input.reset(); merger.reset();
+            ok = MediaSourceResolver::refresh(info, error, &shouldQuit_) && prepare();
+        }
+        if (!ok || shouldQuit_.load()) { if (error.empty()) error = "输入打开或探测失败/已取消"; return false; }
+        error.clear();
         preparedOpenPath_ = path;
         preparedOpenMerger_ = std::move(merger);
         preparedOpenInput_ = std::move(input);
@@ -291,8 +329,9 @@ bool Player::open(const std::string& filePath) {
     // 上一次会话的 Worker 必须已回收；新 open 才能解除稳定停止标志。
     shouldQuit_.store(false);
 
-    // 原始来源必须在任何提取/重定向之前保存：下载入口依赖它重新建立独立任务。
+    // 原始网页用于会话刷新；下载直接复用当前选中的媒体地址。
     // 只有通过状态校验后才发布，避免一次失败的重复 open 覆盖正在播放媒体的来源。
+    { std::lock_guard<std::mutex> lock(mediaSessionMutex_); activeMediaSession_ = {}; }
     currentSourceUrl_ = filePath;
     currentSourceIsNetwork_ = isNetworkUrl(filePath);
 
@@ -304,13 +343,15 @@ bool Player::open(const std::string& filePath) {
     // 网页 URL 提取流程
     std::string actualPath = filePath;
     std::string httpHeaders;
+    std::string httpCookies;
+    CctvProtectionMode cctvProtection = CctvProtectionMode::None;
     double knownDuration = 0.0;
 
-    // 调用方（如 OpeningScreen）可能已在工作线程上跑完 yt-dlp 并注入了 info；
+    // 调用方（如 OpeningScreen）可能已在工作线程上跑完 浏览器捕获 并注入了 info；
     // 此分支跳过同步阻塞的 extract，直接消费 preExtractedInfo_。
     bool consumePreExtracted = hasPreExtracted_ && (preExtractedPageUrl_ == filePath);
 
-    if (StreamExtractor::needsExtraction(filePath) || consumePreExtracted) {
+    if (MediaSource::needsCapture(filePath) || consumePreExtracted) {
         setState(PlayerState::EXTRACTING);
         lastPageUrl_ = filePath;
 
@@ -324,8 +365,8 @@ bool Player::open(const std::string& filePath) {
             LOG_INFO("Player::open: 使用预先提取的流信息（来自 OpeningScreen）");
         } else {
             std::string error;
-            if (!StreamExtractor::extract(filePath, "", info, error, &shouldQuit_)) {
-                triggerError("流提取失败: " + error);
+            if (!StreamExtractor::extract(filePath,"",info,error,&shouldQuit_)) {
+                triggerError(error);
                 setState(PlayerState::ERRORED);
                 return false;
             }
@@ -405,13 +446,14 @@ bool Player::open(const std::string& filePath) {
         if (info.isDash && preparedOpenInput_ && preparedOpenPath_ == filePath) {
             // 打开/探测已经在后台完成，主线程只移交所有权。
             lastExtractedInfo_ = info;
+            publishMediaSession(info);
         } else if (info.isDash) {
             // DASH 分离流：启动合并器，Demuxer 读取管道
             dashMerger_ = std::make_unique<DashMerger>();
             const uint64_t dashGeneration = dashSeekGeneration_.load(std::memory_order_acquire);
             if (!dashMerger_->start(info.videoUrl, info.audioUrl, info.headers, 0.0,
                                     &dashSeekGeneration_, dashGeneration,
-                                    &shouldQuit_)) {
+                                    &shouldQuit_, true, info.httpCookies)) {
                 triggerError("DASH 合并器启动失败");
                 setState(PlayerState::ERRORED);
                 return false;
@@ -429,20 +471,26 @@ bool Player::open(const std::string& filePath) {
             LOG_INFO("Player::open: waitReady 返回, actualPath=" + actualPath);
             // 保存提取信息，用于 seek 时通过 -ss 参数重启 merger（见 restartDashMerger）
             lastExtractedInfo_ = info;
+            publishMediaSession(info);
         } else {
             actualPath   = info.videoUrl;
             httpHeaders  = info.headers;
+            httpCookies = info.httpCookies;
+            cctvProtection = info.cctvProtection;
             // 非 DASH 流也保存提取信息，用于画质切换
             lastExtractedInfo_ = info;
+            publishMediaSession(info);
         }
     }
 
     setState(PlayerState::OPENING);
     filePath_ = filePath;
-    isLocalFile_ = !isNetworkUrl(filePath) && !StreamExtractor::needsExtraction(filePath);
+    isLocalFile_ = !isNetworkUrl(filePath) && !MediaSource::needsCapture(filePath);
     // 保存实时流重连参数：连接断开后用于完整重开 demuxer
     liveReopenPath_ = actualPath;
     liveReopenHeaders_ = httpHeaders;
+    liveReopenCookies_ = httpCookies;
+    liveReopenCctvProtection_ = cctvProtection;
     liveReopenDuration_ = knownDuration;
 
     // 创建并打开解复用器
@@ -454,7 +502,7 @@ bool Player::open(const std::string& filePath) {
         opened = true;
     } else {
         demuxer_ = std::make_unique<Demuxer>(&shouldQuit_);
-        opened = demuxer_->open(actualPath, httpHeaders, knownDuration);
+        opened = demuxer_->open(actualPath, httpHeaders, knownDuration, httpCookies, cctvProtection);
     }
 
     if (!opened) {
@@ -1477,6 +1525,8 @@ void Player::cleanup() {
     currentSourceIsNetwork_ = false;
     liveReopenPath_.clear();
     liveReopenHeaders_.clear();
+    liveReopenCookies_.clear();
+    liveReopenCctvProtection_ = CctvProtectionMode::None;
     liveReopenDuration_ = 0.0;
     duration_ = 0.0;
     lastRenderedPTS_.store(0.0);
@@ -2455,7 +2505,7 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime,
     auto candidate = std::make_unique<QualityCandidate>();
     candidate->requestId = requestId;
     candidate->seekTime = isLiveStream_ ? 0.0 : seekTime;
-    candidate->info = lastExtractedInfo_; // 主线程复制，后台不访问活跃会话数据。
+    candidate->info = getDownloadSession(); // 主线程复制，后台不访问活跃会话数据。
     auto* task = candidate.get();
     const auto page = lastPageUrl_;
     const uint64_t generation = qualityPrepareGeneration_.load();
@@ -2471,7 +2521,7 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime,
                     task->info.headers = quality.headers;
                     task->info.isDash = !quality.audioUrl.empty();
                     task->info.height = quality.height;
-                    task->info.width = 0;
+                    task->info.width = quality.width;
                     task->info.filesize = 0;
                     reused = true;
                     break;
@@ -2483,7 +2533,7 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime,
                     if (task->info.isDash) {
                         task->merger = std::make_unique<DashMerger>();
                         if (!task->merger->start(url, task->info.audioUrl, task->info.headers,
-                                task->seekTime, &qualityPrepareGeneration_, generation) ||
+                                task->seekTime, &qualityPrepareGeneration_, generation, nullptr, true, task->info.httpCookies) ||
                             !task->merger->waitReady() || task->cancel.load()) {
                             task->error = "DASH 候选准备失败";
                             return false;
@@ -2492,7 +2542,7 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime,
                     }
                     const bool opened = task->info.isDash
                         ? task->input->openSelfDescribingPipe(url, task->info.duration)
-                        : task->input->open(url, task->info.headers, task->info.duration);
+                        : task->input->open(url, task->info.headers, task->info.duration, task->info.httpCookies, task->info.cctvProtection);
                     if (!opened || task->cancel.load()) { task->error = "候选输入打开失败"; return false; }
                     if (task->input->getVideoStreamIndex() < 0 && task->input->getAudioStreamIndex() < 0) {
                         task->error = "候选输入没有音视频轨道"; return false;
@@ -2513,11 +2563,14 @@ void Player::switchQualityInternal(const std::string& formatId, double seekTime,
                     // 过期直链/缺少缓存只重新提取一次；先回收候选读写端，不影响旧播放。
                     task->input.reset();
                     task->merger.reset();
-                    task->info = ExtractedStream{};
                     task->error.clear();
-                    LOG_INFO("Quality candidate: extract URL, format=" + formatId);
-                    task->success = StreamExtractor::extract(page, formatId, task->info,
-                        task->error, &task->cancel) && prepare();
+                    if (task->info.resolver == StreamResolverKind::Browser || task->info.resolver == StreamResolverKind::YtDlp || !task->info.hlsSourceUrl.empty()) {
+                        task->info.selectedFormatId = formatId;
+                        LOG_INFO("Quality candidate: refresh current source session");
+                        task->success = MediaSourceResolver::refresh(task->info, task->error, &task->cancel) && prepare();
+                    } else {
+                        task->error = "当前来源没有可用画质，请重新打开网页捕获";
+                    }
                 }
             } catch (const std::exception& error) {
                 task->error = error.what();
@@ -2586,7 +2639,7 @@ bool Player::installQualityStream(const ExtractedStream& info, double seekTime, 
             merger.reset();
             merger = std::make_unique<DashMerger>();
             input = std::make_unique<Demuxer>();
-            positioned = merger->start(info.videoUrl, info.audioUrl, info.headers, seekTime) &&
+            positioned = merger->start(info.videoUrl, info.audioUrl, info.headers, seekTime, nullptr, 0, nullptr, true, info.httpCookies) &&
                 merger->waitReady() && input->openSelfDescribingPipe(merger->getPipeUrl(), info.duration);
             if (positioned) merger->commitPreparedStream();
         } else {
@@ -2671,6 +2724,8 @@ void Player::resetQualityPlayback(const ExtractedStream& info, double seekTime) 
     // DASH 管道 URL 已在准备阶段转交给 Demuxer，不得再次 getPipeUrl() 取走 fd。
     liveReopenPath_ = info.isDash ? "" : info.videoUrl;
     liveReopenHeaders_ = info.isDash ? "" : info.headers;
+    liveReopenCookies_ = info.isDash ? "" : info.httpCookies;
+    liveReopenCctvProtection_ = info.isDash ? CctvProtectionMode::None : info.cctvProtection;
     liveReopenDuration_ = info.duration;
     ptsNormalizer_->setHasVideoStream(hasVideoStream_);
     ptsNormalizer_->setHasAudioStream(hasAudioStream_);
@@ -2698,6 +2753,7 @@ void Player::resetQualityPlayback(const ExtractedStream& info, double seekTime) 
     qualityMediaInfo_ = std::make_unique<MediaInfo>();
     if (!qualityMediaInfo_->extractFromContext(demuxer_->getFormatContext())) qualityMediaInfo_.reset();
     if (audioOnly_) loadCoverImage();
+    publishMediaSession(info);
     lastExtractedInfo_ = info; // DemuxWorker 启动前发布，不能与其读 isDash 竞争。
 }
 

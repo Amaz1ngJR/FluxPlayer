@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.9.3"
+local version = "0.9.4"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -229,6 +229,7 @@ target("FluxPlayer")
     if is_plat("macosx") then
         -- Objective-C++ 源文件，禁用 ARC 与项目内其他原生代码风格一致
         add_files("src/utils/WebLogin_mac.mm", {mxxflags = "-fno-objc-arc"})
+        add_files("src/utils/BrowserRefresh_mac.mm", {mxxflags = "-fno-objc-arc", unity_ignored = true})
         -- macOS 已有原生实现，不能再编译 WebLogin_win.cpp 中的占位实现，否则符号重复。
         remove_files("src/utils/WebLogin_win.cpp")
     end
@@ -363,6 +364,11 @@ target("FluxPlayer")
     -- 构建完成后自动执行的脚本
     after_build(function (target)
         -- 增量复制辅助函数：源文件与目标 hash 相同则跳过
+        local extractor_name = is_plat("macosx") and "yt-dlp_macos" or (is_plat("windows") and "yt-dlp.exe" or nil)
+        if extractor_name then
+            local extractor = path.join(os.projectdir(), "third_party/yt-dlp", extractor_name)
+            if os.isfile(extractor) then os.cp(extractor, target:targetdir()) end
+        end
         local function cp_if_changed(src, dst_dir)
             local dst = path.join(dst_dir, path.filename(src))
             if not os.isfile(dst) or hash.md5(src) ~= hash.md5(dst) then
@@ -380,20 +386,22 @@ target("FluxPlayer")
         local source_dst = path.join(target:targetdir(), "source")
         os.tryrm(source_dst)
         os.cp("source", source_dst)
-        -- source/ 是增量复制，清理全部皮肤，避免已经删除的 JSON manifest 残留。
-        os.tryrm(path.join(target:targetdir(), "source/UI/skins/cyberpunk-neon"))
-        os.cp("source/UI/skins/cyberpunk-neon",
-              path.join(target:targetdir(), "source/UI/skins/cyberpunk-neon"))
-        os.tryrm(path.join(target:targetdir(), "source/UI/skins/minimal-lua"))
-        os.cp("source/UI/skins/minimal-lua",
-              path.join(target:targetdir(), "source/UI/skins/minimal-lua"))
         -- 发布运行时按 Config::getResourcePath() 从 resources/ 读取纯音频兜底封面。
         -- CMake install 使用相同布局；保留上面的 source/ 仅用于开发期资源热加载。
         local resources_dir = path.join(target:targetdir(), "resources")
         os.mkdir(resources_dir)
         cp_if_changed("source/pic2.png", resources_dir)
-        -- 与 CMake 安装布局一致，逐文件增量部署离线超分模型、运行库及许可。
-        for _, resource in ipairs({"models/realesrgan", "onnxruntime"}) do
+        -- 模型采用明确白名单；清理两个部署目录，避免增量构建残留 x4。
+        for _, base in ipairs({source_dst, resources_dir}) do
+            local model_dir = path.join(base, "models/realesrgan")
+            os.tryrm(model_dir)
+            os.mkdir(model_dir)
+            for _, name in ipairs({"realesrgan-x2plus.onnx", "LICENSE", "README.md"}) do
+                cp_if_changed(path.join("source/models/realesrgan", name), model_dir)
+            end
+        end
+        -- 与 CMake 安装布局一致，逐文件增量部署运行库及许可。
+        for _, resource in ipairs({"onnxruntime"}) do
             local src_dir = path.join("source", resource)
             for _, file in ipairs(os.files(path.join(src_dir, "**"))) do
                 local relative = path.relative(file, src_dir)
@@ -406,10 +414,8 @@ target("FluxPlayer")
         -- 清掉整个 skins/ 再重建：避免历史嵌套目录（skins/skins/...）和已删皮肤的残留。
         os.tryrm(path.join(resources_dir, "skins"))
         local skin_dst = path.join(target:targetdir(), "resources/skins/cyberpunk-neon")
-        os.tryrm(skin_dst)
         os.cp("source/UI/skins/cyberpunk-neon", skin_dst)
         local lua_skin_dst = path.join(target:targetdir(), "resources/skins/minimal-lua")
-        os.tryrm(lua_skin_dst)
         os.cp("source/UI/skins/minimal-lua", lua_skin_dst)
         if is_plat("windows") then
             -- Windows：把 FFmpeg 的 DLL 增量复制到可执行文件旁边，否则运行时找不到
@@ -425,12 +431,6 @@ target("FluxPlayer")
                 "third_party", "webview2", "runtimes", "win-x64", "WebView2Loader.dll")
             if os.isfile(webview2_loader) then
                 cp_if_changed(webview2_loader, target:targetdir())
-            end
-            -- 与 CMake install 对齐：发布产物必须把 yt-dlp 放在 exe 同级目录，
-            -- 这样移动整个构建目录后也不会依赖源码树中的绝对路径。
-            local ytdlp = path.join(os.projectdir(), "third_party", "yt-dlp", "yt-dlp.exe")
-            if os.isfile(ytdlp) then
-                cp_if_changed(ytdlp, target:targetdir())
             end
             -- MinGW 运行时 DLL：从编译器同目录拷贝，方便直接从 build/bin 启动调试
             -- （与 CMakeLists.txt 的 POST_BUILD 逻辑保持一致）
@@ -448,10 +448,7 @@ target("FluxPlayer")
             if os.isdir(ffmpeg_lib) then
                 os.cp(path.join(ffmpeg_lib, "*.dylib"), target:targetdir())
             end
-            local ytdlp = path.join(os.projectdir(), "third_party", "yt-dlp", "yt-dlp_macos")
-            if os.isfile(ytdlp) then
-                cp_if_changed(ytdlp, target:targetdir())
-            end
+
         end
     end)
 

@@ -215,7 +215,7 @@ foreach ($file in $requiredFiles) {
     }
 }
 # 动态加载的 ORT 不在主程序导入表中，不能依赖 GET_RUNTIME_DEPENDENCIES 收集。
-foreach ($resource in @("onnxruntime", "models\realesrgan")) {
+foreach ($resource in @("onnxruntime")) {
     Remove-StaleFiles "$root\source\$resource" "$stage\resources\$resource"
 }
 $ortManifest = "$root\source\onnxruntime\windows-x64\SHA256SUMS"
@@ -230,10 +230,13 @@ foreach ($line in Get-Content -LiteralPath $ortManifest) {
         }
     }
 }
-foreach ($name in @("realesrgan-x2plus.onnx", "realesrgan-x4plus.onnx", "LICENSE")) {
+foreach ($name in @("realesrgan-x2plus.onnx", "LICENSE", "README.md")) {
     if (-not (Test-Path -LiteralPath "$stage\resources\models\realesrgan\$name" -PathType Leaf)) {
         throw "Offline SR model resource missing: $name"
     }
+}
+if (Test-Path -LiteralPath "$stage\resources\models\realesrgan\realesrgan-x4plus.onnx") {
+    throw "The source x4 model must not be included in the installer staging directory."
 }
 foreach ($directory in @("shaders", "fonts")) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage $directory) -PathType Container)) {

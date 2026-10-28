@@ -17,8 +17,10 @@
 #include "FluxPlayer/ui/SkinRenderer.h"
 #include "FluxPlayer/core/Player.h"
 #include "FluxPlayer/utils/Logger.h"
-#include "FluxPlayer/utils/StreamExtractor.h"
+#include "FluxPlayer/utils/MediaSource.h"
+#include "FluxPlayer/utils/HlsStreamResolver.h"
 #include "FluxPlayer/utils/WebLogin.h"
+#include "FluxPlayer/utils/StreamExtractor.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -66,7 +68,7 @@ void OpeningScreen::renderSplashFrame(const std::string& mediaPath, const std::s
                     {"mediaPath", mediaPath},
                     {"phase", phase},
                     {"elapsed", elapsed},
-                    {"needsExtract", StreamExtractor::needsExtraction(mediaPath) ? "true" : "false"},
+                    {"needsExtract", MediaSource::needsCapture(mediaPath) ? "true" : "false"},
                 }};
             });
         SkinManager::instance().renderLuaSurface("opening", *luaBackend_,
@@ -110,7 +112,7 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
         LOG_INFO(std::string("OpeningScreen Player state -> ") + name);
     });
 
-    const bool needsExtract = StreamExtractor::needsExtraction(mediaPath);
+    const bool needsExtract = MediaSource::needsCapture(mediaPath);
     startedAt_ = ImGui::GetTime();
 
     // 1) 渲染一帧 splash 给用户看
@@ -128,7 +130,8 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
             return result;
         }
         if (login.result != WebLoginResult::Completed &&
-            login.result != WebLoginResult::UseExistingCookies) {
+            login.result != WebLoginResult::UseExistingCookies &&
+            login.result != WebLoginResult::Unsupported) {
             result.errorMessage = login.error.empty() ? "无法打开网页登录窗口" : login.error;
             return result;
         }
@@ -147,10 +150,20 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
         std::atomic<bool> extractCancelled{false};
         ExtractedStream info;
         std::string extractError;
-        std::thread worker([&info, &extractError, &extractDone, &extractCancelled, &mediaPath]() {
+        std::thread worker([&info, &extractError, &extractDone, &extractCancelled, &mediaPath, &login]() {
             std::string err;
-            bool ok = StreamExtractor::extract(mediaPath, "", info, err, &extractCancelled);
-            if (!ok) extractError = err.empty() ? "yt-dlp 失败" : err;
+            bool ok;
+            if (!login.capturedStream.videoUrl.empty()) {
+                info = login.capturedStream;
+                LOG_INFO("OpeningScreen: 使用浏览器捕获的媒体会话");
+                if (!HlsStreamResolver::populate(info, err, &extractCancelled) && !extractCancelled.load())
+                    LOG_WARN("OpeningScreen: 清晰度列表暂不可用，保留捕获地址播放: " + err);
+                ok = !extractCancelled.load();
+            } else {
+                LOG_INFO("OpeningScreen: 使用 yt-dlp 提取网页媒体");
+                ok = StreamExtractor::extract(mediaPath, "", info, err, &extractCancelled);
+            }
+            if (!ok) extractError = err.empty() ? "流提取失败或已取消" : err;
             extractDone.store(ok ? 1 : 2, std::memory_order_release);
         });
 
@@ -181,7 +194,7 @@ OpeningResult OpeningScreen::run(const std::string& mediaPath) {
             result.errorMessage = extractError.empty() ? "流提取失败" : extractError;
             return result;
         }
-        // 注入预提取结果，下面 player.open 不再触发 yt-dlp
+        // 注入预提取结果，下面 player.open 不再触发 浏览器捕获
         player_.setPreExtractedInfo(mediaPath, info);
 
         renderSplashFrame(mediaPath, "OPENING MEDIA STREAM...");

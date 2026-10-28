@@ -12,6 +12,7 @@
 #pragma once
 
 #include "FluxPlayer/utils/CookieStore.h"
+#include "FluxPlayer/utils/MediaSource.h"
 
 #include <string>
 #include <vector>
@@ -22,7 +23,7 @@ namespace FluxPlayer {
  * @brief 登录窗口的退出原因
  */
 enum class WebLoginResult {
-    Completed,    ///< 用户点击「完成登录」，cookies 字段含读取到的 cookie
+    Completed,    ///< 完成登录后由 yt-dlp 提取；或播放捕获流；cookies 字段含读取到的 cookie
     UseExistingCookies, ///< 不读取浏览器 Cookie，使用已有存储继续（无 Cookie 时匿名继续）
     Cancelled,    ///< 用户取消或关闭窗口
     Unsupported,  ///< 当前平台/构建未启用内置登录
@@ -36,6 +37,7 @@ struct WebLoginOutcome {
     WebLoginResult result = WebLoginResult::Cancelled;
     std::vector<NetscapeCookie> cookies;  ///< 仅 result == Completed 时有效
     std::string error;                    ///< 失败时的人类可读错误描述
+    ExtractedStream capturedStream;        ///< 有媒体 URL 时走网页捕获；为空时走 yt-dlp
 };
 
 class WebLogin {
@@ -44,7 +46,7 @@ public:
      * @brief 弹出模态登录窗口并阻塞等待用户操作
      *
      * @param pageUrl 用户要播放的网页 URL（用作起始页和 cookie 域过滤）
-     * @return 登录结果与读取到的 cookies
+     * @return 登录结果、读取到的 cookies 和用户选择的媒体流（若有）
      *
      * 调用方应在主线程调用：底层控件依赖应用消息循环。
      */

@@ -26,6 +26,9 @@
 
 #include "FluxPlayer/utils/WebLogin.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/BrowserCapture.h"
+#include "FluxPlayer/utils/BrowserRefresh.h"
+#include <memory>
 
 #ifdef FLUXPLAYER_HAVE_WEBVIEW2
 
@@ -51,10 +54,10 @@ namespace {
 // MinGW 的 <wrl/> 不提供 Callback<>/RuntimeClass，因此这里自己实现，
 // 同一份代码 MSVC 也能编译通过。MinGW 不支持对 WebView2.h 中以
 // MIDL_INTERFACE 声明的接口使用 __uuidof，所以这里显式传入 IID。
-template <typename Interface, typename Arg>
+template <typename Interface, typename Arg, typename Sender = HRESULT>
 class LambdaCallback : public Interface {
 public:
-    using Fn = std::function<HRESULT(HRESULT, Arg*)>;
+    using Fn = std::function<HRESULT(Sender, Arg*)>;
     LambdaCallback(REFIID iid, Fn fn) : iid_(iid), fn_(std::move(fn)) {}
 
     // IUnknown
@@ -78,7 +81,7 @@ public:
     }
 
     // *CompletedHandler::Invoke
-    HRESULT STDMETHODCALLTYPE Invoke(HRESULT errorCode, Arg* result) override {
+    HRESULT STDMETHODCALLTYPE Invoke(Sender errorCode, Arg* result) override {
         return fn_ ? fn_(errorCode, result) : S_OK;
     }
 
@@ -92,6 +95,13 @@ template <typename Interface, typename Arg>
 ComPtr<Interface> MakeCallback(REFIID iid, std::function<HRESULT(HRESULT, Arg*)> fn) {
     ComPtr<Interface> cb;
     cb.Attach(new LambdaCallback<Interface, Arg>(iid, std::move(fn)));
+    return cb;
+}
+
+template <typename Interface, typename Arg>
+ComPtr<Interface> MakeEvent(REFIID iid, std::function<HRESULT(ICoreWebView2*, Arg*)> fn) {
+    ComPtr<Interface> cb;
+    cb.Attach(new LambdaCallback<Interface, Arg, ICoreWebView2*>(iid, std::move(fn)));
     return cb;
 }
 
@@ -136,7 +146,7 @@ std::string extractHost(const std::string& url) {
 
 // 判断 cookie 是否归属用户访问的主机
 bool cookieRelevant(const std::string& cookieDomain, const std::string& host) {
-    if (host.empty()) return true;
+    if (host.empty()) return false;
     if (cookieDomain.empty()) return false;
     std::string dn = cookieDomain;
     if (!dn.empty() && dn.front() == '.') dn.erase(dn.begin());
@@ -212,6 +222,19 @@ struct LoginContext {
     HWND completeBtn = nullptr;
     HWND useExistingBtn = nullptr;
     HWND cancelBtn = nullptr;
+    HWND captureBtn = nullptr;
+    HWND streamPicker = nullptr;
+    std::vector<ExtractedStream> captures;
+    ExtractedStream selectedCapture;
+    bool readingCookies = false;
+    // 捕获后为真：此后每个新文档都必须重新进入暂停态。
+    bool pageMediaSuspended = false;
+    bool handoffPending = false;
+    bool confirmationInFlight = false;
+    int confirmationTicks = 0;
+    EventRegistrationToken captureToken{};
+    EventRegistrationToken navigationToken{};
+    EventRegistrationToken completedToken{};
 
     ComPtr<ICoreWebView2Controller> controller;
     ComPtr<ICoreWebView2> webView;
@@ -228,11 +251,14 @@ struct LoginContext {
 
 // 自定义消息：退出消息泵
 constexpr UINT WM_FP_QUIT_LOGIN = WM_USER + 1;
+constexpr UINT WM_FP_READ_COOKIES = WM_USER + 2;
+constexpr UINT_PTR kMediaHandoffTimer = 73;
 
 // 控件 ID
 constexpr int kIdComplete = 1001;
 constexpr int kIdCancel = 1002;
 constexpr int kIdUseExisting = 1003;
+constexpr int kIdCapture = 1004;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* ctx = reinterpret_cast<LoginContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -247,13 +273,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE: {
         if (ctx) {
             RECT rc; GetClientRect(hwnd, &rc);
-            const int btnH = 36;
+            const int btnH = 78;
             // 按钮位置不依赖 WebView2 controller（异步创建）：
             // 第一次 WM_SIZE 触发时 controller 仍为 null，但按钮必须立即可见，
             // 否则用户只能点窗口右上角红叉关闭，相当于取消，不会读到 cookie。
-            if (ctx->completeBtn) MoveWindow(ctx->completeBtn, rc.right - 130, rc.bottom - btnH + 4, 120, 28, TRUE);
-            if (ctx->cancelBtn)   MoveWindow(ctx->cancelBtn,   rc.right - 250, rc.bottom - btnH + 4, 100, 28, TRUE);
-            if (ctx->useExistingBtn) MoveWindow(ctx->useExistingBtn, 10, rc.bottom - btnH + 4, 360, 28, TRUE);
+            if (ctx->completeBtn) MoveWindow(ctx->completeBtn, rc.right - 130, rc.bottom - 32, 120, 28, TRUE);
+            if (ctx->cancelBtn)   MoveWindow(ctx->cancelBtn,   rc.right - 250, rc.bottom - 32, 100, 28, TRUE);
+            if (ctx->useExistingBtn) MoveWindow(ctx->useExistingBtn, 10, rc.bottom - 32, 360, 28, TRUE);
+            if (ctx->streamPicker) MoveWindow(ctx->streamPicker, 10, rc.bottom - 70, rc.right - 190, 240, TRUE);
+            if (ctx->captureBtn) MoveWindow(ctx->captureBtn, rc.right - 170, rc.bottom - 72, 160, 28, TRUE);
             // WebView 区域只在 controller 就绪后才有效
             if (ctx->controller) {
                 RECT webRc{ rc.left, rc.top, rc.right, rc.bottom - btnH };
@@ -275,11 +303,86 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
             return 0;
         }
-        if (id == kIdComplete) {
+        if (id == kIdComplete || id == kIdCapture) {
             if (!ctx->webView) return 0;
+            if (ctx->readingCookies || ctx->handoffPending) return 0;
+            if (id == kIdCapture) {
+                LRESULT index = SendMessageW(ctx->streamPicker, CB_GETCURSEL, 0, 0);
+                if (index == CB_ERR || static_cast<size_t>(index) >= ctx->captures.size()) return 0;
+                ctx->selectedCapture = ctx->captures[index];
+                for (const auto& candidate : ctx->captures)
+                    if (!candidate.hlsSourceUrl.empty()) ctx->selectedCapture.hlsManifestCandidates.push_back(candidate.hlsSourceUrl);
+                if (ctx->selectedCapture.webMedia != WebMediaState::Native &&
+                    ctx->selectedCapture.cctvProtection == CctvProtectionMode::None) {
+                    const wchar_t* text = ctx->selectedCapture.webMedia == WebMediaState::Scheduling
+                        ? L"当前捕获的是站点调度清单，直接交给播放器会在第一个分片被拒绝。按需调度尚未实现，暂不能原生播放。"
+                        : L"此视频包含不支持的保护流。网页正片能播放不代表此地址可直接交给播放器；当前只有已识别的央视模式能在原生侧处理。";
+                    MessageBoxW(hwnd, text, L"此视频不能直接原生播放", MB_OK | MB_ICONINFORMATION);
+                    // 网页播放不能作为交接手段：既不改播放位置，也不放开播放权限。
+                    ctx->selectedCapture = ExtractedStream{};
+                    return 0;
+                }
+            } else {
+                ctx->selectedCapture = ExtractedStream{}; // 完成登录选择 yt-dlp，与捕获流独立。
+                ctx->pageMediaSuspended = true;
+                ctx->webView->ExecuteScript(utf8ToWide(browserMediaSuspendScript()).c_str(),nullptr);
+                // Cookies only; Close destroys the page before yt-dlp starts.
+                PostMessageW(hwnd,WM_FP_READ_COOKIES,0,0);
+                return 0;
+            }
+            // 捕获即交接：先让网页媒体停下，且退出前不再自动恢复。
+            ctx->pageMediaSuspended = true;
+            ctx->handoffPending = true;
+            ctx->confirmationTicks = 0;
+            EnableWindow(ctx->completeBtn,FALSE);
+            EnableWindow(ctx->captureBtn,FALSE);
+            EnableWindow(ctx->streamPicker,FALSE);
+            if (!SetTimer(hwnd,kMediaHandoffTimer,100,nullptr)) {
+                ctx->error = "无法启动网页暂停确认";
+                ctx->modalResult = ModalResult::Failed;
+                PostMessageW(hwnd,WM_FP_QUIT_LOGIN,0,0);
+            }
+            return 0;
+        }
+        break;
+    }
+    case WM_TIMER: {
+        if (!ctx || wp != kMediaHandoffTimer || !ctx->handoffPending) break;
+        if (++ctx->confirmationTicks > 30) {
+            KillTimer(hwnd,kMediaHandoffTimer);
+            ctx->handoffPending=false;
+            ctx->error="网页暂停未确认，拒绝交接";
+            ctx->modalResult=ModalResult::Failed;
+            PostMessageW(hwnd,WM_FP_QUIT_LOGIN,0,0);
+            return 0;
+        }
+        if (ctx->confirmationInFlight) return 0;
+        ctx->confirmationInFlight=true;
+        HRESULT hr=ctx->webView->ExecuteScript(utf8ToWide(browserMediaSuspendScript()).c_str(),
+            MakeCallback<ICoreWebView2ExecuteScriptCompletedHandler,const wchar_t>(
+                IID_ICoreWebView2ExecuteScriptCompletedHandler,
+                [state=ComPtr<LoginContext>(ctx)](HRESULT error,LPCWSTR result)->HRESULT {
+                    auto* ctx=state.Get();
+                    ctx->confirmationInFlight=false;
+                    if(!ctx->running.load() || !ctx->handoffPending || ctx->modalResult!=ModalResult::None)return S_OK;
+                    if(SUCCEEDED(error) && browserMediaSuspensionConfirmed(wideToUtf8(result))) {
+                        ctx->handoffPending=false;
+                        KillTimer(ctx->hwnd,kMediaHandoffTimer);
+                        PostMessageW(ctx->hwnd,WM_FP_READ_COOKIES,0,0);
+                    }
+                    return S_OK;
+                }).Get());
+        if(FAILED(hr))ctx->confirmationInFlight=false;
+        return 0;
+    }
+    case WM_FP_READ_COOKIES: {
+            if (!ctx || !ctx->running.load() || ctx->readingCookies || ctx->modalResult!=ModalResult::None) return 0;
+            ctx->readingCookies = true;
             // 防止读取期间选择其他继续分支。
             EnableWindow(ctx->useExistingBtn, FALSE);
             EnableWindow(ctx->completeBtn, FALSE);
+            EnableWindow(ctx->captureBtn, FALSE);
+            EnableWindow(ctx->streamPicker, FALSE);
             SetWindowTextW(ctx->completeBtn, L"读取登录信息中…");
 
             // 异步读取所有 cookies
@@ -314,15 +417,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             return S_OK;
                         }
                         UINT count = 0;
+                        std::vector<NetscapeCookie> playbackCookies;
+                        const auto mediaHost = extractHost(ctx->selectedCapture.videoUrl);
+                        const auto audioHost = extractHost(ctx->selectedCapture.audioUrl);
                         list->get_Count(&count);
                         ctx->cookies.reserve(count);
                         for (UINT i = 0; i < count; ++i) {
                             ComPtr<ICoreWebView2Cookie> c;
                             if (FAILED(list->GetValueAtIndex(i, &c)) || !c) continue;
                             NetscapeCookie nc = convertCookie(c.Get());
-                            if (!cookieRelevant(nc.domain, ctx->host)) continue;
+                            bool mediaCookie = (!mediaHost.empty() && cookieRelevant(nc.domain, mediaHost)) ||
+                                (!audioHost.empty() && cookieRelevant(nc.domain, audioHost));
+                            for (const auto& target : ctx->selectedCapture.mediaCookieUrls)
+                                mediaCookie = mediaCookie || cookieRelevant(nc.domain, extractHost(target));
+                            for (const auto& q : ctx->selectedCapture.qualities)
+                                mediaCookie = mediaCookie || cookieRelevant(nc.domain, extractHost(q.videoUrl)) ||
+                                    (!q.audioUrl.empty() && cookieRelevant(nc.domain, extractHost(q.audioUrl)));
+                            if (mediaCookie) playbackCookies.push_back(nc);
+                            if (!cookieRelevant(nc.domain, ctx->host) && !cookieRelevant(nc.domain, extractHost(ctx->selectedCapture.originalUrl)) && !mediaCookie) continue;
                             ctx->cookies.push_back(std::move(nc));
                         }
+                        ctx->selectedCapture.httpCookies = browserCaptureCookies(playbackCookies, ctx->selectedCapture.videoUrl);
                         ctx->modalResult = ModalResult::Complete;
                         PostMessageW(ctx->hwnd, WM_FP_QUIT_LOGIN, 0, 0);
                         return S_OK;
@@ -334,8 +449,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
             }
             return 0;
-        }
-        return 0;
     }
     case WM_CLOSE:
         if (ctx) {
@@ -373,13 +486,172 @@ const wchar_t* ensureWindowClass(HINSTANCE hInst) {
     return kClassName;
 }
 
+// Hidden refresh runs on the application's existing STA message loop. Worker
+// threads only post requests and wait; callbacks never retain their cancel flag.
+struct RefreshView {
+    std::shared_ptr<BrowserRefreshRequest> request;
+    ExtractedStream selected;
+    HWND hwnd = nullptr;
+    ComPtr<ICoreWebView2Environment> environment;
+    ComPtr<ICoreWebView2Controller> controller;
+    ComPtr<ICoreWebView2> view;
+    EventRegistrationToken token{};
+    bool done = false, reading = false;
+    void finish(const std::string& error) {
+        if (done) return;
+        done = true;
+        if (view) { view->remove_WebMessageReceived(token); view->Stop(); }
+        if (controller) controller->Close();
+        view.Reset(); controller.Reset(); environment.Reset();
+        request->finish(selected, error);
+        if (hwnd) { KillTimer(hwnd, 1); DestroyWindow(hwnd); hwnd = nullptr; }
+    }
+};
+using RefreshState = std::shared_ptr<RefreshView>;
+constexpr UINT kRefreshMessage = WM_APP + 73;
+std::atomic<HWND> refreshDispatcher{nullptr};
+
+void startRefresh(const RefreshState& state);
+LRESULT CALLBACK RefreshProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* stored = reinterpret_cast<RefreshState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == kRefreshMessage) {
+        std::unique_ptr<std::shared_ptr<BrowserRefreshRequest>> request(reinterpret_cast<std::shared_ptr<BrowserRefreshRequest>*>(lp));
+        if (!(*request)->abandoned.load()) {
+            auto state = std::make_shared<RefreshView>();
+            state->request = *request;
+            startRefresh(state);
+        }
+        return 0;
+    }
+    if (msg == WM_TIMER && stored) {
+        const auto state = *stored;
+        if (state->request->abandoned.load() || std::chrono::steady_clock::now() >= state->request->deadline)
+            state->finish("网页未返回当前画质的播放数据，请重新打开网页登录或播放");
+        return 0;
+    }
+    if (msg == WM_NCDESTROY && stored) {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        delete stored;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+const wchar_t* refreshClass() {
+    static const wchar_t* name = L"FluxPlayerMediaRefresh";
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSW cls{}; cls.lpfnWndProc = RefreshProc; cls.hInstance = GetModuleHandleW(nullptr); cls.lpszClassName = name;
+        registered = RegisterClassW(&cls) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+    }
+    return name;
+}
+void startRefresh(const RefreshState& state) {
+    state->hwnd = CreateWindowExW(0, refreshClass(), L"", WS_POPUP, 0, 0, 960, 540, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!state->hwnd) { state->finish("无法创建网页刷新环境"); return; }
+    SetWindowLongPtrW(state->hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(new RefreshState(state)));
+    SetTimer(state->hwnd, 1, 100, nullptr);
+    using Create = HRESULT(STDMETHODCALLTYPE*)(PCWSTR, PCWSTR, ICoreWebView2EnvironmentOptions*, ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler*);
+    static HMODULE loader = LoadLibraryW(L"WebView2Loader.dll");
+    auto create = loader ? reinterpret_cast<Create>(GetProcAddress(loader, "CreateCoreWebView2EnvironmentWithOptions")) : nullptr;
+    if (!create) { state->finish("缺少 WebView2 刷新环境"); return; }
+    HRESULT hr = create(nullptr, nullptr, nullptr,
+        MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler, ICoreWebView2Environment>(
+        IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
+        [state](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+            if (state->done) return S_OK;
+            if (FAILED(hr) || !env) { state->finish("创建网页刷新环境失败"); return S_OK; }
+            state->environment = env;
+            HRESULT created = env->CreateCoreWebView2Controller(state->hwnd,
+                MakeCallback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, ICoreWebView2Controller>(
+                IID_ICoreWebView2CreateCoreWebView2ControllerCompletedHandler,
+                [state](HRESULT hr, ICoreWebView2Controller* controller) -> HRESULT {
+                    if (state->done) { if (controller) controller->Close(); return S_OK; }
+                    if (FAILED(hr) || !controller) { state->finish("创建网页刷新视图失败"); return S_OK; }
+                    state->controller = controller;
+                    controller->put_IsVisible(FALSE);
+                    controller->put_Bounds(RECT{0,0,960,540});
+                    if (FAILED(controller->get_CoreWebView2(&state->view)) || !state->view) { state->finish("网页刷新视图不可用"); return S_OK; }
+                    ComPtr<ICoreWebView2_8> media;
+                    if (SUCCEEDED(state->view.CopyTo(IID_ICoreWebView2_8, reinterpret_cast<void**>(media.ReleaseAndGetAddressOf())))) media->put_IsMuted(TRUE);
+                    HRESULT hooked = state->view->add_WebMessageReceived(
+                        MakeEvent<ICoreWebView2WebMessageReceivedEventHandler, ICoreWebView2WebMessageReceivedEventArgs>(
+                        IID_ICoreWebView2WebMessageReceivedEventHandler,
+                        [state](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                            if (state->done || state->reading || state->request->abandoned.load()) return S_OK;
+                            LPWSTR raw = nullptr;
+                            if (FAILED(args->TryGetWebMessageAsString(&raw))) return S_OK;
+                            const std::string message = wideToUtf8(raw); CoTaskMemFree(raw);
+                            ExtractedStream candidate;
+                            if (!parseBrowserCapture(message, candidate) || !state->request->match(candidate, state->selected)) return S_OK;
+                            state->reading = true;
+                            ComPtr<ICoreWebView2_2> newer;
+                            ComPtr<ICoreWebView2CookieManager> cookies;
+                            if (FAILED(state->view.CopyTo(IID_ICoreWebView2_2, reinterpret_cast<void**>(newer.ReleaseAndGetAddressOf()))) ||
+                                FAILED(newer->get_CookieManager(&cookies))) { state->finish("读取刷新鉴权信息失败"); return S_OK; }
+                            HRESULT got = cookies->GetCookies(nullptr,
+                                MakeCallback<ICoreWebView2GetCookiesCompletedHandler, ICoreWebView2CookieList>(
+                                IID_ICoreWebView2GetCookiesCompletedHandler,
+                                [state](HRESULT hr, ICoreWebView2CookieList* list) -> HRESULT {
+                                    if (state->done) return S_OK;
+                                    if (FAILED(hr) || !list) { state->finish("读取刷新 Cookie 失败"); return S_OK; }
+                                    std::vector<NetscapeCookie> scoped;
+                                    UINT count = 0; list->get_Count(&count);
+                                    for (UINT i = 0; i < count; ++i) {
+                                        ComPtr<ICoreWebView2Cookie> cookie;
+                                        if (SUCCEEDED(list->GetValueAtIndex(i, &cookie)) && cookie) {
+                                            auto c = convertCookie(cookie.Get());
+                                            bool relevant = cookieRelevant(c.domain, extractHost(state->selected.originalUrl)) ||
+                                                cookieRelevant(c.domain, extractHost(state->selected.videoUrl)) || cookieRelevant(c.domain, extractHost(state->selected.audioUrl));
+                                            for (const auto& target : state->selected.mediaCookieUrls) relevant = relevant || cookieRelevant(c.domain,extractHost(target));
+                                            for (const auto& q : state->selected.qualities) relevant = relevant || cookieRelevant(c.domain, extractHost(q.videoUrl)) || cookieRelevant(c.domain, extractHost(q.audioUrl));
+                                            if (relevant) scoped.push_back(std::move(c));
+                                        }
+                                    }
+                                    state->selected.httpCookies = browserCaptureCookies(scoped, state->selected.videoUrl);
+                                    state->finish(""); return S_OK;
+                                }).Get());
+                            if (FAILED(got)) state->finish("无法读取刷新 Cookie");
+                            return S_OK;
+                        }).Get(), &state->token);
+                    if (FAILED(hooked)) { state->finish("无法监听网页刷新结果"); return S_OK; }
+                    // 隐藏刷新视图只发请求，不播放：守护脚本以暂停状态启动。
+                    std::string script = std::string(browserMediaGuardScript(true)) + "\n" + browserCaptureScript();
+                    HRESULT injected = state->view->AddScriptToExecuteOnDocumentCreated(utf8ToWide(script).c_str(),
+                        MakeCallback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler, const wchar_t>(
+                        IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+                        [state](HRESULT hr, LPCWSTR) -> HRESULT {
+                            if (state->done) return S_OK;
+                            if (FAILED(hr) || FAILED(state->view->Navigate(utf8ToWide(state->request->previous.originalUrl).c_str()))) state->finish("重新加载网页失败");
+                            return S_OK;
+                        }).Get());
+                    if (FAILED(injected)) state->finish("注入网页刷新脚本失败");
+                    return S_OK;
+                }).Get());
+            if (FAILED(created)) state->finish("创建网页刷新视图失败");
+            return S_OK;
+        }).Get());
+    if (FAILED(hr)) state->finish("启动网页刷新失败");
+}
+
 } // namespace
+
+void BrowserRefresh::initialize() {
+    if (!refreshDispatcher.load()) refreshDispatcher.store(CreateWindowExW(0, refreshClass(), L"", 0, 0,0,0,0, HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr));
+}
+bool BrowserRefresh::refresh(const ExtractedStream& previous, ExtractedStream& out, std::string& error, const std::atomic<bool>* cancelled) {
+    HWND dispatcher = refreshDispatcher.load();
+    if (!dispatcher || GetWindowThreadProcessId(dispatcher, nullptr) == GetCurrentThreadId()) { error = "网页刷新需要后台线程和已初始化的浏览器环境"; return false; }
+    auto request = std::make_shared<BrowserRefreshRequest>(previous);
+    auto* posted = new std::shared_ptr<BrowserRefreshRequest>(request);
+    if (!PostMessageW(dispatcher, kRefreshMessage, 0, reinterpret_cast<LPARAM>(posted))) { delete posted; error = "无法提交网页刷新请求"; return false; }
+    return request->wait(out, error, cancelled);
+}
 
 bool WebLogin::isSupported() {
     return true;
 }
 
 WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
+    BrowserRefresh::initialize();
     WebLoginOutcome outcome;
 
     HINSTANCE hInst = GetModuleHandleW(nullptr);
@@ -393,7 +665,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     ctx.host = extractHost(pageUrl);
 
     HWND hwnd = CreateWindowExW(
-        0, cls, L"FluxPlayer 登录",
+        0, cls, L"FluxPlayer 网页视频 — 浏览器捕获 / yt-dlp",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760,
         nullptr, nullptr, hInst, nullptr);
@@ -410,7 +682,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdCancel, hInst, nullptr);
     ctx.completeBtn = CreateWindowExW(0, L"BUTTON", L"完成登录",
-        WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdComplete, hInst, nullptr);
     ctx.useExistingBtn = CreateWindowExW(0, L"BUTTON",
         CookieStore::hasCookiesForUrl(pageUrl)
@@ -420,7 +692,14 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdUseExisting, hInst, nullptr);
     // 控件初始化完成即可继续，不必等待网页加载或登录。
     EnableWindow(ctx.completeBtn, FALSE);
-    EnableWindow(ctx.useExistingBtn, TRUE);
+    ShowWindow(ctx.useExistingBtn, SW_SHOW);
+    ctx.streamPicker = CreateWindowExW(0, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+        0, 0, 0, 0, hwnd, nullptr, hInst, nullptr);
+    ctx.captureBtn = CreateWindowExW(0, L"BUTTON", L"播放捕获视频",
+        WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+        0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)kIdCapture, hInst, nullptr);
+    EnableWindow(ctx.captureBtn, FALSE);
     // 触发首次布局
     SendMessageW(hwnd, WM_SIZE, 0, 0);
 
@@ -505,15 +784,124 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                                 return S_OK;
                             }
                             RECT rc; GetClientRect(hwnd, &rc);
-                            rc.bottom -= 36;
-                            if (FAILED(controller->put_Bounds(rc)) ||
-                                FAILED(wv->Navigate(ctx.startUrl.c_str()))) {
+                            rc.bottom -= 78;
+                            HRESULT captureResult = wv->add_WebMessageReceived(
+                                MakeEvent<ICoreWebView2WebMessageReceivedEventHandler, ICoreWebView2WebMessageReceivedEventArgs>(
+                                    IID_ICoreWebView2WebMessageReceivedEventHandler,
+                                    [state](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                                        auto& ctx = *state.Get();
+                                        if (!ctx.running.load() || ctx.readingCookies || ctx.modalResult != ModalResult::None) return S_OK;
+                                        LPWSTR raw = nullptr;
+                                        if (FAILED(args->TryGetWebMessageAsString(&raw))) return S_OK;
+                                        std::string message = wideToUtf8(raw);
+                                        CoTaskMemFree(raw);
+                                        if (logBrowserNetworkObservation(message)) return S_OK;
+                                        ExtractedStream stream;
+                                        if (!parseBrowserCapture(message, stream)) return S_OK;
+                                        for (auto& previous : ctx.captures) {
+                                            if (!sameBrowserCapture(previous, stream)) continue;
+                                            if (!stream.qualities.empty()) {
+                                                const auto index = static_cast<size_t>(&previous - ctx.captures.data());
+                                                const auto selected = SendMessageW(ctx.streamPicker, CB_GETCURSEL, 0, 0);
+                                                auto label = utf8ToWide(stream.title);
+                                                for (const auto& q : stream.qualities)
+                                                    if (q.formatId == stream.selectedFormatId) label += utf8ToWide(" · " + q.label);
+                                                previous = stream;
+                                                SendMessageW(ctx.streamPicker, CB_DELETESTRING, index, 0);
+                                                SendMessageW(ctx.streamPicker, CB_INSERTSTRING, index, reinterpret_cast<LPARAM>(label.c_str()));
+                                                if (selected != CB_ERR) SendMessageW(ctx.streamPicker, CB_SETCURSEL, selected, 0);
+                                                return S_OK;
+                                            }
+                                            if (stream.webMedia != WebMediaState::Native) previous.webMedia = stream.webMedia;
+                                            if (stream.cctvProtection != CctvProtectionMode::None && previous.cctvProtection == CctvProtectionMode::None) {
+                                                previous.cctvProtection = stream.cctvProtection;
+                                                const auto index = static_cast<size_t>(&previous - ctx.captures.data());
+                                                const auto selected = SendMessageW(ctx.streamPicker, CB_GETCURSEL, 0, 0);
+                                                const auto clean = previous.videoUrl.substr(0, previous.videoUrl.find_first_of("?#"));
+                                                const auto label = utf8ToWide("[央视原生] " + std::to_string(index + 1) + ". " + clean);
+                                                SendMessageW(ctx.streamPicker, CB_DELETESTRING, index, 0);
+                                                SendMessageW(ctx.streamPicker, CB_INSERTSTRING, index, reinterpret_cast<LPARAM>(label.c_str()));
+                                                if (selected != CB_ERR) SendMessageW(ctx.streamPicker, CB_SETCURSEL, selected, 0);
+                                            }
+                                            return S_OK;
+                                        }
+                                        if (ctx.captures.size() >= 128) return S_OK;
+                                        if (stream.originalUrl.empty()) stream.originalUrl = ctx.startUrlUtf8;
+                                        auto cleanUrl = stream.videoUrl.substr(0, stream.videoUrl.find_first_of("?#"));
+                                        auto label = utf8ToWide(std::to_string(ctx.captures.size() + 1) + ". " + cleanUrl);
+                                        if (stream.platform == "InlinePlaylist") label = L"网页生成的完整播放清单";
+                                        if (!stream.qualities.empty()) label = utf8ToWide("音视频 · " + stream.title);
+                                        if (!stream.qualities.empty())
+                                            for (const auto& quality : stream.qualities)
+                                                if (quality.formatId == stream.selectedFormatId) label += utf8ToWide(" · " + quality.label);
+                                        if (stream.cctvProtection != CctvProtectionMode::None) label = L"[央视原生] " + label;
+                                        const bool inlinePlaylist = stream.platform == "InlinePlaylist";
+                                        ctx.captures.push_back(std::move(stream));
+                                        SendMessageW(ctx.streamPicker, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+                                        if (ctx.captures.size() == 1 || inlinePlaylist) SendMessageW(ctx.streamPicker, CB_SETCURSEL, ctx.captures.size() - 1, 0);
+                                        EnableWindow(ctx.captureBtn, TRUE);
+                                        LOG_INFO("WebLogin: 捕获到可选媒体流 count=" + std::to_string(ctx.captures.size()));
+                                        return S_OK;
+                                    }).Get(), &ctx.captureToken);
+                            HRESULT navResult = wv->add_NavigationStarting(
+                                MakeEvent<ICoreWebView2NavigationStartingEventHandler, ICoreWebView2NavigationStartingEventArgs>(
+                                    IID_ICoreWebView2NavigationStartingEventHandler,
+                                    [state](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+                                        auto& ctx = *state.Get();
+                                        if (ctx.pageMediaSuspended) { args->put_Cancel(TRUE); return S_OK; }
+                                        if (!ctx.running.load() || ctx.readingCookies) return S_OK;
+                                        ctx.captures.clear();
+                                        SendMessageW(ctx.streamPicker, CB_RESETCONTENT, 0, 0);
+                                        EnableWindow(ctx.captureBtn, FALSE);
+                                        return S_OK;
+                                    }).Get(), &ctx.navigationToken);
+                            // 页面自行导航会得到新文档，守卫默认重新允许播放；交接后必须再停一次。
+                            HRESULT completedResult = wv->add_NavigationCompleted(
+                                MakeEvent<ICoreWebView2NavigationCompletedEventHandler, ICoreWebView2NavigationCompletedEventArgs>(
+                                    IID_ICoreWebView2NavigationCompletedEventHandler,
+                                    [state](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+                                        auto& ctx = *state.Get();
+                                        if (!ctx.running.load() || !ctx.pageMediaSuspended) return S_OK;
+                                        BOOL success = FALSE;
+                                        args->get_IsSuccess(&success);
+                                        if (success) ctx.webView->ExecuteScript(utf8ToWide(browserMediaSuspendScript()).c_str(), nullptr);
+                                        return S_OK;
+                                    }).Get(), &ctx.completedToken);
+                            // Registration completes before navigation so early player requests are observed.
+                            // 登录期间允许用户自己点播放；交接后由守护脚本暂停并阻止重播。
+                            const std::string pageScript = std::string(browserMediaGuardScript(false)) + "\n" + browserCaptureScript();
+                            HRESULT scriptResult = wv->AddScriptToExecuteOnDocumentCreated(
+                                utf8ToWide(pageScript).c_str(),
+                                MakeCallback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler, const wchar_t>(
+                                    IID_ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+                                    [state](HRESULT result, LPCWSTR) -> HRESULT {
+                                        auto& ctx = *state.Get();
+                                        if (!ctx.running.load() || ctx.modalResult != ModalResult::None) return S_OK;
+                                        if (FAILED(result)) {
+                                            ctx.error="无法注入网页捕获与暂停守卫";
+                                            ctx.modalResult=ModalResult::Failed;
+                                            PostMessageW(ctx.hwnd,WM_FP_QUIT_LOGIN,0,0);
+                                            return S_OK;
+                                        }
+                                        if (FAILED(ctx.webView->Navigate(ctx.startUrl.c_str()))) {
+                                            ctx.error = "导航登录页面失败";
+                                            ctx.modalResult = ModalResult::Failed;
+                                            PostMessageW(ctx.hwnd, WM_FP_QUIT_LOGIN, 0, 0);
+                                        } else EnableWindow(ctx.completeBtn, TRUE);
+                                        return S_OK;
+                                    }).Get());
+                            if (FAILED(captureResult) || FAILED(navResult) || FAILED(completedResult)) {
+                                ctx.error="无法注册网页捕获与导航守卫";
+                                ctx.modalResult=ModalResult::Failed;
+                                PostMessageW(hwnd,WM_FP_QUIT_LOGIN,0,0);
+                                return S_OK;
+                            }
+                            if (FAILED(controller->put_Bounds(rc)) || FAILED(scriptResult)) {
                                 ctx.error = "初始化或导航登录页面失败";
                                 ctx.modalResult = ModalResult::Failed;
                                 PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
                                 return S_OK;
                             }
-                            EnableWindow(ctx.completeBtn, TRUE);
                             return S_OK;
                         }
                     ).Get());
@@ -547,8 +935,16 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
 
     // 先失效，再关闭页面。Close 结束网页媒体，Stop 只取消导航，不能替代 Close。
     ctx.running = false;
+    KillTimer(hwnd,kMediaHandoffTimer);
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     ctx.hwnd = nullptr;
+    if (ctx.webView) {
+        ctx.webView->remove_WebMessageReceived(ctx.captureToken);
+        ctx.webView->remove_NavigationStarting(ctx.navigationToken);
+        ctx.webView->remove_NavigationCompleted(ctx.completedToken);
+        // 取消/关闭同样要先真正停下页面媒体，不能只依赖随后关闭控制器。
+        ctx.webView->ExecuteScript(utf8ToWide(browserMediaSuspendScript()).c_str(), nullptr);
+    }
     if (ctx.webView && FAILED(ctx.webView->Stop()))
         LOG_WARN("WebLogin: 停止页面导航失败");
     if (ctx.controller && FAILED(ctx.controller->Close())) {
@@ -564,6 +960,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     case ModalResult::Complete:
         outcome.result = WebLoginResult::Completed;
         outcome.cookies = std::move(ctx.cookies);
+        outcome.capturedStream = std::move(ctx.selectedCapture);
         LOG_INFO("WebLogin: 用户完成登录，读取 cookies "
                  + std::to_string(outcome.cookies.size()) + " 条 host=" + ctx.host);
         break;
@@ -589,6 +986,11 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
 #else  // FLUXPLAYER_HAVE_WEBVIEW2 未定义：构建系统未检测到 WebView2 SDK
 
 namespace FluxPlayer {
+
+void BrowserRefresh::initialize() {}
+bool BrowserRefresh::refresh(const ExtractedStream&, ExtractedStream&, std::string& error, const std::atomic<bool>*) {
+    error = "此构建没有 WebView2，无法刷新浏览器会话"; return false;
+}
 
 bool WebLogin::isSupported() {
     return false;

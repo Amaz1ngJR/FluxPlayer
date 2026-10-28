@@ -9,6 +9,7 @@
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include "FluxPlayer/utils/H264NalTransformer.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -56,10 +57,13 @@ public:
      * @param filename      流 URL 或 "pipe:N"
      * @param httpHeaders   HTTP headers（"Key: Value\r\n" 格式），空则不注入
      * @param knownDuration 已知时长（秒），>0 时手动注入 duration（解决 pipe 流被误判为直播流）
+     * @param httpCookies   FFmpeg Cookie jar，保留 domain/path，供分片请求和重连复用
      */
     bool open(const std::string& filename,
               const std::string& httpHeaders,
-              double knownDuration = 0.0);
+              double knownDuration = 0.0,
+              const std::string& httpCookies = "",
+              CctvProtectionMode cctvProtection = CctvProtectionMode::None);
 
     /**
      * @brief 打开输入但不调用 avformat_find_stream_info。
@@ -221,7 +225,9 @@ private:
     bool openInternal(const std::string& filename,
                       const std::string& httpHeaders,
                       double knownDuration,
-                      bool useConfiguredProxy);
+                      bool useConfiguredProxy,
+                      const std::string& httpCookies,
+                      CctvProtectionMode cctvProtection);
 
     /**
      * @brief 为网络流 URL 配置 FFmpeg 打开选项
@@ -249,6 +255,7 @@ private:
     void logMediaInfo(const std::string& filename) const;
 
     int m_lastReadError = 0;
+    std::unique_ptr<H264NalTransformer> cctvDecoder_;
     AVFormatContext* m_formatCtx;    ///< FFmpeg 格式上下文，管理容器级别的信息
     int m_videoStreamIndex;          ///< 视频流索引，-1 表示未找到
     int m_audioStreamIndex;          ///< 音频流索引，-1 表示未找到

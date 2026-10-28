@@ -202,11 +202,16 @@ bool Demuxer::open(const std::string& filename) {
 bool Demuxer::openInternal(const std::string& filename,
                            const std::string& httpHeaders,
                            double knownDuration,
-                           bool useConfiguredProxy) {
+                           bool useConfiguredProxy,
+                           const std::string& httpCookies,
+                           CctvProtectionMode cctvProtection) {
     if (!prepareInput()) return false;
     if (!preparePipeInput(filename)) { close(); return false; }
     AVDictionary* options = configureNetworkOptions(filename, useConfiguredProxy);
+    if (filename.rfind("data:application/vnd.apple.mpegurl;base64,",0)==0)
+        av_dict_set(&options,"protocol_whitelist","data,http,https,tcp,tls,crypto,httpproxy",0);
     if (!httpHeaders.empty()) av_dict_set(&options, "headers", httpHeaders.c_str(), 0);
+    if (!httpCookies.empty()) av_dict_set(&options, "cookies", httpCookies.c_str(), 0);
 
     int ret = finishIo(avformat_open_input(&m_formatCtx, filename.c_str(), nullptr, &options));
     av_dict_free(&options);
@@ -249,6 +254,23 @@ bool Demuxer::openInternal(const std::string& filename,
     if (!findStreams()) {
         close();
         return false;
+    }
+    if (cctvProtection == CctvProtectionMode::None)
+        cctvProtection = H264NalTransformer::detect(filename);
+    if (cctvProtection != CctvProtectionMode::None) {
+        const auto* video = getVideoStream();
+        if (!video || video->codecpar->codec_id != AV_CODEC_ID_H264) {
+            LOG_ERROR("CCTV native processing supports H.264 only");
+            close();
+            return false;
+        }
+        cctvDecoder_ = std::make_unique<H264NalTransformer>(cctvProtection);
+        // A master playlist can expose several bitrate variants. Only fetch the
+        // selected A/V pair; unselected encrypted variants must not keep loading.
+        for (unsigned i = 0; i < m_formatCtx->nb_streams; ++i)
+            if (static_cast<int>(i) != m_videoStreamIndex && static_cast<int>(i) != m_audioStreamIndex &&
+                static_cast<int>(i) != m_subtitleStreamIndex) m_formatCtx->streams[i]->discard = AVDISCARD_ALL;
+        LOG_INFO("Demuxer: enabled native CCTV H.264 processing");
     }
     logMediaInfo(filename);
     return true;
@@ -426,6 +448,7 @@ void Demuxer::logMediaInfo(const std::string& filename) const {
  * 关闭解复用器，释放资源
  */
 void Demuxer::close() {
+    cctvDecoder_.reset();
     // demuxer 的 read_close 仍可能访问 pb；先关闭格式上下文，再释放自定义 AVIO。
     // 此函数只由 I/O 所有者或其 join 后的线程调用，不用于跨线程解除阻塞。
     if (m_formatCtx) {
@@ -489,6 +512,17 @@ bool Demuxer::readPacket(AVPacket* packet, const std::atomic<uint64_t>* generati
             LOG_ERROR("Failed to read packet: " + std::string(errBuf));
         }
         return false;
+    }
+
+    if (cctvDecoder_ && packet->stream_index == m_videoStreamIndex) {
+        std::string processingError;
+        if (!cctvDecoder_->process(packet, processingError)) {
+            LOG_ERROR("H264NalTransformer: " + processingError);
+            av_packet_unref(packet);
+            m_lastReadError = AVERROR_INVALIDDATA;
+            lastIoResult_ = IoResult::Error;
+            return false;
+        }
     }
 
     LOG_DEBUG("Read packet from stream " + std::to_string(packet->stream_index) +
@@ -649,6 +683,7 @@ bool Demuxer::seek(int64_t timestamp, const std::atomic<uint64_t>* generation,
         return false;
     }
 
+    if (cctvDecoder_) cctvDecoder_->reset();
     LOG_INFO("Seek completed successfully to timestamp: " + std::to_string(seekTarget));
     return true;
 }
@@ -687,15 +722,17 @@ bool Demuxer::openSelfDescribingPipe(const std::string& filename, double knownDu
 
 bool Demuxer::open(const std::string& filename,
                    const std::string& httpHeaders,
-                   double knownDuration) {
-    if (openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/true)) return true;
+                   double knownDuration,
+                   const std::string& httpCookies,
+                   CctvProtectionMode cctvProtection) {
+    if (openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/true, httpCookies, cctvProtection)) return true;
 
     if (isCancelled()) return false; // 用户取消不得触发代理回退。
     const auto& cfg = Config::getInstance().get();
     if (FluxPlayer::isHttpUrl(filename) && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
         LOG_WARN("HTTP open via proxy failed, retrying direct once");
         close();
-        return openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/false);
+        return openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/false, httpCookies, cctvProtection);
     }
     return false;
 }
