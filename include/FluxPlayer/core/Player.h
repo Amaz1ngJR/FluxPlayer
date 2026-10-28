@@ -274,7 +274,7 @@ public:
      * 获取窗口引用
      * 用于 UI 控制器等需要访问窗口的组件
      */
-    Window* getWindow() const { return window_.get(); }
+    Window* getWindow() const { return window_; }
 
     /**
      * 获取已打开流的 AVFormatContext（来自内部 Demuxer）
@@ -425,16 +425,14 @@ private:
      * 泵取并执行命令队列中的所有待处理命令
      *
      * 由控制线程（主循环 run()）每帧调用，串行执行本帧投递的所有命令。
-     * 控制线程每帧调用，串行执行本帧投递的所有命令。
      */
     void pumpCommands();
 
     /**
      * 命令 execute() 调用的内部执行方法
      *
-     * 公开方法（seek/pause/...）在后续阶段会改为「投递命令」，命令 execute()
-     * 调用这些 *Internal() 方法真正落地，从而消除递归。这些方法
-     * 委托给现有公开方法的实现，行为完全不变。
+     * 公开方法（seek/pause/...）投递命令，控制线程的命令 execute()
+     * 调用这些 *Internal() 方法落地，不再反向调用公开入口。
      */
     void seekInternal(double seconds);
     void pauseInternal();
@@ -655,8 +653,9 @@ private:
     std::atomic<int> audioUnderrunCount_;        // 音频欠载计数（队列为空）
 
     // 核心组件（使用智能指针管理）
-    std::unique_ptr<Window> window_;
-    bool ownsWindow_ = true; ///< false 时 cleanup 不销毁 window_（外部窗口场景）
+    // 仅 ownedWindow_ 拥有对象；window_ 是当前窗口的非拥有观察指针。
+    std::unique_ptr<Window> ownedWindow_;
+    Window* window_ = nullptr;
     std::unique_ptr<GLRenderer> renderer_;
     std::unique_ptr<Demuxer> demuxer_;
     std::unique_ptr<VideoDecoder> videoDecoder_;
@@ -732,8 +731,7 @@ private:
     std::atomic<bool> audioDrainedEof_{false};
 
     // 队列管理器（统一管理 packet×2 + frame×2 的生命周期）
-    // 通过访问器 videoPacketQueue()/audioPacketQueue()/videoFrameQueue()/audioFrameQueue()
-    // 返回 unique_ptr& 引用，兼容原成员用法（判空 / operator-> / 赋值 / reset）
+    // QueueManager 独占队列；访问器只借用，生命周期变更走显式方法。
     std::unique_ptr<QueueManager> queueManager_;
 
     // 网络流预缓冲状态

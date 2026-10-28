@@ -501,22 +501,10 @@ bool Player::open(const std::string& filePath) {
     constexpr int kLiveAudioQueueSize  = 8;
     int videoQueueSize = isLiveStream_ ? kLiveVideoQueueSize : kLocalVideoQueueSize;
     int audioQueueSize = isLiveStream_ ? kLiveAudioQueueSize : kLocalAudioQueueSize;
-    // 纯音频模式不需要视频队列
-    if (!audioOnly_) {
-        queueManager_->videoFrameQueue() = std::make_unique<FrameQueue>(videoQueueSize, /*keepLast=*/true);
-    }
-    queueManager_->audioFrameQueue() = std::make_unique<FrameQueue>(audioQueueSize, /*keepLast=*/false);
+    queueManager_->configure(!audioOnly_, demuxer_->getAudioStreamIndex() >= 0,
+                             videoQueueSize, audioQueueSize);
     LOG_INFO("Frame queues created: video=" + std::to_string(videoQueueSize) +
              ", audio=" + std::to_string(audioQueueSize));
-
-    // 创建压缩包队列（demux 线程生产，对应 decode 线程消费）。
-    // 时间基准设置见 initDecoders 之后（需要 demuxer 的流 time_base）。
-    if (!audioOnly_) {
-        queueManager_->videoPacketQueue() = std::make_unique<PacketQueue>();
-    }
-    if (demuxer_->getAudioStreamIndex() >= 0) {
-        queueManager_->audioPacketQueue() = std::make_unique<PacketQueue>();
-    }
 
     // 初始化解码器
     if (!initDecoders()) {
@@ -583,17 +571,14 @@ bool Player::open(const std::string& filePath) {
 }
 
 bool Player::open(const std::string& filePath, Window* externalWindow) {
-    // 外部窗口模式：标记不拥有窗口，然后委托给标准 open()
-    // initWindowAndRenderer 会检测 ownsWindow_==false 并跳过窗口创建
-    ownsWindow_ = false;
-    window_.reset(externalWindow); // 借用指针，不拥有所有权
-    bool ok = open(filePath);
-    if (!ok) {
-        // 失败时释放借用指针，避免 cleanup 销毁外部窗口
-        window_.release();
-        ownsWindow_ = true;
-    }
-    return ok;
+    // 先验证状态，拒绝重复 open 时不能覆盖当前窗口借用关系。
+    if (!externalWindow || externalWindow == ownedWindow_.get() ||
+        (stateManager_->current() != PlayerState::IDLE &&
+         stateManager_->current() != PlayerState::STOPPED)) return false;
+    // 清理旧会话（包括依赖旧 GL 上下文的资源），再安装新的借用窗口。
+    if (window_ || demuxer_) close();
+    window_ = externalWindow;
+    return open(filePath); // 失败时也由 close/析构回收资源，绝不 delete 借用窗口
 }
 
 void Player::setPreExtractedInfo(const std::string& pageUrl, const ExtractedStream& info) {
@@ -1182,7 +1167,7 @@ void Player::quit() {
     // 仅在 Player 拥有窗口时才让窗口 shouldClose=true（CLI 模式行为不变）。
     // 共享 UiContext 模式下，窗口归 main 持有，关闭它会让整个程序退出，
     // 而 Player::run 已经通过 shouldQuit_ 自行退出循环。
-    if (window_ && ownsWindow_) {
+    if (window_ && ownedWindow_) {
         glfwSetWindowShouldClose(window_->getGLFWWindow(), true);
     }
 }
@@ -1449,20 +1434,16 @@ void Player::cleanup() {
         glfwMakeContextCurrent(window_->getGLFWWindow());
     }
 
-    // 清理组件
+    // 清理组件；回调捕获 Player，借用窗口继续存活时也必须解除。
+    if (window_) window_->setKeyCallback({});
     renderer_.reset();
-    // 外部窗口模式：不销毁窗口，仅释放借用指针
-    if (ownsWindow_) {
-        window_.reset();
-    } else {
-        window_.release();
-        ownsWindow_ = true; // 重置，下次 open 默认自建
-    }
+    // 借用窗口从不进入 owning pointer，无需 release 补救。
+    window_ = nullptr;
+    ownedWindow_.reset();
     audioDecoder_.reset();
     videoDecoder_.reset();
     // packet 队列在解码器之后释放（解码器线程已 join，无人再访问）
-    queueManager_->videoPacketQueue().reset();
-    queueManager_->audioPacketQueue().reset();
+    queueManager_->resetPackets();
     // 字幕模块必须在 demuxer_ 之前释放（SubtitleDecoder 不直接依赖 demuxer，
     // 但 subtitleManager_ 的 Entry 被 Controller 引用，顺序释放保险起见）
     subtitleDecoder_.reset();
@@ -1540,9 +1521,10 @@ bool Player::initWindowAndRenderer() {
     }
 
     // 创建窗口（外部窗口模式下跳过创建，但需要 resize 适配内容尺寸）
-    if (ownsWindow_) {
-        window_ = std::make_unique<Window>(clampedW, clampedH,
-                                           "FluxPlayer - " + filePath_);
+    if (!window_) {
+        ownedWindow_ = std::make_unique<Window>(clampedW, clampedH,
+                                               "FluxPlayer - " + filePath_);
+        window_ = ownedWindow_.get();
         if (!window_->init()) {
             LOG_ERROR("Failed to initialize window");
             return false;
@@ -1799,8 +1781,7 @@ bool Player::disableAudioPlayback() {
     audioCoverageEnds_.clear();
     audioCoverageCount_ = 0;
     audioDecoder_.reset();
-    queueManager_->audioPacketQueue().reset();
-    queueManager_->audioFrameQueue().reset();
+    queueManager_->disableAudio();
     audioDrainedEof_.store(true);
     seekAudioAligned_.store(true);
     audioPausedForSeek_.store(false);
@@ -1939,14 +1920,14 @@ bool Player::initDecoders() {
         if (vs) queueManager_->videoPacketQueue()->setTimeBase(vs->time_base);
     } else {
         // 无视频解码器：不需要视频 packet 队列（纯音频模式或视频流缺失）
-        queueManager_->videoPacketQueue().reset();
+        queueManager_->disableVideoPackets();
     }
     if (hasAudioStream_ && queueManager_->audioPacketQueue()) {
         AVStream* as = demuxer_->getAudioStream();
         if (as) queueManager_->audioPacketQueue()->setTimeBase(as->time_base);
     } else {
         // 音频解码器初始化失败：丢弃音频 packet 队列，不创建音频 decode 线程
-        queueManager_->audioPacketQueue().reset();
+        queueManager_->disableAudioPackets();
     }
 
     LOG_INFO("Decoders initialized successfully");
@@ -1978,7 +1959,7 @@ size_t Player::audioOutputCallback(uint8_t* buffer, size_t bufferSize) {
     }
 
     const size_t frames = bufferSize / (audioChannels_ * sizeof(int16_t));
-    auto* queue = queueManager_->audioFrameQueue().get();
+    auto* queue = queueManager_->audioFrameQueue();
     if (queue && frames <= audioCoverageStarts_.size()) {
         audioCoverageCount_ = queue->renderAudio(buffer, frames, audioChannels_, audioSampleRate_,
             playbackRate_.load(), audioCoverageStarts_.data(), audioCoverageEnds_.data());
@@ -2651,14 +2632,9 @@ bool Player::installQualityStream(const ExtractedStream& info, double seekTime, 
     duration_ = demuxer_->getDuration() / 1000000.0;
     constexpr int kVideoFrames = 4, kAudioFrames = 10;
     constexpr int kLiveVideoFrames = 3, kLiveAudioFrames = 8; // 保持直播浅队列策略。
-    if (!audioOnly_) {
-        queueManager_->videoPacketQueue() = std::make_unique<PacketQueue>();
-        queueManager_->videoFrameQueue() = std::make_unique<FrameQueue>(
-            isLiveStream_ ? kLiveVideoFrames : kVideoFrames, true);
-    }
-    queueManager_->audioPacketQueue() = std::make_unique<PacketQueue>();
-    queueManager_->audioFrameQueue() = std::make_unique<FrameQueue>(
-        isLiveStream_ ? kLiveAudioFrames : kAudioFrames, false);
+    queueManager_->configure(!audioOnly_, demuxer_->getAudioStreamIndex() >= 0,
+        isLiveStream_ ? kLiveVideoFrames : kVideoFrames,
+        isLiveStream_ ? kLiveAudioFrames : kAudioFrames);
     if (!initDecoders() || !initRenderer() || !initAudioOutput()) {
         if (audioOutput_) { audioOutput_->stop(); audioOutput_.reset(); }
         renderer_.reset();
@@ -2985,7 +2961,7 @@ bool Player::openImageFile(const std::string& path) {
     clockController_->avSync()->setClockType(ClockType::EXTERNAL_CLOCK);
 
     // 创建视频帧队列（大小 2，keep-last 让暂停后继续复用 GPU 纹理）
-    queueManager_->videoFrameQueue() = std::make_unique<FrameQueue>(2, /*keepLast=*/true);
+    queueManager_->configureImage();
     queueManager_->videoFrameQueue()->start();
 
     // 图片也走私有帧提交，不暴露内部槽位。
@@ -2997,7 +2973,7 @@ bool Player::openImageFile(const std::string& path) {
     av_frame_move_ref(prepared.getAVFrame(), imgFrame);
     prepared.setPTS(0.0);
     prepared.setType(FrameType::VIDEO);
-    auto* imageQueue = queueManager_->videoFrameQueue().get();
+    auto* imageQueue = queueManager_->videoFrameQueue();
     const auto result = imageQueue->trySubmit(prepared, imageQueue->outputTag(0));
     av_frame_free(&imgFrame);
     if (result != FrameQueue::SubmitResult::Committed) {

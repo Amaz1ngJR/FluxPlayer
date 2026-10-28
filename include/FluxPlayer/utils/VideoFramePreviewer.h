@@ -74,14 +74,14 @@ public:
      */
     bool poll(PreviewFrame& outFrame);
 
-    /// 取消当前挂起请求（不停止线程，仅丢弃 pending）
+    /// 取消 pending 与运行中的旧请求；使旧完成失效并中断可取消的 I/O。
     void cancel();
 
-    /// 同步探测文件时长（秒），失败返回 0。用于 UI 添加片段时获取滑块范围（开销小：
-    /// 仅 open + find_stream_info，无解码）。
+    /// 同步探测工具（秒），失败返回 0；只能由后台调用，不应在 UI 线程使用。
     static double probeDuration(const std::string& path);
 
 private:
+    friend struct PreviewRegressionAccess;
     /// worker 线程主循环
     void workerLoop();
 
@@ -97,9 +97,13 @@ private:
     std::atomic<bool> running_{true};
 
     // 待处理请求（只保留最新一个）
-    bool        hasPending_ = false;
-    std::string pendingPath_;
-    double      pendingTs_ = 0.0;
+    struct PreviewRequest {
+        uint64_t id = 0;
+        std::string path;
+        double timestamp = 0.0;
+    };
+    bool hasPending_ = false;
+    PreviewRequest pending_;
     std::atomic<uint64_t> generation_{0};   ///< 最新请求代号
 
     // 完成队列（worker → UI）

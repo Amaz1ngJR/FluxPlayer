@@ -161,6 +161,10 @@ bool MergeScreen::init() {
 }
 
 void MergeScreen::destroy() {
+    for (auto& task : metadataTasks_) task.cancel->store(true);
+    if (previewer_) previewer_->cancel();
+    // future 析构等待 worker；callback opaque 由任务共享持有到退出。
+    metadataTasks_.clear();
     if (g_mergeScreenInstance == this && ui_.window()) {
         glfwSetDropCallback(ui_.window()->getGLFWWindow(), nullptr);
     }
@@ -194,6 +198,7 @@ MergeScreenResult MergeScreen::run() {
 
     while (!w->shouldClose()) {
         w->pollEvents();
+        pollMetadata();
         pollMerger();   // 驱动 phase 切换
         pollPreview();  // 取预览结果 + 上传纹理（UI 线程）
 
@@ -246,8 +251,9 @@ MergeScreen::provideLuaData(const std::string& name) const {
         const char* phase = phase_ == Phase::Editing ? "editing" :
                             phase_ == Phase::Merging ? "merging" :
                             phase_ == Phase::Done ? "done" : "failed";
-        const auto hw = merger_->getHWAccelInfo();
-        rows.push_back({{"phase", phase}, {"progress", std::to_string(merger_->progress())},
+        const auto status = merger_->status();
+        const auto& hw = status.hardware;
+        rows.push_back({{"phase", phase}, {"progress", std::to_string(status.progress())},
                         {"resultPath", resultPath_}, {"resultHint", resultHint_},
                         {"error", errorMessage_}, {"clipCount", std::to_string(clips_.size())},
                         {"resolutionMode", resolutionMode_ == MergeOptions::ResolutionMode::Unified ? "unified" : "original"},
@@ -268,7 +274,7 @@ MergeScreen::provideLuaData(const std::string& name) const {
                         {"previewDecoding", previewDecoding_ ? "true" : "false"},
                         // Merge pipeline 状态：与 C++ 版 renderMerging() 展示的内容一致，
                         // 否则 Lua 皮肤在合并期间只剩一条进度条，看不出走的是转码还是流拷贝。
-                        {"transcoded", merger_->transcoded() ? "true" : "false"},
+                        {"transcoded", status.transcoded ? "true" : "false"},
                         {"hwDecoding", hw.isHardwareDecoding ? "true" : "false"},
                         {"decoderName", hw.decoderName},
                         {"hwEncoding", hw.isHardwareEncoding ? "true" : "false"},
@@ -348,7 +354,14 @@ void MergeScreen::handleLuaAction(
     if ((action == "mergeReset" || action == "mergeDuplicate") && phase_ == Phase::Editing &&
         selectedClip_ >= 0 && selectedClip_ < static_cast<int>(clips_.size())) {
         if (action == "mergeReset") { clips_[selectedClip_].clip.startSec = 0; clips_[selectedClip_].clip.endSec = -1; }
-        else { auto copy = clips_[selectedClip_]; clips_.insert(clips_.begin() + selectedClip_ + 1, copy); ++selectedClip_; }
+        else {
+            auto copy = clips_[selectedClip_];
+            copy.clipId = nextClipId_++;
+            // 未完成的元数据任务属于原实例，副本必须独立排队。
+            if (!copy.probed) copy.probeStarted = false;
+            clips_.insert(clips_.begin() + selectedClip_ + 1, std::move(copy));
+            ++selectedClip_;
+        }
         requestPreview(PreviewEdge::In, true);
         return;
     }
@@ -405,23 +418,27 @@ void MergeScreen::handleLuaAction(
 
 void MergeScreen::pollMerger() {
     if (phase_ != Phase::Merging) return;
-    VideoMerger::State st = merger_->state();
+    const auto status = merger_->status();
+    VideoMerger::State st = status.state;
     if (st == VideoMerger::State::Done) {
         phase_ = Phase::Done;
-        resultPath_ = merger_->outputPath();
+        resultPath_ = status.outputPath;
         std::string hint;
-        if (merger_->transcoded()) {
-            hint = "Re-encoded to H.264/MP4 (trimmed or mixed inputs)";
-            if (merger_->audioDropped()) hint += "; some clips had no audio, output is video-only";
+        if (status.transcoded) {
+            hint = "Re-encoded (trimmed or mixed inputs)";
+            if (status.audioDropped) hint += "; some clips had no audio, output is video-only";
         } else {
             hint = "Stream-copied (lossless, fast)";
         }
+        const auto& warning = status.error;
+        if (!warning.empty()) hint += "; " + warning;
         resultHint_ = hint;
         LOG_INFO("MergeScreen: merge complete " + resultPath_);
     } else if (st == VideoMerger::State::Failed) {
         phase_ = Phase::Failed;
-        errorMessage_ = merger_->error();
+        errorMessage_ = status.error;
     } else if (st == VideoMerger::State::Cancelled) {
+        errorMessage_ = status.error;
         phase_ = Phase::Editing;  // 取消后回到编辑态，保留片段列表
     }
 }
@@ -431,7 +448,8 @@ void MergeScreen::pollMerger() {
 // ═══════════════════════════════════════════════════════
 
 // 辅助函数：探测视频元数据（分辨率、编码、文件大小）
-static void probeVideoMetadata(const std::string& path, MergeClipUiState& ui) {
+static void probeVideoMetadata(const std::string& path, MergeClipUiState& ui,
+                               const std::atomic<bool>& cancelled) {
     // 获取文件大小
 #ifdef _WIN32
     struct _stat64 st;
@@ -446,13 +464,29 @@ static void probeVideoMetadata(const std::string& path, MergeClipUiState& ui) {
 #endif
 
     // 使用 FFmpeg 探测视频流信息
-    AVFormatContext* fmt = nullptr;
+    struct Interrupt {
+        const std::atomic<bool>& cancelled;
+        std::chrono::steady_clock::time_point deadline;
+        static int check(void* opaque) {
+            const auto& self = *static_cast<Interrupt*>(opaque);
+            return self.cancelled.load() || std::chrono::steady_clock::now() >= self.deadline;
+        }
+    } interrupt{cancelled, std::chrono::steady_clock::now() + std::chrono::seconds(10)};
+    AVFormatContext* fmt = avformat_alloc_context();
+    if (!fmt) return;
+    fmt->interrupt_callback = {Interrupt::check, &interrupt};
     if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return;
+    struct InputGuard {
+        AVFormatContext*& input;
+        ~InputGuard() { avformat_close_input(&input); }
+    } inputGuard{fmt};
     if (avformat_find_stream_info(fmt, nullptr) < 0) {
         avformat_close_input(&fmt);
         return;
     }
 
+    ui.clip.durationSec = fmt->duration > 0 ? static_cast<double>(fmt->duration) / AV_TIME_BASE : 0.0;
+    ui.probed = ui.clip.durationSec > 0.0;
     // 查找视频流
     for (unsigned i = 0; i < fmt->nb_streams; ++i) {
         AVStream* st = fmt->streams[i];
@@ -479,8 +513,55 @@ static void probeVideoMetadata(const std::string& path, MergeClipUiState& ui) {
     avformat_close_input(&fmt);
 }
 
+void MergeScreen::pollMetadata() {
+    for (auto it = metadataTasks_.begin(); it != metadataTasks_.end();) {
+        auto clip = std::find_if(clips_.begin(), clips_.end(), [&](const MergeClipUiState& c) {
+            return c.clipId == it->clipId && c.clip.path == it->path;
+        });
+        if (clip == clips_.end()) it->cancel->store(true);
+        if (it->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { ++it; continue; }
+        try {
+            auto result = it->result.get();
+            if (clip != clips_.end()) {
+                // 仅合入元数据，不覆盖用户在探测期间修改的裁剪范围。
+                clip->clip.durationSec = result.clip.durationSec;
+                clip->probed = result.probed;
+                clip->width = result.width;
+                clip->height = result.height;
+                clip->codecName = result.codecName;
+                clip->fileSize = result.fileSize;
+            }
+        } catch (const std::exception& e) {
+            if (clip != clips_.end()) clip->error = e.what();
+        } catch (...) {
+            if (clip != clips_.end()) clip->error = "Metadata probe failed";
+        }
+        it = metadataTasks_.erase(it);
+    }
+    // 有界并行；未启动任务留在片段列表中，删除即取消排队。
+    for (auto& clip : clips_) {
+        if (metadataTasks_.size() >= 2) break;
+        if (clip.probeStarted) continue;
+        clip.probeStarted = true;
+        try {
+            auto cancelled = std::make_shared<std::atomic<bool>>(false);
+            MetadataTask task{clip.clipId, clip.clip.path, cancelled, {}};
+            task.result = std::async(std::launch::async, [path = clip.clip.path, cancelled]() {
+                MergeClipUiState result;
+                probeVideoMetadata(path, result, *cancelled);
+                return result;
+            });
+            metadataTasks_.push_back(std::move(task));
+        } catch (const std::exception& e) {
+            clip.codecName.clear();
+            clip.error = e.what();
+        }
+    }
+}
+
 void MergeScreen::addClip(const std::string& path) {
     MergeClipUiState ui;
+    ui.clipId = nextClipId_++;
     ui.clip.path = path;
     ui.clip.startSec = 0.0;
     ui.clip.endSec = -1.0;       // 整段
@@ -492,13 +573,8 @@ void MergeScreen::addClip(const std::string& path) {
         if (c.clip.path == path) maxInstance = std::max(maxInstance, c.sourceInstanceId + 1);
     ui.sourceInstanceId = maxInstance;
 
-    // 探测源时长（轻量：仅 open + find_stream_info，无解码），供 IN/OUT 滑块范围使用。
-    // 探测失败（时长未知）时仍可整段合并，但精确滑块受限。
-    ui.clip.durationSec = VideoFramePreviewer::probeDuration(path);
-    ui.probed = ui.clip.durationSec > 0.0;
-
-    // 探测视频元数据（分辨率、编码、文件大小）
-    probeVideoMetadata(path, ui);
+    // 探测由 pollMetadata 有界调度；添加文件不在 UI 线程执行磁盘/FFmpeg I/O。
+    ui.codecName = "Probing...";
 
     clips_.push_back(std::move(ui));
     if (selectedClip_ < 0) {
@@ -578,7 +654,10 @@ void MergeScreen::startMerge() {
 void MergeScreen::requestPreview(PreviewEdge edge, bool force) {
     if (selectedClip_ < 0 || selectedClip_ >= (int)clips_.size()) return;
     const auto& c = clips_[selectedClip_];
-    if (previewClip_ != selectedClip_) releasePreviewTexture();
+    if (previewClipId_ != c.clipId) releasePreviewTexture();
+    previewClipId_ = c.clipId;
+    previewer_->cancel();
+    previewRequestId_ = 0;
     previewEdge_ = edge;
     previewClip_ = selectedClip_;
     double ts = (edge == PreviewEdge::In)
@@ -588,7 +667,7 @@ void MergeScreen::requestPreview(PreviewEdge edge, bool force) {
 
     double now = ImGui::GetTime();
     if (force || (now - lastPreviewReqTime_) >= kPreviewDebounceSec) {
-        previewer_->request(c.clip.path, ts);
+        previewRequestId_ = previewer_->request(c.clip.path, ts);
         lastPreviewReqTime_ = now;
         pendingPreviewTs_ = -1.0;
         previewDecoding_ = true;
@@ -602,7 +681,11 @@ void MergeScreen::pollPreview() {
     if (pendingPreviewTs_ >= 0.0 && previewClip_ >= 0 && previewClip_ < (int)clips_.size()) {
         double now = ImGui::GetTime();
         if ((now - lastPreviewReqTime_) >= kPreviewDebounceSec) {
-            previewer_->request(clips_[previewClip_].clip.path, pendingPreviewTs_);
+            if (clips_[previewClip_].clipId != previewClipId_) {
+                pendingPreviewTs_ = -1.0;
+                return;
+            }
+            previewRequestId_ = previewer_->request(clips_[previewClip_].clip.path, pendingPreviewTs_);
             lastPreviewReqTime_ = now;
             pendingPreviewTs_ = -1.0;
             previewDecoding_ = true;
@@ -613,6 +696,7 @@ void MergeScreen::pollPreview() {
     PreviewFrame f;
     if (previewer_->poll(f)) {
         if (selectedClip_ < 0 || selectedClip_ >= static_cast<int>(clips_.size()) ||
+            f.generation != previewRequestId_ || clips_[selectedClip_].clipId != previewClipId_ ||
             f.path != clips_[selectedClip_].clip.path) return;
         previewDecoding_ = false;
         if (f.ok && !f.rgba.empty()) {

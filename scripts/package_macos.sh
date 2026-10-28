@@ -100,7 +100,10 @@ cp -R "$FFMPEG_LIB_DIR/." "$APP_BUNDLE/Contents/MacOS/"
 for binary in "$APP_BUNDLE/Contents/MacOS/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"*.dylib \
     "$APP_BUNDLE/Contents/Resources/onnxruntime/macos-arm64/"*.dylib; do
     [ -e "$binary" ] || { echo "Broken bundled library: $binary" >&2; exit 1; }
+    # otool -L 也会列出 dylib 自身的 LC_ID_DYLIB，它不是需要解析的外部依赖。
+    install_name="$(otool -D "$binary" | awk 'NR == 2 { print; exit }')"
     otool -L "$binary" | awk 'NR > 1 { print $1 }' | while IFS= read -r dependency; do
+        [ "$dependency" != "$install_name" ] || continue
         case "$dependency" in
             @loader_path/*|@executable_path/*)
                 if [[ "$dependency" == @loader_path/* ]]; then

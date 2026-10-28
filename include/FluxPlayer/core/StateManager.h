@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <functional>
+#include <thread>
+#include <stdexcept>
 
 #include "FluxPlayer/core/PlayerState.h"
 
@@ -25,7 +27,7 @@ public:
     using StateCallback = std::function<void(PlayerState)>;
 
     explicit StateManager(PlayerState initial = PlayerState::IDLE)
-        : state_(initial) {}
+        : controlThread_(std::this_thread::get_id()), state_(initial) {}
 
     // ===== 状态查询（无锁原子读）=====
     PlayerState current() const { return state_.load(); }
@@ -46,9 +48,17 @@ public:
     /**
      * 设置状态变化回调（由 Player 注册，转发给 UI 等）
      */
-    void setCallback(StateCallback cb) { callback_ = std::move(cb); }
+    void setCallback(StateCallback cb) {
+        requireControlThread();
+        callback_ = std::move(cb);
+    }
 
 private:
+    void requireControlThread() const {
+        if (std::this_thread::get_id() != controlThread_)
+            throw std::logic_error("StateManager writes must run on its control thread");
+    }
+    const std::thread::id controlThread_;
     std::atomic<PlayerState> state_;
     StateCallback callback_;
 };

@@ -28,6 +28,8 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <future>
+#include <atomic>
 
 struct ImFont;
 
@@ -51,9 +53,11 @@ struct MergeScreenResult {
  * @brief 片段在 UI 中的状态（一行 = 一个待合并片段）
  */
 struct MergeClipUiState {
+    uint64_t    clipId = 0;           ///< 界面生命周期内稳定身份，删除后不复用
     MergeClip   clip;                 ///< path + start/end + 源时长
     std::string displayName;          ///< 列表显示用文件名
     int         sourceInstanceId = 0; ///< 同一源文件多次添加时的实例序号（仅显示用）
+    bool        probeStarted = false;
     bool        probed = false;       ///< 是否已探测到源时长
     std::string error;                ///< 该片段的错误（范围非法 / 探测失败）
 
@@ -129,6 +133,7 @@ private:
     void requestPreview(PreviewEdge edge, bool force);
     /// 轮询预览结果并在 UI 线程上传 OpenGL 纹理
     void pollPreview();
+    void pollMetadata();
     /// 释放预览纹理
     void releasePreviewTexture();
 
@@ -162,6 +167,16 @@ private:
     PreviewEdge  previewEdge_ = PreviewEdge::In;
     double       lastPreviewReqTime_ = 0.0; ///< 上次发起预览请求的时间（防抖）
     double       pendingPreviewTs_ = -1.0;  ///< 待发请求的目标时间（防抖窗口内暂存，<0 表示无）
+    struct MetadataTask {
+        uint64_t clipId;
+        std::string path;
+        std::shared_ptr<std::atomic<bool>> cancel;
+        std::future<MergeClipUiState> result;
+    };
+    std::vector<MetadataTask> metadataTasks_;
+    uint64_t nextClipId_ = 1;
+    uint64_t previewRequestId_ = 0;
+    uint64_t previewClipId_ = 0;
     int          previewClip_ = -1;         ///< 预览对应的片段索引
     bool         previewDecoding_ = false;  ///< 是否正在等待预览结果
 

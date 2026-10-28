@@ -7,6 +7,33 @@ namespace FluxPlayer {
 QueueManager::QueueManager() = default;
 QueueManager::~QueueManager() = default;
 
+void QueueManager::configure(bool video, bool audio, int videoFrames, int audioFrames) {
+    QueueManager candidate;
+    if (video) {
+        candidate.videoPktQueue_ = std::make_unique<PacketQueue>();
+        candidate.videoQueue_ = std::make_unique<FrameQueue>(videoFrames, true);
+    }
+    if (audio) {
+        candidate.audioPktQueue_ = std::make_unique<PacketQueue>();
+        candidate.audioQueue_ = std::make_unique<FrameQueue>(audioFrames, false);
+    }
+    videoPktQueue_.swap(candidate.videoPktQueue_);
+    audioPktQueue_.swap(candidate.audioPktQueue_);
+    videoQueue_.swap(candidate.videoQueue_);
+    audioQueue_.swap(candidate.audioQueue_);
+}
+
+void QueueManager::configureImage() {
+    auto frameQueue = std::make_unique<FrameQueue>(2, true);
+    reset();
+    videoQueue_ = std::move(frameQueue);
+}
+
+void QueueManager::disableVideoPackets() { videoPktQueue_.reset(); }
+void QueueManager::disableAudioPackets() { audioPktQueue_.reset(); }
+void QueueManager::disableAudio() { audioPktQueue_.reset(); audioQueue_.reset(); }
+void QueueManager::resetPackets() { videoPktQueue_.reset(); audioPktQueue_.reset(); }
+
 void QueueManager::startAll() {
     if (videoPktQueue_) videoPktQueue_->start();
     if (audioPktQueue_) audioPktQueue_->start();

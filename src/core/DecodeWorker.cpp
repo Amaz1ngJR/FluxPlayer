@@ -61,8 +61,8 @@ void DecodeWorker::runVideo() {
     LOG_INFO("Video decode thread started");
 
     auto& shouldQuit_ = player_->shouldQuit_;
-    auto& videoPktQueue_ = player_->queueManager_->videoPacketQueue();
-    auto& videoQueue_ = player_->queueManager_->videoFrameQueue();
+    auto* videoPktQueue_ = player_->queueManager_->videoPacketQueue();
+    auto* videoQueue_ = player_->queueManager_->videoFrameQueue();
     auto& videoDecoder_ = player_->videoDecoder_;
     auto& clockController_ = player_->clockController_;
 
@@ -177,8 +177,8 @@ void DecodeWorker::runAudio() {
     LOG_INFO("Audio decode thread started");
 
     auto& shouldQuit_ = player_->shouldQuit_;
-    auto& audioPktQueue_ = player_->queueManager_->audioPacketQueue();
-    auto& audioQueue_ = player_->queueManager_->audioFrameQueue();
+    auto* audioPktQueue_ = player_->queueManager_->audioPacketQueue();
+    auto* audioQueue_ = player_->queueManager_->audioFrameQueue();
     auto& audioDecoder_ = player_->audioDecoder_;
     auto& clockController_ = player_->clockController_;
 
@@ -331,7 +331,7 @@ void DecodeWorker::checkPrebufferComplete() {
         (player_->hasVideoStream_ && kind_ != StreamKind::Video)) {
         return;
     }
-    auto& queue = player_->hasVideoStream_
+    auto* queue = player_->hasVideoStream_
         ? player_->queueManager_->videoFrameQueue()
         : player_->queueManager_->audioFrameQueue();
     const size_t buffered = queue ? queue->size() : 0;
@@ -398,8 +398,8 @@ bool DecodeWorker::submitPreparedFrame(FrameQueue* queue, PacketQueue* packets, 
 }
 
 bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
-    auto& videoPktQueue_ = player_->queueManager_->videoPacketQueue();
-    auto& videoQueue_ = player_->queueManager_->videoFrameQueue();
+    auto* videoPktQueue_ = player_->queueManager_->videoPacketQueue();
+    auto* videoQueue_ = player_->queueManager_->videoFrameQueue();
     auto& videoDecoder_ = player_->videoDecoder_;
     auto& clockController_ = player_->clockController_;
 
@@ -461,7 +461,7 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
     }
     preparedFrame_.setPTS(framePTS);
     preparedFrame_.setPTSEstimated(rawFrame.isPTSEstimated());
-    if (!submitPreparedFrame(videoQueue_.get(), videoPktQueue_.get(), outputTag_)) return false;
+    if (!submitPreparedFrame(videoQueue_, videoPktQueue_, outputTag_)) return false;
     {
         // Seek 控制路径持同一锁发布新边界；迟到提交不得完成新 Seek。
         std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
@@ -483,8 +483,8 @@ bool DecodeWorker::enqueueVideoFrame(Frame& rawFrame, int serial) {
 
 bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued) {
     if (enqueued) *enqueued = false;
-    auto& audioPktQueue_ = player_->queueManager_->audioPacketQueue();
-    auto& audioQueue_ = player_->queueManager_->audioFrameQueue();
+    auto* audioPktQueue_ = player_->queueManager_->audioPacketQueue();
+    auto* audioQueue_ = player_->queueManager_->audioFrameQueue();
     auto& audioDecoder_ = player_->audioDecoder_;
     auto& clockController_ = player_->clockController_;
 
@@ -553,7 +553,7 @@ bool DecodeWorker::enqueueAudioFrame(Frame& rawFrame, int serial, bool* enqueued
     preparedFrame_.setPTS(rawFrame.getPTS());
     preparedFrame_.setPTSEstimated(rawFrame.isPTSEstimated());
     preparedFrame_.setType(FrameType::AUDIO);
-    if (!submitPreparedFrame(audioQueue_.get(), audioPktQueue_.get(), outputTag_)) return false;
+    if (!submitPreparedFrame(audioQueue_, audioPktQueue_, outputTag_)) return false;
     {
         std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
         if (audioPktQueue_->serial() != serial) return false;

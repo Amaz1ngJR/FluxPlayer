@@ -92,8 +92,8 @@ void DemuxWorker::waitForPacketSpace() {
     // demux 线程背压：避免坏文件 / 差交织导致单路无限缓冲 OOM。
     // 软上限：总量超阈值且各启用流都已缓冲足够（包数或时长）时短暂等待；
     // 硬上限 / 单路上限：任意触顶都必须等待，不论交织情况。
-    auto& videoPktQueue_ = player_->queueManager_->videoPacketQueue();
-    auto& audioPktQueue_ = player_->queueManager_->audioPacketQueue();
+    auto* videoPktQueue_ = player_->queueManager_->videoPacketQueue();
+    auto* audioPktQueue_ = player_->queueManager_->audioPacketQueue();
 
     for (;;) {
         if (player_->shouldQuit_.load()) return;
@@ -355,8 +355,8 @@ void DemuxWorker::run() {
 
     // 局部引用简化访问
     auto& shouldQuit_ = player_->shouldQuit_;
-    auto& videoPktQueue_ = player_->queueManager_->videoPacketQueue();
-    auto& audioPktQueue_ = player_->queueManager_->audioPacketQueue();
+    auto* videoPktQueue_ = player_->queueManager_->videoPacketQueue();
+    auto* audioPktQueue_ = player_->queueManager_->audioPacketQueue();
     auto& demuxer_ = player_->demuxer_;
     auto& isLiveStream_ = player_->isLiveStream_;
     auto& prebuffering_ = player_->prebuffering_;
@@ -478,7 +478,7 @@ void DemuxWorker::run() {
                 if (recordingService_) {
                     recordingService_->writeVideoPacket(packet, packet->stream_index);
                 }
-                putCurrentPacket(videoPktQueue_.get()); // 原子校验目标并转移所有权
+                putCurrentPacket(videoPktQueue_); // 原子校验目标并转移所有权
             } else if (packet->stream_index == audioIdx) {
                 // 录制按源音轨分发，不依赖音频播放队列。每个录制器只接收一次，
                 // Recorder 内部 clone 包，之后才可向播放队列 move_ref 或直接释放。
@@ -486,7 +486,7 @@ void DemuxWorker::run() {
                     recordingService_->writeVideoPacket(packet, packet->stream_index);
                     recordingService_->writeAudioPacket(packet, packet->stream_index);
                 }
-                if (audioPktQueue_) putCurrentPacket(audioPktQueue_.get());
+                if (audioPktQueue_) putCurrentPacket(audioPktQueue_);
                 else av_packet_unref(packet);
             } else if (subtitleDecoder_ && subtitleManager_ && packet->stream_index == subIdx) {
                 // 字幕包：同步解码，结果直接写入 SubtitleManager 供 UI 线程查询。

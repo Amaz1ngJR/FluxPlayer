@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <cmath>
+#include <chrono>
 
 namespace FluxPlayer {
 
@@ -30,28 +31,30 @@ VideoFramePreviewer::VideoFramePreviewer() {
 }
 
 VideoFramePreviewer::~VideoFramePreviewer() {
-    running_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_.store(false);
+    }
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
 }
 
 uint64_t VideoFramePreviewer::request(const std::string& path, double timestampSec) {
-    uint64_t gen = generation_.fetch_add(1) + 1;
-
-    // 命中缓存：直接放入完成队列，无需唤醒 worker
+    uint64_t gen;
     std::string key = cacheKey(path, timestampSec);
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        gen = generation_.fetch_add(1) + 1;
+        hasPending_ = false;
+        done_.clear();
         PreviewFrame cached;
         if (cacheGet(key, cached)) {
             cached.generation = gen;
             done_.push_back(std::move(cached));
             return gen;
         }
-        // 覆盖旧的 pending（拖动时只关心最新位置）
+        pending_ = {gen, path, timestampSec};
         hasPending_ = true;
-        pendingPath_ = path;
-        pendingTs_ = timestampSec;
     }
     cv_.notify_one();
     return gen;
@@ -73,6 +76,7 @@ bool VideoFramePreviewer::poll(PreviewFrame& outFrame) {
 
 void VideoFramePreviewer::cancel() {
     std::lock_guard<std::mutex> lock(mutex_);
+    generation_.fetch_add(1);
     hasPending_ = false;
     done_.clear();
 }
@@ -132,19 +136,29 @@ void VideoFramePreviewer::workerLoop() {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [this] { return hasPending_ || !running_.load(); });
             if (!running_.load()) break;
-            path = pendingPath_;
-            ts = pendingTs_;
-            gen = generation_.load();
+            path = std::move(pending_.path);
+            ts = pending_.timestamp;
+            gen = pending_.id;
             hasPending_ = false;
         }
 
-        PreviewFrame frame = decodeFrame(path, ts, gen);
+        PreviewFrame frame;
+        try {
+            frame = decodeFrame(path, ts, gen);
+        } catch (...) {
+            frame.generation = gen;
+        }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        if (frame.ok) cachePut(cacheKey(path, ts), frame);
-        // 仅当仍是最新请求才入队（worker 解码期间可能又有新 request）
-        if (gen == generation_.load() && !hasPending_)
-            done_.push_back(std::move(frame));
+        try {
+            if (frame.ok && gen == generation_.load()) cachePut(cacheKey(path, ts), frame);
+            // 仅当仍是最新请求才入队。
+            if (running_.load() && gen == generation_.load() && !hasPending_)
+                done_.push_back(std::move(frame));
+        } catch (...) {
+            // 分配失败不允许逃出线程入口；清缓存以恢复 LRU 的一致性。
+            cache_.clear(); lruOrder_.clear(); lruIter_.clear();
+        }
     }
 }
 
@@ -155,7 +169,38 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
     result.timestampSec = timestampSec;
     result.generation = generation;
 
-    AVFormatContext* fmt = nullptr;
+    struct Interrupt {
+        VideoFramePreviewer* owner;
+        uint64_t id;
+        std::chrono::steady_clock::time_point deadline;
+        static int check(void* opaque) {
+            const auto& self = *static_cast<Interrupt*>(opaque);
+            return !self.owner->running_.load() || self.owner->generation_.load() != self.id ||
+                   std::chrono::steady_clock::now() >= self.deadline;
+        }
+    } interrupt{this, generation, std::chrono::steady_clock::now() + std::chrono::seconds(10)};
+    struct Resources {
+        AVFormatContext* fmt = nullptr;
+        AVCodecContext* ctx = nullptr;
+        AVFrame* frame = nullptr;
+        AVPacket* pkt = nullptr;
+        SwsContext* sws = nullptr;
+        ~Resources() {
+            if (sws) sws_freeContext(sws);
+            av_packet_free(&pkt);
+            av_frame_free(&frame);
+            avcodec_free_context(&ctx);
+            avformat_close_input(&fmt);
+        }
+    } resources;
+    auto& fmt = resources.fmt;
+    auto& ctx = resources.ctx;
+    auto& frame = resources.frame;
+    auto& pkt = resources.pkt;
+    auto& sws = resources.sws;
+    fmt = avformat_alloc_context();
+    if (!fmt) return result;
+    fmt->interrupt_callback = {Interrupt::check, &interrupt};
     if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return result;
     if (avformat_find_stream_info(fmt, nullptr) < 0) { avformat_close_input(&fmt); return result; }
 
@@ -164,9 +209,9 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
 
     AVStream* st = fmt->streams[vIdx];
     const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
-    AVCodecContext* ctx = avcodec_alloc_context3(dec);
-    avcodec_parameters_to_context(ctx, st->codecpar);
-    if (!dec || avcodec_open2(ctx, dec, nullptr) < 0) {
+    ctx = avcodec_alloc_context3(dec);
+    if (!ctx || !dec || avcodec_parameters_to_context(ctx, st->codecpar) < 0 ||
+        avcodec_open2(ctx, dec, nullptr) < 0) {
         if (ctx) avcodec_free_context(&ctx);
         avformat_close_input(&fmt);
         return result;
@@ -184,9 +229,8 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
         avcodec_flush_buffers(ctx);
     }
 
-    AVFrame* frame = av_frame_alloc();
-    AVPacket* pkt = av_packet_alloc();
-    SwsContext* sws = nullptr;
+    frame = av_frame_alloc();
+    pkt = av_packet_alloc();
     bool got = false;
 
     // 目标输出尺寸：等比缩小到不超过 kMaxPreviewW x kMaxPreviewH
@@ -198,9 +242,9 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
     int outW = srcW > 0 ? std::max(2, (int)(srcW * scale) & ~1) : kMaxPreviewW;  // 偶数宽
     int outH = srcH > 0 ? std::max(2, (int)(srcH * scale) & ~1) : kMaxPreviewH;
 
-    while (!got && av_read_frame(fmt, pkt) >= 0) {
+    while (frame && pkt && !got && !Interrupt::check(&interrupt) && av_read_frame(fmt, pkt) >= 0) {
         if (pkt->stream_index == vIdx && avcodec_send_packet(ctx, pkt) >= 0) {
-            while (avcodec_receive_frame(ctx, frame) >= 0) {
+            while (!Interrupt::check(&interrupt) && avcodec_receive_frame(ctx, frame) >= 0) {
                 int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
                              ? frame->best_effort_timestamp : frame->pts;
                 double sec = (ts != AV_NOPTS_VALUE) ? ts * av_q2d(tb) - startOffset : timestampSec;
@@ -212,6 +256,7 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
                                          outW, outH, AV_PIX_FMT_RGBA, SWS_BILINEAR,
                                          nullptr, nullptr, nullptr);
                 }
+                if (!sws) break;
                 result.rgba.resize((size_t)outW * outH * 4);
                 uint8_t* dst[4] = { result.rgba.data(), nullptr, nullptr, nullptr };
                 int dstStride[4] = { outW * 4, 0, 0, 0 };
@@ -227,11 +272,6 @@ PreviewFrame VideoFramePreviewer::decodeFrame(const std::string& path, double ti
         av_packet_unref(pkt);
     }
 
-    if (sws) sws_freeContext(sws);
-    av_packet_free(&pkt);
-    av_frame_free(&frame);
-    avcodec_free_context(&ctx);
-    avformat_close_input(&fmt);
     return result;
 }
 

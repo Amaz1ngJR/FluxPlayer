@@ -6,6 +6,7 @@
 namespace FluxPlayer {
 
 void StateManager::transitionTo(PlayerState newState) {
+    requireControlThread();
     PlayerState oldState = state_.exchange(newState);
 
     if (oldState != newState) {

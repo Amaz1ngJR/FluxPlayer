@@ -29,7 +29,7 @@ void RecordingService::requestStartVideo(const std::string& outputPath) {
         const auto state = status_.videoState.load();
         if (state == RecordingState::Starting || state == RecordingState::Recording) return;
         if (!inputAvailable_) {
-            reportError(status_.videoState);
+            reportErrorLocked(status_.videoState);
             return;
         }
         pendingRequests_.push_back({
@@ -65,7 +65,7 @@ void RecordingService::requestStartAudio(const std::string& outputPath) {
         const auto state = status_.audioState.load();
         if (state == RecordingState::Starting || state == RecordingState::Recording) return;
         if (!inputAvailable_) {
-            reportError(status_.audioState);
+            reportErrorLocked(status_.audioState);
             return;
         }
         pendingRequests_.push_back({
@@ -96,6 +96,10 @@ void RecordingService::requestStopAudio() {
 
 void RecordingService::publishState(std::atomic<RecordingState>& state, RecordingState value) {
     std::lock_guard<std::mutex> lock(requestMutex_);
+    publishStateLocked(state, value);
+}
+
+void RecordingService::publishStateLocked(std::atomic<RecordingState>& state, RecordingState value) {
     const bool video = &state == &status_.videoState;
     for (const auto& request : pendingRequests_) {
         const bool requestVideo = request.action == DemuxRecordingRequest::Action::StartVideo ||
@@ -107,7 +111,13 @@ void RecordingService::publishState(std::atomic<RecordingState>& state, Recordin
 }
 
 void RecordingService::reportError(std::atomic<RecordingState>& state) {
-    state.store(RecordingState::Error);
+    std::lock_guard<std::mutex> lock(requestMutex_);
+    reportErrorLocked(state);
+}
+
+void RecordingService::reportErrorLocked(std::atomic<RecordingState>& state) {
+    // 错误事件保留，但旧失败不能覆盖后续请求的 Starting/Stopping。
+    publishStateLocked(state, RecordingState::Error);
     pendingErrors_.fetch_or(&state == &status_.videoState ? 1u : 2u);
 }
 

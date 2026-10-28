@@ -18,13 +18,14 @@
  * 设计约束（遵守项目开发守则）：
  * - 头文件不暴露任何 libav 类型，AVFormatContext 等全部封装在 .cpp 中。
  * - 资源用 RAII / 显式 cleanup 管理；FFmpeg 返回值全部检查并记录日志。
- * - start/cancel 在 UI 线程调用，合并在后台线程执行；状态与进度用原子量发布，
- *   错误字符串用 mutex 保护。
+ * - start/cancel 在 UI 控制线程调用；state 是生命周期唯一来源，isRunning 从其推导。
+ *   错误/路径在终态发布前写入，字符串及硬件展示块由 mutex 保护。
  */
 
 #pragma once
 
 #include <string>
+#include <algorithm>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -104,6 +105,9 @@ struct MergeOptions {
     /// 硬件加速开关（默认开启，失败自动回退软件）
     bool enableHardwareAccel = true;
 
+    /// 仅 Unified 转码使用；1=串行，默认/上限为2，流拷贝与 KeepOriginal 不受影响。
+    int maxParallelClips = 2;
+
     /// KeepOriginal 兼容性警告（UI 填充，逻辑层不用）
     static const char* keepOriginalWarning() {
         return "输出文件可能无法在部分第三方播放器（如 VLC）中正常播放，建议用本播放器打开";
@@ -125,12 +129,16 @@ class VideoMerger {
 public:
     /// 合并生命周期状态（原子发布，UI 线程轮询）
     enum class State {
-        Idle,       ///< 未开始
-        Probing,    ///< 正在探测各输入文件参数
-        Merging,    ///< 正在写出（流拷贝或转码）
-        Done,       ///< 成功完成
-        Failed,     ///< 失败（error() 返回原因）
-        Cancelled   ///< 被用户取消
+        Idle, Probing, Merging, Done, Failed, Cancelled
+    };
+
+    struct HWAccelInfo {
+        bool isHardwareDecoding = false;
+        std::string decoderName;
+        bool isHardwareEncoding = false;
+        std::string encoderName;
+        bool isZeroCopy = false;
+        std::string hwDeviceType;
     };
 
     VideoMerger() = default;
@@ -167,11 +175,30 @@ public:
                const std::string& outputPath,
                const MergeOptions& options = MergeOptions{});
 
-    /// 请求取消：置原子标志，后台线程会尽快中止并删除半成品文件
+    /// 请求取消：与最终提交排序，后台退出后仅删除本任务拥有的半成品。
     void cancel();
 
     /// 当前状态（原子读取，可在 UI 线程每帧调用）
     State state() const { return state_.load(); }
+
+    struct Status {
+        State state = State::Idle;
+        double totalDuration = 0.0;
+        double processedDuration = 0.0;
+        std::string outputPath;
+        std::string error;
+        bool transcoded = false;
+        bool audioDropped = false;
+        bool pcmAudio = false;
+        HWAccelInfo hardware;
+        double progress() const {
+            if (totalDuration <= 0.0) return 0.0;
+            return std::clamp(processedDuration / totalDuration, 0.0, 1.0);
+        }
+        bool isRunning() const { return state == State::Probing || state == State::Merging; }
+    };
+
+    Status status() const;
 
     /// 合并进度 0.0~1.0（按已处理时长 / 总时长估算）
     double progress() const;
@@ -186,14 +213,6 @@ public:
     std::string error() const;
 
     /// 获取硬件加速信息（合并过程中有效，mutex 保护）
-    struct HWAccelInfo {
-        bool isHardwareDecoding = false;      ///< 是否使用硬件解码
-        std::string decoderName;              ///< 解码器名称（如 "h264_cuvid", "h264"）
-        bool isHardwareEncoding = false;      ///< 是否使用硬件编码
-        std::string encoderName;              ///< 编码器名称（如 "h264_nvenc", "libx264"）
-        bool isZeroCopy = false;              ///< 是否零拷贝（GPU 解码→缩放→编码）
-        std::string hwDeviceType;             ///< 硬件设备类型（如 "D3D11VA", "VideoToolbox", 空表示软件）
-    };
     HWAccelInfo getHWAccelInfo() const;
 
     /// 本次是否走了转码路径（完成后用于 UI 提示，需要 join 后读取）
@@ -215,11 +234,11 @@ private:
     void mergeLoop(std::vector<MergeClip> clips, std::string outputPath, MergeOptions options);
 
     /// 设置失败状态与错误信息（线程安全）
-    void fail(const std::string& msg);
+    void fail(const std::string& msg) noexcept;
 
     std::thread thread_;
     std::atomic<State> state_{State::Idle};
-    std::atomic<bool>  running_{false};
+    std::mutex terminalMutex_;   ///< 排序 cancel 与不可撤销的最终提交
     std::atomic<bool>  cancelRequested_{false};
 
     std::atomic<double> totalDuration_{0.0};      ///< 所有输入总时长（秒），探测后填充

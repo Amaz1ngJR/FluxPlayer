@@ -160,7 +160,9 @@ private:
     void finishRecorder(std::unique_ptr<Recorder>& recorder, std::atomic<RecordingState>& state);
 
     void reportError(std::atomic<RecordingState>& state);
-    /// 正常完成不能覆盖排队中的新请求；锁仅覆盖状态发布，不覆盖文件 I/O。
+    void reportErrorLocked(std::atomic<RecordingState>& state);
+    void publishStateLocked(std::atomic<RecordingState>& state, RecordingState value);
+    /// 所有完成（含失败）不能覆盖排队中的新请求；锁不覆盖文件 I/O。
     void publishState(std::atomic<RecordingState>& state, RecordingState value);
     std::atomic<unsigned> pendingErrors_{0};
     std::atomic<bool> readWake_{false};

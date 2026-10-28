@@ -18,6 +18,7 @@
 #include "FluxPlayer/utils/VideoMerger.h"
 #include "FluxPlayer/utils/HWAccelDevice.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "SRFileCommit.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -33,6 +34,9 @@ extern "C" {
 }
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <d3d11.h>
 extern "C" {
 #include <libavutil/hwcontext_d3d11va.h>
@@ -48,6 +52,18 @@ extern "C" {
 #include <filesystem>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <limits>
+#include <system_error>
+#include <random>
+#include <fcntl.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace FluxPlayer {
 
@@ -61,6 +77,57 @@ namespace FluxPlayer {
 #endif
 
 namespace {
+
+// 保留现有显式 cleanup 出口，同时保证 C++ 异常展开时只回收一次。
+template<class F> struct Cleanup {
+    F fn;
+    bool active = true;
+    void operator()() noexcept { if (active) { active = false; fn(); } }
+    ~Cleanup() { (*this)(); }
+};
+template<class F> Cleanup<F> onExit(F fn) { return {std::move(fn)}; }
+
+int interruptMerge(void* opaque) {
+    return static_cast<std::atomic<bool>*>(opaque)->load() ? 1 : 0;
+}
+int openMergeInput(AVFormatContext** input, const std::string& path, std::atomic<bool>& cancel) {
+    *input = avformat_alloc_context();
+    if (!*input) return AVERROR(ENOMEM);
+    (*input)->interrupt_callback = {interruptMerge, &cancel};
+    return avformat_open_input(input, path.c_str(), nullptr, nullptr);
+}
+
+int openMergeOutput(AVIOContext** output, const std::string& path, std::atomic<bool>& cancel) {
+    AVIOInterruptCB interrupt{interruptMerge, &cancel};
+    return avio_open2(output, path.c_str(), AVIO_FLAG_WRITE, &interrupt, nullptr);
+}
+
+// 检查缓冲写错误与 close 错误后，才允许调用方提交文件。
+int closeMergeOutput(AVFormatContext* output) {
+    if (!output || !output->pb) return 0;
+    avio_flush(output->pb);
+    const int writeError = output->pb->error;
+    const int closeError = avio_closep(&output->pb);
+    return writeError < 0 ? writeError : closeError;
+}
+
+void syncMergeOutput(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const int fd = _wopen(path.c_str(), _O_RDWR | _O_BINARY);
+    if (fd < 0) throw std::system_error(errno, std::generic_category(), "Open completed output for sync");
+    const int result = _commit(fd);
+    const int error = errno;
+    const int closed = _close(fd);
+#else
+    const int fd = ::open(path.c_str(), O_RDWR);
+    if (fd < 0) throw std::system_error(errno, std::generic_category(), "Open completed output for sync");
+    const int result = fsync(fd);
+    const int error = errno;
+    const int closed = ::close(fd);
+#endif
+    if (result < 0) throw std::system_error(error, std::generic_category(), "Sync completed output");
+    if (closed < 0) throw std::system_error(errno, std::generic_category(), "Close completed output");
+}
 
 /// 转码目标音频格式：AAC 原生编码器要求平面浮点（FLTP），码率 128kbps
 constexpr int    kAacBitRate     = 128000;
@@ -238,15 +305,16 @@ int64_t secToTs(double sec, AVRational tb) {
 }
 
 /// 探测单个片段的视频/音频参数与源时长，并校验截取范围（探测后立即关闭，不持有句柄）
-ClipInfo probeClip(const MergeClip& clip) {
+ClipInfo probeClip(const MergeClip& clip, std::atomic<bool>& cancel) {
     ClipInfo info;
     info.clip = clip;
 
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, clip.path.c_str(), nullptr, nullptr) < 0) {
+    if (openMergeInput(&fmt, clip.path, cancel) < 0) {
         LOG_WARN("VideoMerger: 无法打开输入: " + clip.path);
         return info;
     }
+    auto closeInput = onExit([&]() { avformat_close_input(&fmt); });
     if (avformat_find_stream_info(fmt, nullptr) < 0) {
         LOG_WARN("VideoMerger: 无法解析流信息: " + clip.path);
         avformat_close_input(&fmt);
@@ -468,38 +536,65 @@ bool VideoMerger::start(const std::vector<std::string>& inputs,
 bool VideoMerger::start(const std::vector<MergeClip>& clips,
                         const std::string& outputPath,
                         const MergeOptions& options) {
-    if (running_.load()) {
+    if (isRunning()) {
         LOG_WARN("VideoMerger: 已在运行");
         return false;
     }
-    // 上一次合并已结束（running_==false）但 thread_ 仍 joinable：必须先 join，
-    // 否则对 joinable 的 std::thread 赋值会触发 std::terminate（MERGE AGAIN 复用同一实例）。
+    // 业务终态不代表线程已回收；复用前必须 join。
     if (thread_.joinable()) thread_.join();
-    if (clips.size() < 2) {
-        fail("Please select at least 2 clips");
+    if (clips.size() < 2 || outputPath.empty()) {
+        fail(outputPath.empty() ? "Output path is empty" : "Please select at least 2 clips");
         return false;
     }
     cancelRequested_.store(false);
-    transcoded_.store(false);
-    audioDropped_.store(false);
-    totalDuration_.store(0.0);
-    processedDuration_.store(0.0);
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        pcmAudio_.store(false);
+        transcoded_.store(false);
+        audioDropped_.store(false);
+        totalDuration_.store(0.0);
+        processedDuration_.store(0.0);
         error_.clear();
         outputPath_ = outputPath;
         // 每次任务都从空的处理链路状态开始，避免“再次合并”时短暂显示上一次任务的
         // 解码器、编码器或零拷贝结果。后台线程打开编解码器后会逐项填充这些信息。
         hwAccelInfo_ = {};
+        state_.store(State::Probing);
     }
-    state_.store(State::Probing);
-    running_.store(true);
-    thread_ = std::thread(&VideoMerger::mergeLoop, this, clips, outputPath, options);
+    try {
+        thread_ = std::thread([this, clips, outputPath, options]() mutable noexcept {
+            try { mergeLoop(std::move(clips), std::move(outputPath), options); }
+            catch (...) { state_.store(State::Failed); } // 连错误字符串分配失败也不能逃出线程
+        });
+    } catch (const std::exception& e) {
+        try { fail(std::string("Cannot start merge worker: ") + e.what()); }
+        catch (...) { state_.store(State::Failed); }
+        return false;
+    } catch (...) {
+        fail("Cannot start merge worker");
+        return false;
+    }
     return true;
 }
 
 void VideoMerger::cancel() {
-    cancelRequested_.store(true);
+    std::lock_guard<std::mutex> lock(terminalMutex_);
+    if (isRunning()) cancelRequested_.store(true);
+}
+
+VideoMerger::Status VideoMerger::status() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Status result;
+    result.state = state_.load();
+    result.totalDuration = totalDuration_.load();
+    result.processedDuration = processedDuration_.load();
+    result.outputPath = outputPath_;
+    result.error = error_;
+    result.transcoded = transcoded_.load();
+    result.audioDropped = audioDropped_.load();
+    result.pcmAudio = pcmAudio_.load();
+    result.hardware = hwAccelInfo_;
+    return result;
 }
 
 double VideoMerger::progress() const {
@@ -510,7 +605,8 @@ double VideoMerger::progress() const {
 }
 
 bool VideoMerger::isRunning() const {
-    return running_.load();
+    const auto phase = state_.load();
+    return phase == State::Probing || phase == State::Merging;
 }
 
 std::string VideoMerger::outputPath() const {
@@ -528,13 +624,13 @@ VideoMerger::HWAccelInfo VideoMerger::getHWAccelInfo() const {
     return hwAccelInfo_;
 }
 
-void VideoMerger::fail(const std::string& msg) {
-    {
+void VideoMerger::fail(const std::string& msg) noexcept {
+    try {
         std::lock_guard<std::mutex> lock(mutex_);
         error_ = msg;
-    }
-    LOG_ERROR("VideoMerger: " + msg);
-    state_.store(State::Failed);
+        state_.store(State::Failed);
+    } catch (...) { state_.store(State::Failed); }
+    try { LOG_ERROR("VideoMerger: " + msg); } catch (...) {}
 }
 
 void VideoMerger::updateHWAccelInfo(bool isHWDecoding, const std::string& decoderName,
@@ -570,22 +666,25 @@ bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& output
     bool headerWritten = false;
     int64_t streamOffset[2] = {0, 0};  // 各输出流累计时间偏移（各自 time_base）
 
-    auto cleanup = [&]() {
+    auto cleanup = onExit([&]() {
         if (out) {
             if (!(out->oformat->flags & AVFMT_NOFILE) && out->pb) avio_closep(&out->pb);
             avformat_free_context(out);
             out = nullptr;
         }
-    };
+    });
 
     for (size_t i = 0; i < infos.size(); ++i) {
         if (cancelFlag.load()) { cleanup(); return false; }
 
         AVFormatContext* in = nullptr;
-        if (avformat_open_input(&in, infos[i].clip.path.c_str(), nullptr, nullptr) < 0) {
+        if (openMergeInput(&in, infos[i].clip.path, cancelFlag) < 0) {
             err = "Failed to open input: " + infos[i].clip.path; cleanup(); return false;
         }
-        avformat_find_stream_info(in, nullptr);
+        auto closeInput = onExit([&]() { avformat_close_input(&in); });
+        if (avformat_find_stream_info(in, nullptr) < 0) {
+            err = "Failed to probe input"; avformat_close_input(&in); cleanup(); return false;
+        }
         int vIdx = infos[i].vIdx, aIdx = infos[i].aIdx;
 
         // 首文件：以其参数建立输出流并写文件头（后续文件参数一致，无需重建）
@@ -601,7 +700,7 @@ bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& output
                 outAIdx = oa->index;
             }
             if (!(out->oformat->flags & AVFMT_NOFILE)) {
-                if (avio_open(&out->pb, outputPath.c_str(), AVIO_FLAG_WRITE) < 0) {
+                if (openMergeOutput(&out->pb, outputPath, cancelFlag) < 0) {
                     err = "Failed to open output file"; avformat_close_input(&in); cleanup(); return false;
                 }
             }
@@ -614,7 +713,10 @@ bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& output
         // 逐包读取并平移时间戳；各流统一按文件时长推进偏移，保持 A/V 对齐
         int64_t fileFirst[2] = {AV_NOPTS_VALUE, AV_NOPTS_VALUE};
         AVPacket* pkt = av_packet_alloc();
-        while (av_read_frame(in, pkt) >= 0) {
+        auto freePacket = onExit([&]() { av_packet_free(&pkt); });
+        if (!pkt) { avformat_close_input(&in); cleanup(); err = "Cannot allocate packet"; return false; }
+        int readRet = 0;
+        while ((readRet = av_read_frame(in, pkt)) >= 0) {
             if (cancelFlag.load()) { av_packet_free(&pkt); avformat_close_input(&in); cleanup(); return false; }
             int outIdx = -1, slot = -1;
             if (pkt->stream_index == vIdx) { outIdx = outVIdx; slot = 0; }
@@ -632,10 +734,17 @@ bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& output
             if (pkt->dts != AV_NOPTS_VALUE) pkt->dts += base;
             pkt->stream_index = outIdx;
             pkt->pos = -1;
-            av_interleaved_write_frame(out, pkt);
+            const int writeRet = av_interleaved_write_frame(out, pkt);
             av_packet_unref(pkt);
+            if (writeRet < 0) {
+                av_packet_free(&pkt); avformat_close_input(&in); cleanup();
+                err = "Failed to write merged packet"; return false;
+            }
         }
         av_packet_free(&pkt);
+        if (readRet != AVERROR_EOF) {
+            avformat_close_input(&in); cleanup(); err = "Failed to read input"; return false;
+        }
 
         // 推进各输出流偏移（流拷贝下片段都是整段，按片段时长推进，保持 A/V 同步）
         double dur = infos[i].clipDuration > 0 ? infos[i].clipDuration : 0.0;
@@ -645,8 +754,10 @@ bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& output
         avformat_close_input(&in);
     }
 
-    if (headerWritten) av_write_trailer(out);
+    const int trailerRet = headerWritten ? av_write_trailer(out) : -1;
+    const int closeRet = closeMergeOutput(out);
     cleanup();
+    if (trailerRet < 0 || closeRet < 0) { err = "Failed to finalize merged video"; return false; }
     return true;
 }
 
@@ -658,9 +769,19 @@ bool runStreamCopy(const std::vector<ClipInfo>& infos, const std::string& output
 
 namespace {
 
+class PreparedVideo;
+
 /// 转码会话：持有跨文件保持的输出与编码器状态（PTS 计数器连续递增）
 struct TranscodeCtx {
-    VideoMerger& merger;  ///< VideoMerger 引用（用于更新 hwAccelInfo_）
+    VideoMerger& merger;
+    VideoMerger::HWAccelInfo hardware;  ///< 会话局部事实；并行 worker 不读共享 UI 发布块
+    bool publishHardware = true;
+    void updateHardware(bool decoding, const std::string& decoder, bool encoding,
+                        const std::string& encoder, bool zeroCopy, const std::string& device) {
+        hardware = {decoding, decoder, encoding, encoder, zeroCopy, device};
+        if (publishHardware)
+            merger.updateHWAccelInfo(decoding, decoder, encoding, encoder, zeroCopy, device);
+    }
     AVFormatContext* out  = nullptr;
     AVCodecContext*  vEnc = nullptr;
     AVCodecContext*  aEnc = nullptr;
@@ -670,6 +791,9 @@ struct TranscodeCtx {
     int64_t aNextPts = 0;   ///< 下一音频帧 PTS（采样数刻度，连续递增）
     AVAudioFifo* fifo = nullptr;
     bool keepAudio = false;
+    PreparedVideo* preparedVideo = nullptr; // 并行路径最终复用视频，仅重新读取原始音频
+    double preparedDuration = 0.0;
+    int codecThreadLimit = 0;
     int targetSampleRate = 44100;
     int targetChannels   = 2;
     AVSampleFormat targetSampleFmt = AV_SAMPLE_FMT_FLTP; ///< 音频编码器/重采样器目标格式（AAC=FLTP，PCM=S16）
@@ -718,8 +842,9 @@ int encodeWriteFrame(AVFormatContext* out, AVCodecContext* enc, int streamIdx,
         if (ret < 0) return ret;
         pkt->stream_index = streamIdx;
         av_packet_rescale_ts(pkt, enc->time_base, out->streams[streamIdx]->time_base);
-        av_interleaved_write_frame(out, pkt);
+        const int writeRet = av_interleaved_write_frame(out, pkt);
         av_packet_unref(pkt);
+        if (writeRet < 0) return writeRet;
     }
     return 0;
 }
@@ -776,6 +901,8 @@ bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameR
     }
 
     tc.vEnc = avcodec_alloc_context3(codec);
+    if (!tc.vEnc) { err = "Cannot allocate video encoder"; return false; }
+    tc.vEnc->thread_count = tc.codecThreadLimit;
     tc.vEnc->width = w;
     tc.vEnc->height = h;
     tc.vEnc->pix_fmt = tc.hwPixFmt;  // 硬件像素格式（d3d11 或 videotoolbox）
@@ -1305,6 +1432,7 @@ AVCodecContext* openHardwareDecoder(AVStream* st, TranscodeCtx& tc, std::string&
     }
 
     avcodec_parameters_to_context(ctx, st->codecpar);
+    ctx->thread_count = tc.codecThreadLimit;
     ctx->hw_device_ctx = av_buffer_ref(tc.hwDevice->avDeviceContext());
     ctx->get_format = hwGetFormat;
 
@@ -1362,6 +1490,7 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
                 swDstFrame->height = srcH;
                 av_frame_get_buffer(swDstFrame, 0);
             }
+            if (av_frame_make_writable(swDstFrame) < 0) return nullptr;
             sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, srcH,
                       swDstFrame->data, swDstFrame->linesize);
             return swDstFrame;  // 返回缓存帧指针（调用方不释放）
@@ -1384,6 +1513,7 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
                 swDstFrame->height = targetH;
                 av_frame_get_buffer(swDstFrame, 0);
             }
+            if (av_frame_make_writable(swDstFrame) < 0) return nullptr;
             sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, srcH,
                       swDstFrame->data, swDstFrame->linesize);
             return swDstFrame;
@@ -1416,6 +1546,7 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
         av_frame_get_buffer(swDstFrame, 0);
     }
 
+    if (av_frame_make_writable(swDstFrame) < 0) return nullptr;
     sws_scale(sws, srcFrame->data, srcFrame->linesize, 0, srcH,
               swDstFrame->data, swDstFrame->linesize);
     return swDstFrame;
@@ -1436,6 +1567,7 @@ bool setupVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameRate,
     tc.vEnc->width = w;
     tc.vEnc->height = h;
     tc.vEnc->pix_fmt = AV_PIX_FMT_YUV420P;
+    tc.vEnc->thread_count = tc.codecThreadLimit;
     tc.vEnc->time_base = AVRational{1, 90000};
     tc.vEnc->framerate = frameRate;
     tc.vEnc->bit_rate = kVideoBitRate;
@@ -1524,7 +1656,7 @@ bool setupAudioEncoder(TranscodeCtx& tc, AVCodecID codecId, std::string& err) {
 }
 
 /// 从 FIFO 取出整帧送音频编码；drainAll=true 时把不足一帧的尾部也编码
-void drainAudioFifo(TranscodeCtx& tc, AVPacket* pkt, bool drainAll) {
+bool drainAudioFifo(TranscodeCtx& tc, AVPacket* pkt, bool drainAll) {
     int frameSize = tc.aEnc->frame_size > 0 ? tc.aEnc->frame_size : tc.aFrameSize;
     while (av_audio_fifo_size(tc.fifo) >= frameSize ||
            (drainAll && av_audio_fifo_size(tc.fifo) > 0)) {
@@ -1543,10 +1675,12 @@ void drainAudioFifo(TranscodeCtx& tc, AVPacket* pkt, bool drainAll) {
         av_audio_fifo_read(tc.fifo, (void**)f->data, n);
         f->pts = tc.aNextPts;
         tc.aNextPts += n;
-        encodeWriteFrame(tc.out, tc.aEnc, tc.aStreamIdx, f, pkt);
+        const int ret = encodeWriteFrame(tc.out, tc.aEnc, tc.aStreamIdx, f, pkt);
         av_frame_free(&f);
+        if (ret < 0) return false;
         if (!drainAll && av_audio_fifo_size(tc.fifo) < frameSize) break;
     }
+    return true;
 }
 
 } // anonymous namespace
@@ -1557,6 +1691,92 @@ void drainAudioFifo(TranscodeCtx& tc, AVPacket* pkt, bool drainAll) {
 
 namespace {
 
+// 视频包始终由最终写出线程独占；音频沿用跨片段 FIFO 和单个编码器。
+class PreparedVideo {
+public:
+    ~PreparedVideo() {
+        av_packet_free(&packet_);
+        avformat_close_input(&input_);
+    }
+
+    bool open(const std::string& path, AVFormatContext* output, int streamIndex,
+              double baseSec, int64_t& lastDts, std::string& err, std::atomic<bool>& cancel) {
+        output_ = output;
+        streamIndex_ = streamIndex;
+        baseSec_ = baseSec;
+        lastDts_ = &lastDts;
+        if (openMergeInput(&input_, path, cancel) < 0 ||
+            avformat_find_stream_info(input_, nullptr) < 0) {
+            err = "Failed to open prepared video: " + path;
+            return false;
+        }
+        videoIndex_ = av_find_best_stream(input_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (videoIndex_ < 0 || !(packet_ = av_packet_alloc())) {
+            err = "Prepared segment has no video or packet allocation failed";
+            return false;
+        }
+        return true;
+    }
+
+    bool copyUntil(double relativeSec, const std::atomic<bool>& cancelled, std::string& err) {
+        const AVRational sourceTb = input_->streams[videoIndex_]->time_base;
+        const AVRational outputTb = output_->streams[streamIndex_]->time_base;
+        while (!eof_) {
+            if (cancelled.load()) { err = "Cancelled"; return false; }
+            if (!pending_) {
+                const int ret = av_read_frame(input_, packet_);
+                if (ret == AVERROR_EOF) {
+                    if (!wroteVideo_) { err = "Prepared video contains no frames"; return false; }
+                    eof_ = true;
+                    break;
+                }
+                if (ret < 0) { err = "Failed to read prepared video"; return false; }
+                if (packet_->stream_index != videoIndex_) { av_packet_unref(packet_); continue; }
+                pending_ = true;
+            }
+            const int64_t dts = packet_->dts != AV_NOPTS_VALUE ? packet_->dts : packet_->pts;
+            if (dts == AV_NOPTS_VALUE || packet_->pts == AV_NOPTS_VALUE) {
+                err = "Prepared video has no timestamps";
+                return false;
+            }
+            if (dts * av_q2d(sourceTb) > relativeSec) break;
+            if (!wroteVideo_ && !(packet_->flags & AV_PKT_FLAG_KEY)) {
+                err = "Prepared segment does not start at a keyframe";
+                return false;
+            }
+            av_packet_rescale_ts(packet_, sourceTb, outputTb);
+            const int64_t offset = secToTs(baseSec_, outputTb);
+            packet_->pts += offset;
+            packet_->dts = av_rescale_q(dts, sourceTb, outputTb) + offset;
+            if (*lastDts_ != AV_NOPTS_VALUE && packet_->dts <= *lastDts_) {
+                err = "Prepared video DTS overlaps at a segment boundary";
+                return false;
+            }
+            *lastDts_ = packet_->dts;
+            packet_->stream_index = streamIndex_;
+            packet_->pos = -1;
+            const int ret = av_interleaved_write_frame(output_, packet_);
+            av_packet_unref(packet_);
+            pending_ = false;
+            if (ret < 0) { err = "Failed to write prepared video"; return false; }
+            wroteVideo_ = true;
+        }
+        return true;
+    }
+
+private:
+    AVFormatContext* input_ = nullptr;
+    AVFormatContext* output_ = nullptr;
+    AVPacket* packet_ = nullptr;
+    int videoIndex_ = -1;
+    int streamIndex_ = -1;
+    int64_t* lastDts_ = nullptr;
+    double baseSec_ = 0.0;
+    bool pending_ = false;
+    bool eof_ = false;
+    bool wroteVideo_ = false;
+};
+
 /// 转码单个片段：seek 到入点 → 丢弃入点前帧 → 解码/缩放/重采样/编码 → 出点截断
 /// @param timelineBaseSec 本片段在合并时间轴上的起始秒数（前序片段累计裁剪时长）
 /// @param outConsumedSec  输出参数：本片段实际消耗时长（供调用方推进 timelineBaseSec）
@@ -1565,14 +1785,26 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                    std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                    double timelineBaseSec, double& outConsumedSec, std::string& err) {
     AVFormatContext* in = nullptr;
-    if (avformat_open_input(&in, info.clip.path.c_str(), nullptr, nullptr) < 0) {
+    AVCodecContext* vDec = nullptr;
+    AVCodecContext* aDec = nullptr;
+    SwrContext* swr = nullptr;
+    auto closeSource = onExit([&]() {
+        swr_free(&swr);
+        avcodec_free_context(&aDec);
+        avcodec_free_context(&vDec);
+        avformat_close_input(&in);
+    });
+    if (openMergeInput(&in, info.clip.path, cancelFlag) < 0) {
         err = "Failed to open input: " + info.clip.path; return false;
     }
-    avformat_find_stream_info(in, nullptr);
+    if (avformat_find_stream_info(in, nullptr) < 0) {
+        err = "Failed to inspect input: " + info.clip.path;
+        avformat_close_input(&in);
+        return false;
+    }
 
     // —— 视频解码器 ——
-    AVCodecContext* vDec = nullptr;
-    {
+    if (!tc.preparedVideo) {
         AVStream* st = in->streams[info.vIdx];
         std::string decErr;
         if (tc.useHardware) {
@@ -1586,8 +1818,9 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             // 软件解码器回退
             const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
             vDec = avcodec_alloc_context3(dec);
-            avcodec_parameters_to_context(vDec, st->codecpar);
-            if (!dec || avcodec_open2(vDec, dec, nullptr) < 0) {
+            if (vDec) vDec->thread_count = tc.codecThreadLimit;
+            if (!dec || !vDec || avcodec_parameters_to_context(vDec, st->codecpar) < 0 ||
+                avcodec_open2(vDec, dec, nullptr) < 0) {
                 err = "Failed to open video decoder"; avcodec_free_context(&vDec); avformat_close_input(&in); return false;
             }
         }
@@ -1596,22 +1829,20 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         if (timelineBaseSec == 0.0) {
             std::string decoderName = vDec->codec ? vDec->codec->name : "";
             // 获取当前编码器信息
-            auto currentInfo = tc.merger.getHWAccelInfo();
-            tc.merger.updateHWAccelInfo(tc.useHardware, decoderName,
+            auto currentInfo = tc.hardware;
+            tc.updateHardware(tc.useHardware, decoderName,
                                         currentInfo.isHardwareEncoding, currentInfo.encoderName,
                                         currentInfo.isZeroCopy, currentInfo.hwDeviceType);
         }
     }
 
     // —— 音频解码器 + 重采样器（仅在保留音轨时）——
-    AVCodecContext* aDec = nullptr;
-    SwrContext* swr = nullptr;
     if (tc.keepAudio && info.aIdx >= 0) {
         AVStream* st = in->streams[info.aIdx];
         const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
         aDec = avcodec_alloc_context3(dec);
-        avcodec_parameters_to_context(aDec, st->codecpar);
-        if (dec && avcodec_open2(aDec, dec, nullptr) == 0) {
+        if (dec && aDec && avcodec_parameters_to_context(aDec, st->codecpar) >= 0 &&
+            avcodec_open2(aDec, dec, nullptr) == 0) {
 #if LIBAVUTIL_VERSION_MAJOR >= 57
             AVChannelLayout outLayout;
             av_channel_layout_default(&outLayout, tc.targetChannels);
@@ -1622,8 +1853,15 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                     av_get_default_channel_layout(tc.targetChannels), tc.targetSampleFmt, tc.targetSampleRate,
                     av_get_default_channel_layout(aDec->channels), aDec->sample_fmt, aDec->sample_rate, 0, nullptr);
 #endif
-            if (swr) swr_init(swr);
+            if (swr && swr_init(swr) < 0) swr_free(&swr);
         }
+    }
+    if (tc.keepAudio && !swr) {
+        err = "Failed to initialize source audio decoder or resampler";
+        if (aDec) avcodec_free_context(&aDec);
+        if (vDec) avcodec_free_context(&vDec);
+        avformat_close_input(&in);
+        return false;
     }
 
     // —— seek 到入点（startSec>0 时）——
@@ -1645,7 +1883,7 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         // seek 目标按文件绝对时间轴（含基准偏移）计算
         int64_t seekTarget = (int64_t)((startSec + baseOffset) * AV_TIME_BASE);
         avformat_seek_file(in, -1, INT64_MIN, seekTarget, seekTarget, AVSEEK_FLAG_BACKWARD);
-        avcodec_flush_buffers(vDec);
+        if (vDec) avcodec_flush_buffers(vDec);
         if (aDec) avcodec_flush_buffers(aDec);
     }
 
@@ -1658,7 +1896,7 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
     double frameDurSec = (info.frameRate.num > 0)
         ? av_q2d(av_inv_q(info.frameRate)) : 1.0 / 25.0;  // 缺时间戳时的回退步长
 
-    auto cleanup = [&]() {
+    auto cleanup = onExit([&]() {
         if (sws) sws_freeContext(sws);
         if (dstV) av_frame_free(&dstV);
         if (frame) av_frame_free(&frame);
@@ -1667,10 +1905,11 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         if (aDec) avcodec_free_context(&aDec);
         if (vDec) avcodec_free_context(&vDec);
         if (in) avformat_close_input(&in);
-    };
+    });
 
-    bool videoEnd = false;   // 视频已到出点
+    bool videoEnd = tc.preparedVideo != nullptr;   // 已转码的视频在最终线程直接复用
     bool audioEnd = !(swr);   // 无音频时直接视为音频已完成
+    bool copyFailed = false;
 
     // 音频对齐状态：每个片段首个保留的音频帧需对齐到「时间轴目标采样位置」，
     // 以真正保留源文件的 A/V 偏移（正偏移补静音、负偏移 sample-level 丢弃），
@@ -1715,11 +1954,14 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             got -= drop;
             if (got <= 0) return;  // 整帧被丢
         }
-        // FLTP 是平面格式：每个声道独立平面，按 offset 偏移指针。
-        // 用 vector 按实际声道数分配，兼容 >8 声道布局，避免固定数组越界。
-        std::vector<uint8_t*> chans(tc.targetChannels);
-        for (int ch = 0; ch < tc.targetChannels; ++ch)
-            chans[ch] = buf[ch] + (size_t)offset * sizeof(float);
+        // AAC 等平面格式按声道偏移；PCM 等交错格式仅偏移一个平面。
+        const bool planar = av_sample_fmt_is_planar(tc.targetSampleFmt);
+        const int planes = planar ? tc.targetChannels : 1;
+        const int stride = av_get_bytes_per_sample(tc.targetSampleFmt) *
+                           (planar ? 1 : tc.targetChannels);
+        std::vector<uint8_t*> chans(planes);
+        for (int ch = 0; ch < planes; ++ch)
+            chans[ch] = buf[ch] + (size_t)offset * stride;
         av_audio_fifo_write(tc.fifo, (void**)chans.data(), got);
     };
 
@@ -1734,6 +1976,11 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         double aSrcSec = (ats != AV_NOPTS_VALUE) ? ats * av_q2d(aInTb) - baseOffset
                                                  : lastAudioSrcSec;
         lastAudioSrcSec = aSrcSec + aFrameDur;  // 推进兜底基准（下一帧用）
+        if (tc.preparedVideo && !tc.preparedVideo->copyUntil(
+                std::max(0.0, aSrcSec - startSec), cancelFlag, err)) {
+            copyFailed = true;
+            return true;
+        }
         if (aSrcSec + aFrameDur <= startSec) return false;          // 整帧在入点前
         if (hasEnd && aSrcSec >= endSec)     return true;           // 整帧在出点后
         int outSamples = (int)av_rescale_rnd(
@@ -1755,12 +2002,17 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 
         if (got > 0) writeAlignedAudio(buf, got, aSrcSec);
         if (buf) { av_freep(&buf[0]); av_freep(&buf); }
-        drainAudioFifo(tc, pkt, false);
+        if (!drainAudioFifo(tc, pkt, false)) {
+            err = "Failed to encode or write merged audio";
+            copyFailed = true;
+            return true;
+        }
         return reachedOut;
     };
 
     // 读包直到视频与音频都到出点（仅视频到点不停止音频，避免片段尾部音频被提前截断）
-    while (!(videoEnd && audioEnd) && av_read_frame(in, pkt) >= 0) {
+    int readRet = 0;
+    while (!copyFailed && !(videoEnd && audioEnd) && (readRet = av_read_frame(in, pkt)) >= 0) {
         if (cancelFlag.load()) { cleanup(); err = "Cancelled"; return false; }
 
         // ── 视频包 ──
@@ -1782,9 +2034,8 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                     AVFrame* encFrame = processVideoFrame(tc, frame, targetW, targetH, sws, dstV,
                                                            options, pkt, procErr);
                     if (!encFrame) {
-                        LOG_ERROR(std::string("VideoMerger: processVideoFrame failed: ") + procErr);
-                        av_frame_unref(frame);
-                        continue;
+                        err = "Failed to process video frame: " + procErr;
+                        cleanup(); return false;
                     }
 
                     // 输出 PTS = 片段内相对时间(srcSec-startSec) + 时间轴偏移，换算到 1/90000。
@@ -1800,11 +2051,14 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                     bool isNewFrame = (encFrame != dstV && encFrame != frame);
                     if (isNewFrame) {
                         encFrame->pts = pts;
-                        encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                        const int ret = encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
                         av_frame_free(&encFrame);  // 释放新分配的帧
+                        if (ret < 0) { err = "Failed to encode video"; cleanup(); return false; }
                     } else {
                         encFrame->pts = pts;
-                        encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                        if (encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt) < 0) {
+                            err = "Failed to encode video"; cleanup(); return false;
+                        }
                     }
 
                     processed.store(timelineBaseSec + relSec);
@@ -1823,6 +2077,9 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         }
         av_packet_unref(pkt);
     }
+    if (readRet < 0 && readRet != AVERROR_EOF) {
+        err = "Failed to read source clip"; cleanup(); return false;
+    }
 
     // flush 视频解码器残留帧（仅当视频未到出点；音频尾部留待全部片段处理完再 flush 保证 PTS 连续）
     if (!videoEnd) {
@@ -1840,8 +2097,8 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             AVFrame* encFrame = processVideoFrame(tc, frame, targetW, targetH, sws, dstV,
                                                    options, pkt, procErr);
             if (!encFrame) {
-                av_frame_unref(frame);
-                continue;
+                err = "Failed to process video tail: " + procErr;
+                cleanup(); return false;
             }
 
             double relSec = srcSec - startSec;
@@ -1854,11 +2111,14 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
             bool isNewFrame = (encFrame != dstV && encFrame != frame);
             if (isNewFrame) {
                 encFrame->pts = pts;
-                encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                const int ret = encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
                 av_frame_free(&encFrame);
+                if (ret < 0) { err = "Failed to encode video tail"; cleanup(); return false; }
             } else {
                 encFrame->pts = pts;
-                encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt);
+                if (encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, encFrame, pkt) < 0) {
+                    err = "Failed to encode video tail"; cleanup(); return false;
+                }
             }
 
             av_frame_unref(frame);
@@ -1867,16 +2127,22 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 
     // flush 音频解码器残留帧：部分解码器内部缓存帧，不送 nullptr 会丢片段尾音。
     // 复用 handleAudioFrame 做同样的裁剪/对齐/写入；尾部 FIFO/编码器在所有片段后统一 drain。
-    if (swr && aDec) {
+    if (swr && aDec && !copyFailed && !audioEnd) {
         avcodec_send_packet(aDec, nullptr);
         while (avcodec_receive_frame(aDec, frame) >= 0) {
             if (handleAudioFrame(frame)) { av_frame_unref(frame); break; }
             av_frame_unref(frame);
         }
     }
+    if (tc.preparedVideo && !copyFailed) {
+        copyFailed = !tc.preparedVideo->copyUntil(
+            std::numeric_limits<double>::infinity(), cancelFlag, err);
+    }
     cleanup();
+    if (copyFailed) return false;
     // 本片段消耗时长：优先用裁剪后实际写出的最大相对时间（+一帧），否则回退校验时长
-    double consumed = maxRelSec > 0.0 ? (maxRelSec + frameDurSec)
+    double consumed = tc.preparedVideo ? tc.preparedDuration
+        : maxRelSec > 0.0 ? (maxRelSec + frameDurSec)
                                       : (info.clipDuration > 0 ? info.clipDuration : 0.0);
     outConsumedSec = consumed;
     processed.store(timelineBaseSec + consumed);
@@ -1888,8 +2154,13 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const std::string& outputPath,
                   bool keepAudio, bool pcmOutput, const MergeOptions& options,
                   std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
-                  std::string& err) {
-    TranscodeCtx tc{merger};  // 初始化 merger 引用
+                  std::string& err, const ClipInfo* outputPolicy = nullptr,
+                  double* consumedDuration = nullptr, int codecThreadLimit = 0,
+                  VideoMerger::HWAccelInfo* hardwareResult = nullptr) {
+    const ClipInfo& policy = outputPolicy ? *outputPolicy : infos.front();
+    TranscodeCtx tc{merger};
+    tc.publishHardware = hardwareResult == nullptr;
+    tc.codecThreadLimit = codecThreadLimit;
     tc.keepAudio = keepAudio;
     if (keepAudio) {
         tc.targetSampleRate = infos.front().sampleRate > 0 ? infos.front().sampleRate : 44100;
@@ -1912,7 +2183,7 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
             targetH = options.customHeight;
         }
     }
-    AVRational frameRate = infos.front().frameRate;
+    AVRational frameRate = policy.frameRate;
     if (frameRate.num <= 0 || frameRate.den <= 0) frameRate = AVRational{25, 1};
     tc.targetFrameRate = frameRate;
 
@@ -1922,7 +2193,7 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
         !options.useFirstClipResolution) {
         tc.targetGopSize = normalizeGopSize(options.customGopSize);
     } else {
-        tc.targetGopSize = normalizeGopSize(infos.front().gopSize);
+        tc.targetGopSize = normalizeGopSize(policy.gopSize);
     }
     LOG_INFO("VideoMerger: output video policy: resolution=" +
              std::to_string(targetW) + "x" + std::to_string(targetH) +
@@ -1935,14 +2206,14 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
     // 此时按首个 clip 的格式对齐（HEVC 源合并 HEVC，H.264 源合并 H.264）。
     AVCodecID vCodecId = requestedVideoCodec(options.videoCodec);
     if (vCodecId == AV_CODEC_ID_NONE) {
-        vCodecId = (infos.front().vCodec == AV_CODEC_ID_HEVC) ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
+        vCodecId = (policy.vCodec == AV_CODEC_ID_HEVC) ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264;
     }
 
     // 目标音频编码格式：KeepSource 且各源不一致时按首个 clip 的格式对齐。
     // 探测必须连「能不能接受源采样格式」一起看：源是 8kHz 单声道 mulaw 时，编码器
     // 虽存在却只接受 s16，直接沿用会在 avcodec_open2 才失败（早期版本就是这样）。
     AVCodecID aCodecId = requestedAudioCodec(options.audioCodec);
-    if (aCodecId == AV_CODEC_ID_NONE) {
+    if (keepAudio && aCodecId == AV_CODEC_ID_NONE) {
         // KeepSource 且走到转码，说明各源格式不一致：按首个 clip 的格式对齐。
         // 采样率/声道数的差异可以靠重采样抹平，采样格式不能——编码器存在但不吃源
         // 采样格式时（如 8kHz 单声道 mulaw 源）必须在编码器打开前回退 AAC。
@@ -1989,7 +2260,7 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
         err = "Failed to create output context"; return false;
     }
 
-    auto cleanup = [&]() {
+    auto cleanup = onExit([&]() {
         if (tc.fifo) av_audio_fifo_free(tc.fifo);
         if (tc.vEnc) avcodec_free_context(&tc.vEnc);
         if (tc.aEnc) avcodec_free_context(&tc.aEnc);
@@ -2006,7 +2277,7 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
             avformat_free_context(tc.out);
             tc.out = nullptr;
         }
-    };
+    });
 
     // 构建编码器（硬件或软件）
     bool encoderOk = false;
@@ -2037,7 +2308,7 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
     bool isZeroCopy = false;
 #endif
     // 解码器信息会在 transcodeClip 中首次打开输入时填充
-    merger.updateHWAccelInfo(false, "", tc.useHardware, encoderName, isZeroCopy, hwDeviceType);
+    tc.updateHardware(false, "", tc.useHardware, encoderName, isZeroCopy, hwDeviceType);
 
     // 初始化 GPU 缩放器（Unified 模式 + 硬件路径）
     if (tc.useHardware && options.resolutionMode == MergeOptions::ResolutionMode::Unified) {
@@ -2073,13 +2344,13 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
              (tc.useHardware ? "true" : "false") +
              ", " + interopState +
              ", isZeroCopy=" + (isZeroCopyFinal ? "true" : "false"));
-    auto currentInfo = merger.getHWAccelInfo();
-    merger.updateHWAccelInfo(currentInfo.isHardwareDecoding, currentInfo.decoderName,
+    auto currentInfo = tc.hardware;
+    tc.updateHardware(currentInfo.isHardwareDecoding, currentInfo.decoderName,
                              currentInfo.isHardwareEncoding, currentInfo.encoderName,
                              isZeroCopyFinal, currentInfo.hwDeviceType);
 
     if (!(tc.out->oformat->flags & AVFMT_NOFILE)) {
-        if (avio_open(&tc.out->pb, outputPath.c_str(), AVIO_FLAG_WRITE) < 0) {
+        if (openMergeOutput(&tc.out->pb, outputPath, cancelFlag) < 0) {
             err = "Failed to open output file"; cleanup(); return false;
         }
     }
@@ -2108,14 +2379,267 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
 
     // flush 音频 FIFO 尾部与编码器
     AVPacket* pkt = av_packet_alloc();
-    if (keepAudio && tc.fifo) drainAudioFifo(tc, pkt, true);
-    encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, nullptr, pkt);
-    if (keepAudio) encodeWriteFrame(tc.out, tc.aEnc, tc.aStreamIdx, nullptr, pkt);
+    const bool audioOk = !keepAudio || !tc.fifo || drainAudioFifo(tc, pkt, true);
+    int flushRet = audioOk ? encodeWriteFrame(tc.out, tc.vEnc, tc.vStreamIdx, nullptr, pkt) : -1;
+    if (keepAudio && flushRet >= 0)
+        flushRet = encodeWriteFrame(tc.out, tc.aEnc, tc.aStreamIdx, nullptr, pkt);
     av_packet_free(&pkt);
 
-    av_write_trailer(tc.out);
+    const int trailerRet = flushRet < 0 ? flushRet : av_write_trailer(tc.out);
+    if (hardwareResult) *hardwareResult = tc.hardware;
+    const int closeRet = closeMergeOutput(tc.out);
+    if (trailerRet >= 0 && closeRet >= 0 && consumedDuration) *consumedDuration = timelineBaseSec;
     cleanup();
-    return true;
+    if (trailerRet < 0 || closeRet < 0) err = "Failed to finalize transcoded video";
+    return trailerRet >= 0 && closeRet >= 0;
+}
+
+struct PreparedSegment {
+    std::string path;
+    std::string error;
+    std::atomic<double> processed{0.0};
+    double duration = 0.0;
+    bool ok = false;
+    VideoMerger::HWAccelInfo hardware;
+};
+
+struct SegmentDirectory {
+    std::filesystem::path path;
+    std::string cleanup() {
+        if (path.empty()) return {};
+        try {
+            std::error_code ec;
+            std::filesystem::remove_all(path, ec);
+            if (ec) return "Cannot remove merge staging directory: " + path.u8string() + ": " + ec.message();
+            path.clear();
+        } catch (...) {
+            return "Cannot remove merge staging directory";
+        }
+        return {};
+    }
+    ~SegmentDirectory() {
+        try {
+            const auto warning = cleanup();
+            if (!warning.empty()) LOG_WARN("VideoMerger: " + warning);
+        } catch (...) {} // 析构不得打断 worker 的异常收尾
+    }
+
+    bool create(const std::string& output, std::string& err) {
+        std::random_device random;
+        const auto stamp = (static_cast<uint64_t>(random()) << 32) ^ random();
+        for (int i = 0; i < 16; ++i) {
+            auto candidate = std::filesystem::u8path(output).parent_path() /
+                (".flux-merge-" + std::to_string(stamp) + "-" + std::to_string(i));
+            std::error_code ec;
+            if (std::filesystem::create_directory(candidate, ec)) {
+                path = std::move(candidate);
+                return true;
+            }
+            if (ec) { err = "Cannot create merge staging directory: " + ec.message(); return false; }
+        }
+        err = "Cannot allocate a unique merge staging directory";
+        return false;
+    }
+};
+
+// 不能把独立编码器的不同参数集强行拼成一条 MP4 视频流。
+bool samePreparedEncoding(const AVCodecParameters* a, const AVCodecParameters* b) {
+    return a->codec_id == b->codec_id && a->width == b->width && a->height == b->height &&
+        a->format == b->format && a->profile == b->profile && a->level == b->level &&
+        av_cmp_q(a->sample_aspect_ratio, b->sample_aspect_ratio) == 0 &&
+        a->color_range == b->color_range && a->color_space == b->color_space &&
+        a->color_primaries == b->color_primaries && a->color_trc == b->color_trc &&
+        a->extradata_size == b->extradata_size &&
+        (a->extradata_size == 0 || std::memcmp(a->extradata, b->extradata, a->extradata_size) == 0);
+}
+
+bool assemblePrepared(VideoMerger& merger, const std::vector<ClipInfo>& infos,
+                      const std::vector<PreparedSegment>& segments, const std::string& outputPath,
+                      bool keepAudio, bool pcmOutput, const MergeOptions& options,
+                      std::atomic<bool>& cancelled, std::atomic<double>& processed,
+                      double total, std::string& err) {
+    TranscodeCtx tc{merger};
+    tc.keepAudio = keepAudio;
+    auto cleanup = onExit([&]() {
+        if (tc.fifo) av_audio_fifo_free(tc.fifo);
+        avcodec_free_context(&tc.aEnc);
+        if (tc.out) {
+            if (tc.out->pb) avio_closep(&tc.out->pb);
+            avformat_free_context(tc.out);
+            tc.out = nullptr;
+        }
+    });
+    if (avformat_alloc_output_context2(&tc.out, nullptr, pcmOutput ? "mov" : nullptr,
+                                       outputPath.c_str()) < 0 || !tc.out) {
+        err = "Cannot create assembled output";
+        return false;
+    }
+    AVStream* video = avformat_new_stream(tc.out, nullptr);
+    if (!video) { err = "Cannot allocate assembled video stream"; cleanup(); return false; }
+    tc.vStreamIdx = video->index;
+    // 先校验所有片段，失败时尚未写最终文件。
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (cancelled.load()) { cleanup(); return false; }
+        AVFormatContext* input = nullptr;
+        auto closeInput = onExit([&]() { avformat_close_input(&input); });
+        int ret = openMergeInput(&input, segments[i].path, cancelled);
+        if (ret >= 0) ret = avformat_find_stream_info(input, nullptr);
+        const int index = ret >= 0
+            ? av_find_best_stream(input, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0) : -1;
+        if (index < 0) {
+            avformat_close_input(&input);
+            err = "Cannot inspect prepared video"; cleanup(); return false;
+        }
+        const auto* params = input->streams[index]->codecpar;
+        const bool compatible = i == 0 || samePreparedEncoding(video->codecpar, params);
+        if (i == 0) {
+            ret = avcodec_parameters_copy(video->codecpar, params);
+            video->time_base = AVRational{1, 90000};
+        }
+        avformat_close_input(&input);
+        if (!compatible || ret < 0) {
+            err = "Independent video encoders produced incompatible stream parameters";
+            cleanup(); return false;
+        }
+    }
+    if (keepAudio) {
+        tc.targetSampleRate = infos.front().sampleRate > 0 ? infos.front().sampleRate : 44100;
+        tc.targetChannels = infos.front().channels > 0 ? infos.front().channels : 2;
+        AVCodecID codec = requestedAudioCodec(options.audioCodec);
+        if (codec == AV_CODEC_ID_NONE) {
+            codec = audioEncoderAcceptsFormat(infos.front().aCodec,
+                static_cast<AVSampleFormat>(infos.front().aSampleFmt))
+                ? infos.front().aCodec : AV_CODEC_ID_AAC;
+        }
+        if (!setupAudioEncoder(tc, codec, err)) { cleanup(); return false; }
+    }
+    if (openMergeOutput(&tc.out->pb, outputPath, cancelled) < 0 ||
+        avformat_write_header(tc.out, nullptr) < 0) {
+        err = "Cannot write assembled output header"; cleanup(); return false;
+    }
+    double base = 0.0;
+    int64_t lastDts = AV_NOPTS_VALUE;
+    std::atomic<double> audioProgress{0.0};
+    for (size_t i = 0; i < infos.size(); ++i) {
+        PreparedVideo copy;
+        if (!copy.open(segments[i].path, tc.out, tc.vStreamIdx, base, lastDts, err, cancelled)) {
+            cleanup(); return false;
+        }
+        tc.preparedVideo = &copy;
+        tc.preparedDuration = segments[i].duration;
+        double consumed = 0.0;
+        if (!transcodeClip(infos[i], tc, 0, 0, options, cancelled, audioProgress,
+                           base, consumed, err)) {
+            cleanup(); return false;
+        }
+        base += consumed;
+        processed.store(total * (0.9 + 0.09 * (i + 1) / infos.size()));
+    }
+    tc.preparedVideo = nullptr;
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) { err = "Cannot allocate audio packet"; cleanup(); return false; }
+    const bool audioOk = !keepAudio || drainAudioFifo(tc, packet, true);
+    int ret = !audioOk ? -1 : keepAudio
+        ? encodeWriteFrame(tc.out, tc.aEnc, tc.aStreamIdx, nullptr, packet) : 0;
+    av_packet_free(&packet);
+    if (ret >= 0 && !cancelled.load()) ret = av_write_trailer(tc.out);
+    const int closeRet = closeMergeOutput(tc.out);
+    cleanup();
+    if (ret < 0 || closeRet < 0) err = "Cannot finalize assembled output";
+    return ret >= 0 && closeRet >= 0 && !cancelled.load();
+}
+
+bool runParallelTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos,
+                          const std::string& outputPath, bool keepAudio, bool pcmOutput,
+                          const MergeOptions& options, std::atomic<bool>& cancelled,
+                          std::atomic<double>& processed, std::string& err) {
+    SegmentDirectory staging;
+    if (!staging.create(outputPath, err)) return false;
+    MergeOptions unified = options;
+    unified.useFirstClipResolution = false;
+    if (options.useFirstClipResolution) {
+        unified.customWidth = infos.front().width;
+        unified.customHeight = infos.front().height;
+        unified.customGopSize = normalizeGopSize(infos.front().gopSize);
+    }
+    std::vector<PreparedSegment> segments(infos.size());
+    double total = 0.0;
+    for (size_t i = 0; i < infos.size(); ++i) {
+        segments[i].path = (staging.path / (std::to_string(i) + ".mp4")).u8string();
+        total += infos[i].clipDuration;
+    }
+    const size_t workers = std::min<size_t>(2, infos.size());
+    const int codecThreads = std::max(1u, std::min(8u, std::thread::hardware_concurrency() / 2));
+    std::atomic<size_t> next{0}, finished{0};
+    std::atomic<bool> stop{false};
+    std::mutex wakeMutex;
+    std::condition_variable wake;
+    std::vector<std::thread> threads;
+    auto joinWorkers = onExit([&]() {
+        stop.store(true);
+        for (auto& thread : threads) if (thread.joinable()) thread.join();
+    });
+    LOG_INFO("VideoMerger: unified parallel video transcode, workers=" + std::to_string(workers) +
+             "; continuous original-source audio, staging=" + staging.path.u8string());
+    try {
+        for (size_t worker = 0; worker < workers; ++worker) {
+            threads.emplace_back([&]() {
+                while (!stop.load()) {
+                    const size_t i = next.fetch_add(1);
+                    if (i >= infos.size()) break;
+                    auto& result = segments[i];
+                    try {
+                        result.ok = runTranscode(merger, {infos[i]}, result.path, false, false,
+                            unified, stop, result.processed, result.error, &infos.front(),
+                            &result.duration, codecThreads, &result.hardware);
+                    } catch (const std::exception& e) {
+                        result.error = e.what();
+                    } catch (...) {
+                        result.error = "Unknown parallel transcode failure";
+                    }
+                    if (!result.ok) stop.store(true);
+                    finished.fetch_add(1);
+                    wake.notify_one();
+                }
+            });
+        }
+    } catch (const std::exception& e) {
+        err = e.what();
+        stop.store(true);
+    }
+    while (!stop.load() && finished.load() < infos.size()) {
+        if (cancelled.load()) { stop.store(true); break; }
+        double done = 0.0;
+        for (size_t i = 0; i < infos.size(); ++i)
+            done += std::clamp(segments[i].processed.load(), 0.0, infos[i].clipDuration);
+        processed.store(done * 0.9);
+        std::unique_lock<std::mutex> lock(wakeMutex);
+        wake.wait_for(lock, std::chrono::milliseconds(40));
+    }
+    for (auto& thread : threads) thread.join();
+    if (cancelled.load()) return false;
+    for (const auto& segment : segments) {
+        if (!segment.ok || segment.duration <= 0.0) {
+            if (err.empty()) err = segment.error.empty() ? "Parallel segment did not complete" : segment.error;
+            return false;
+        }
+    }
+    auto hardware = segments.front().hardware;
+    for (const auto& segment : segments) {
+        if (segment.hardware.decoderName != hardware.decoderName ||
+            segment.hardware.isHardwareDecoding != hardware.isHardwareDecoding) hardware.decoderName = "Mixed";
+        if (segment.hardware.encoderName != hardware.encoderName ||
+            segment.hardware.isHardwareEncoding != hardware.isHardwareEncoding) hardware.encoderName = "Mixed";
+        if (segment.hardware.hwDeviceType != hardware.hwDeviceType) hardware.hwDeviceType = "Mixed";
+        hardware.isHardwareDecoding &= segment.hardware.isHardwareDecoding;
+        hardware.isHardwareEncoding &= segment.hardware.isHardwareEncoding;
+        hardware.isZeroCopy &= segment.hardware.isZeroCopy;
+    }
+    merger.updateHWAccelInfo(hardware.isHardwareDecoding, hardware.decoderName,
+        hardware.isHardwareEncoding, hardware.encoderName, hardware.isZeroCopy, hardware.hwDeviceType);
+    processed.store(total * 0.9);
+    return assemblePrepared(merger, infos, segments, outputPath, keepAudio, pcmOutput,
+                             options, cancelled, processed, total, err);
 }
 
 } // anonymous namespace
@@ -2125,74 +2649,124 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
 // ─────────────────────────────────────────────
 
 void VideoMerger::mergeLoop(std::vector<MergeClip> clips, std::string outputPath, MergeOptions options) {
-    avformat_network_init();
+    SegmentDirectory staging;
+    std::string temporaryPath;
+    bool completedFile = false;
+    try {
+        avformat_network_init();
+        std::vector<ClipInfo> infos;
+        infos.reserve(clips.size());
+        double total = 0.0;
+        for (const auto& clip : clips) {
+            if (cancelRequested_.load()) { state_.store(State::Cancelled); return; }
+            ClipInfo info = probeClip(clip, cancelRequested_);
+            if (cancelRequested_.load()) { state_.store(State::Cancelled); return; }
+            if (!info.ok) {
+                fail("Invalid clip (no video stream or bad range): " + clip.path);
+                return;
+            }
+            total += info.clipDuration;
+            infos.push_back(std::move(info));
+        }
+        const bool streamCopy = canStreamCopy(infos) && !optionsRequireTranscode(infos, options);
+        const bool keepAudio = std::all_of(infos.begin(), infos.end(),
+            [](const ClipInfo& info) { return info.aIdx >= 0; });
+        const bool pcmOutput = !streamCopy && keepAudio &&
+            options.audioCodec == MergeOptions::AudioCodec::PCM;
 
-    // —— 探测阶段 ——
-    state_.store(State::Probing);
-    std::vector<ClipInfo> infos;
-    infos.reserve(clips.size());
-    double total = 0.0;
-    for (const auto& clip : clips) {
-        if (cancelRequested_.load()) { state_.store(State::Cancelled); running_.store(false); return; }
-        ClipInfo info = probeClip(clip);
-        if (!info.ok) {
-            fail("Invalid clip (no video stream or bad range): " + clip.path);
-            running_.store(false);
+        auto final = std::filesystem::u8path(outputPath);
+        final.replace_extension(streamCopy ? ".mkv" : ".mp4");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            outputPath_ = final.u8string();
+        }
+        // 校正扩展名之后检查；最终 commit 还会原子拒绝竞态创建的目标。
+        if (std::filesystem::exists(std::filesystem::symlink_status(final))) {
+            fail("Output already exists: " + final.u8string());
             return;
         }
-        total += info.clipDuration;   // 总时长按「裁剪后」片段时长累计
-        infos.push_back(std::move(info));
+        for (const auto& clip : clips) {
+            if (std::filesystem::weakly_canonical(final) ==
+                std::filesystem::weakly_canonical(std::filesystem::u8path(clip.path))) {
+                fail("Output conflicts with input: " + clip.path);
+                return;
+            }
+        }
+        if (!final.parent_path().empty()) std::filesystem::create_directories(final.parent_path());
+        std::string err;
+        if (!staging.create(final.u8string(), err)) { fail(err); return; }
+        temporaryPath = (staging.path / (std::string("output") + final.extension().u8string())).u8string();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            totalDuration_.store(total);
+            pcmAudio_.store(pcmOutput);
+            transcoded_.store(!streamCopy);
+            audioDropped_.store(!streamCopy && !keepAudio);
+            state_.store(State::Merging);
+        }
+        bool ok = false;
+        if (streamCopy) {
+            ok = runStreamCopy(infos, temporaryPath, cancelRequested_, processedDuration_, err);
+        } else {
+            const bool parallel = options.resolutionMode == MergeOptions::ResolutionMode::Unified &&
+                                  options.maxParallelClips > 1 && infos.size() > 1;
+            if (parallel) {
+                ok = runParallelTranscode(*this, infos, temporaryPath, keepAudio, pcmOutput, options,
+                                          cancelRequested_, processedDuration_, err);
+                if (!ok && !cancelRequested_.load()) {
+                    LOG_WARN("VideoMerger: parallel path unavailable (" + err + "); retrying serially");
+                    err.clear();
+                    processedDuration_.store(0.0);
+                }
+            }
+            if (!ok && !cancelRequested_.load())
+                ok = runTranscode(*this, infos, temporaryPath, keepAudio, pcmOutput, options,
+                                  cancelRequested_, processedDuration_, err);
+        }
+        if (ok && !cancelRequested_.load()) {
+            completedFile = true;
+            syncMergeOutput(std::filesystem::u8path(temporaryPath));
+        }
+        // cancel 和 commit 在唯一决策点排序；Done 后 cancel 无权清理已提交文件。
+        std::lock_guard<std::mutex> terminalLock(terminalMutex_);
+        if (cancelRequested_.load()) {
+            const auto warning = staging.cleanup();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!warning.empty()) error_ = warning;
+                state_.store(State::Cancelled);
+            }
+        } else if (!ok) {
+            const auto warning = staging.cleanup();
+            fail((err.empty() ? "Merge failed" : err) + (warning.empty() ? "" : "; " + warning));
+        } else {
+            completedFile = true;
+            srExport::commitOutput(std::filesystem::u8path(temporaryPath), final);
+            completedFile = false;
+            const auto warning = staging.cleanup();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!warning.empty()) error_ = "Saved, but " + warning;
+                processedDuration_.store(total);
+                state_.store(State::Done);
+            }
+        }
+    } catch (const std::exception& e) {
+        if (completedFile) {
+            // 已封口的完整文件不能按半成品删除，明确报告可恢复位置。
+            staging.path.clear();
+            fail(std::string(e.what()) + "; completed video preserved at: " + temporaryPath);
+        } else {
+            const auto warning = staging.cleanup();
+            fail(std::string("Merge failed: ") + e.what() + (warning.empty() ? "" : "; " + warning));
+        }
+    } catch (...) {
+        std::string warning;
+        if (completedFile) staging.path.clear();
+        else warning = staging.cleanup();
+        fail(completedFile ? "Merge failed; completed video preserved at: " + temporaryPath
+                           : "Unknown merge failure" + (warning.empty() ? std::string{} : "; " + warning));
     }
-    totalDuration_.store(total);
-
-    // —— 智能决策 ——（任一片段有截取，或 Unified 要改变分辨率/GOP/编码格式，均走精确转码）
-    bool streamCopy = canStreamCopy(infos) && !optionsRequireTranscode(infos, options);
-    bool keepAudio = true;
-    for (const auto& info : infos) {
-        if (info.aIdx < 0) { keepAudio = false; break; }  // 任一片段无音频 → 转码时丢音轨
-    }
-    // PCM 音轨进不了 mp4 复用器，转码容器改用 mov（同为 ISO BMFF，沿用 .mp4 扩展名）
-    const bool pcmOutput = !streamCopy && keepAudio &&
-                           (options.audioCodec == MergeOptions::AudioCodec::PCM);
-    pcmAudio_.store(pcmOutput);
-
-    // 校正输出扩展名：流拷贝→.mkv，转码→.mp4
-    std::filesystem::path op(outputPath);
-    std::string finalPath = (op.parent_path() / op.stem()).string() + (streamCopy ? ".mkv" : ".mp4");
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        outputPath_ = finalPath;
-    }
-    std::filesystem::create_directories(op.parent_path());
-
-    LOG_INFO(std::string("VideoMerger: 策略=") + (streamCopy ? "流拷贝" : "转码") +
-             ", 片段数=" + std::to_string(infos.size()) + ", 输出=" + finalPath +
-             ", 容器=" + (pcmOutput ? "mov(lpcm)" : "auto"));
-
-    state_.store(State::Merging);
-    transcoded_.store(!streamCopy);
-    audioDropped_.store(!streamCopy && !keepAudio);
-
-    std::string err;
-    bool ok = streamCopy
-        ? runStreamCopy(infos, finalPath, cancelRequested_, processedDuration_, err)
-        : runTranscode(*this, infos, finalPath, keepAudio, pcmOutput, options,
-                       cancelRequested_, processedDuration_, err);
-
-    if (cancelRequested_.load()) {
-        std::error_code ec;
-        std::filesystem::remove(finalPath, ec);  // 删除半成品
-        state_.store(State::Cancelled);
-    } else if (ok) {
-        processedDuration_.store(total);
-        state_.store(State::Done);
-        LOG_INFO("VideoMerger: 合并完成 " + finalPath);
-    } else {
-        std::error_code ec;
-        std::filesystem::remove(finalPath, ec);
-        fail(err.empty() ? "Merge failed" : err);
-    }
-    running_.store(false);
 }
 
 } // namespace FluxPlayer

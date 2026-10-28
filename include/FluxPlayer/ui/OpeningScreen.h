@@ -8,14 +8,12 @@
  * 半透明覆盖层，等 Player::open 返回再让位给 Controller。
  *
  * 实现约束：
- * - GLRenderer / VideoDecoder 等组件涉及 GL 上下文，必须在主线程构建。
- *   所以 Player::open 仍然在主线程同步调用，OpeningScreen 在调用前先绘制
- *   一帧 splash 让用户看到反馈；yt-dlp 提取阶段在 worker 线程运行，主线程
- *   周期性重绘 splash（按皮肤设定的 redrawIntervalMs）保持动画流畅，同时
- *   响应 glfwPollEvents 防止系统标记窗口未响应。
- * - 支持用户取消：检测窗口关闭事件，worker 完成后检查 windowClosed 标志。
- * - 超时机制：yt-dlp 调用通过 runCommand(cmd, timeoutSec) 传入超时参数，
- *   超时后 popen 返回空字符串，extract() 识别为失败并返回错误。
+ * - 提取以及 prepareOpenInput 的输入打开/探测在 worker 执行；主线程持续绘制
+ *   splash 并响应关闭。worker join 后，主线程调用 open 安装候选输入并创建
+ *   解码器、GLRenderer 和 AudioOutput；这些组件不迁移到后台。
+ * - 关闭窗口时请求取消提取/输入准备，等待 worker 退出后才能释放借用状态。
+ * - 提取使用取消 token 和进程超时；FFmpeg 准备使用输入中断协议，不保证
+ *   所有底层文件系统调用都能被硬实时抢占。
  */
 
 #pragma once
