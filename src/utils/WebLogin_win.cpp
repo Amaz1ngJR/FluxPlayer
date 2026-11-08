@@ -18,7 +18,7 @@
  *   因此本文件手写 COM 回调对象 LambdaCallback<I, T>，实现三个 WebView2
  *   异步接口需要的 IUnknown + Invoke；
  * - 不链接 WebView2LoaderStatic.lib：运行时通过 LoadLibraryW 动态加载
- *   WebView2Loader.dll，DLL 由 WebView2 Runtime 提供；
+ *   WebView2Loader.dll，DLL 随应用分发，与系统 WebView2 Runtime 分开部署；
  * - 异步流程通过私有消息泵驱动：模态期间持续 GetMessage/DispatchMessage，
  *   保证 WebView2 的回调能被处理；
  * - 「完成登录」点击后异步读取所有 cookies，回调里用 PostMessage 通知主流程退出循环。
@@ -33,6 +33,7 @@
 #ifdef FLUXPLAYER_HAVE_WEBVIEW2
 
 #include <Windows.h>
+#include <shlobj.h>
 #include <wrl/client.h>
 #include "WebView2.h"
 
@@ -40,6 +41,8 @@
 #include <chrono>
 #include <ctime>
 #include <functional>
+#include <filesystem>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -48,6 +51,37 @@ using Microsoft::WRL::ComPtr;
 namespace FluxPlayer {
 
 namespace {
+
+std::string webViewFailure(const char* stage, HRESULT hr) {
+    char code[16];
+    std::snprintf(code, sizeof code, "0x%08lX", static_cast<unsigned long>(hr));
+    std::string error = std::string(stage) + " (HRESULT=" + code + ")";
+    if (hr == E_ACCESSDENIED) error += "：浏览器用户数据目录访问被拒绝";
+    else if (hr == CO_E_NOTINITIALIZED) error += "：当前线程未初始化 COM";
+    else if (hr == RPC_E_CHANGED_MODE) error += "：当前线程 COM 模式不是 STA";
+    else if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) error += "：未找到 WebView2 Runtime，请安装运行库";
+    LOG_WARN(error);
+    return error;
+}
+
+bool webViewUserData(std::wstring& directory, std::string& error) {
+    // Program Files is not writable by a normal user. Both browser entry points
+    // share a per-user profile, independent of the installation directory.
+    wchar_t local[MAX_PATH];
+    const HRESULT hr = SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, local);
+    if (FAILED(hr)) { error = webViewFailure("获取浏览器用户目录失败", hr); return false; }
+    const auto path = std::filesystem::path(local) / L"FluxPlayer" / L"WebView2";
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    if (ec) {
+        error = "创建浏览器用户目录失败：" + path.u8string() + " (" + ec.message() + ")";
+        LOG_WARN(error);
+        return false;
+    }
+    directory = path.wstring();
+    LOG_INFO("WebView2 user data: " + path.u8string());
+    return true;
+}
 
 // 手写的轻量 COM 回调对象：用 lambda 实现 WebView2 的 *CompletedHandler
 // 接口（每个接口形如 IUnknown + HRESULT Invoke(HRESULT, T*)）。
@@ -553,12 +587,15 @@ void startRefresh(const RefreshState& state) {
     static HMODULE loader = LoadLibraryW(L"WebView2Loader.dll");
     auto create = loader ? reinterpret_cast<Create>(GetProcAddress(loader, "CreateCoreWebView2EnvironmentWithOptions")) : nullptr;
     if (!create) { state->finish("缺少 WebView2 刷新环境"); return; }
-    HRESULT hr = create(nullptr, nullptr, nullptr,
+    std::wstring userData;
+    std::string directoryError;
+    if (!webViewUserData(userData, directoryError)) { state->finish(directoryError); return; }
+    HRESULT hr = create(nullptr, userData.c_str(), nullptr,
         MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler, ICoreWebView2Environment>(
         IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
         [state](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
             if (state->done) return S_OK;
-            if (FAILED(hr) || !env) { state->finish("创建网页刷新环境失败"); return S_OK; }
+            if (FAILED(hr) || !env) { state->finish(webViewFailure("创建网页刷新环境失败", FAILED(hr) ? hr : E_POINTER)); return S_OK; }
             state->environment = env;
             HRESULT created = env->CreateCoreWebView2Controller(state->hwnd,
                 MakeCallback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler, ICoreWebView2Controller>(
@@ -629,7 +666,7 @@ void startRefresh(const RefreshState& state) {
             if (FAILED(created)) state->finish("创建网页刷新视图失败");
             return S_OK;
         }).Get());
-    if (FAILED(hr)) state->finish("启动网页刷新失败");
+    if (FAILED(hr)) state->finish(webViewFailure("启动网页刷新失败", hr));
 }
 
 } // namespace
@@ -733,7 +770,13 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
     }
 
     // ── 创建 WebView2 环境（异步） ──
-    HRESULT hr = pfnCreateEnv(nullptr, nullptr, nullptr,
+    std::wstring userData;
+    if (!webViewUserData(userData, outcome.error)) {
+        DestroyWindow(hwnd);
+        outcome.result = WebLoginResult::Failed;
+        return outcome;
+    }
+    HRESULT hr = pfnCreateEnv(nullptr, userData.c_str(), nullptr,
         MakeCallback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler, ICoreWebView2Environment>(
             IID_ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
             [state](HRESULT errorCode, ICoreWebView2Environment* env) -> HRESULT {
@@ -741,7 +784,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                 if (!ctx.running.load() || ctx.modalResult != ModalResult::None) return S_OK;
                 const HWND hwnd = ctx.hwnd;
                 if (FAILED(errorCode) || !env) {
-                    ctx.error = "创建 WebView2 环境失败，请确认已安装 WebView2 Runtime";
+                    ctx.error = webViewFailure("创建 WebView2 环境失败", FAILED(errorCode) ? errorCode : E_POINTER);
                     ctx.modalResult = ModalResult::Failed;
                     PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
                     return S_OK;
@@ -759,7 +802,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
                             }
                             const HWND hwnd = ctx.hwnd;
                             if (FAILED(err2) || !controller) {
-                                ctx.error = "创建 WebView2 控制器失败";
+                                ctx.error = webViewFailure("创建 WebView2 控制器失败", FAILED(err2) ? err2 : E_POINTER);
                                 ctx.modalResult = ModalResult::Failed;
                                 PostMessageW(hwnd, WM_FP_QUIT_LOGIN, 0, 0);
                                 return S_OK;
@@ -915,7 +958,7 @@ WebLoginOutcome WebLogin::showLoginDialog(const std::string& pageUrl) {
         ).Get());
 
     if (FAILED(hr)) {
-        ctx.error = "WebView2 入口调用失败 hr=" + std::to_string(hr);
+        ctx.error = webViewFailure("WebView2 入口调用失败", hr);
         ctx.modalResult = ModalResult::Failed;
         ctx.running = false;
     }

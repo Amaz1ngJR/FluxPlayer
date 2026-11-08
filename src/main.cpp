@@ -41,6 +41,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <objbase.h>
 #include <shellapi.h>
 #else
 #include <signal.h>
@@ -55,6 +56,16 @@ using namespace FluxPlayer;
 namespace {
 
 #ifdef _WIN32
+// WebView2 login and hidden refresh use the main thread's message pump.
+// Own COM initialization for that thread's full application lifetime.
+struct MainThreadCom {
+    HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    ~MainThreadCom() { if (SUCCEEDED(result)) CoUninitialize(); }
+    MainThreadCom() = default;
+    MainThreadCom(const MainThreadCom&) = delete;
+    MainThreadCom& operator=(const MainThreadCom&) = delete;
+};
+
 /**
  * @brief 在 Windows GUI 子系统下复用父进程控制台输出日志
  *
@@ -353,6 +364,7 @@ void interruptOfflineExport(int) { offlineExportInterrupted = 1; }
 
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
+    MainThreadCom mainThreadCom;
     // MinGW 的窄 argv 使用系统代码页；FFmpeg/文件系统边界统一使用 UTF-8。
     std::vector<std::string> utf8Args;
     std::vector<char*> utf8Argv;
@@ -384,6 +396,15 @@ int main(int argc, char* argv[]) {
     Logger::getInstance().enableTcpLog(cfg.tcpLogPort);
 #endif
     LOG_INFO("=== FluxPlayer V2 Starting ===");
+#ifdef _WIN32
+    if (FAILED(mainThreadCom.result)) {
+        char code[16];
+        std::snprintf(code, sizeof code, "0x%08lX", static_cast<unsigned long>(mainThreadCom.result));
+        LOG_ERROR(std::string("Main thread COM STA initialization failed: ") + code);
+        return 1;
+    }
+    LOG_INFO("Main thread COM STA initialized for WebView2");
+#endif
 
     if (!SkinManager::instance().initialize(cfg.skinId, cfg.skinHotReload)) {
         std::string err = SkinManager::instance().lastError();

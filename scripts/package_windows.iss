@@ -39,8 +39,8 @@ Source: "..\dist\staging\resources\*";    DestDir: "{app}\resources"; Flags: ign
 [UninstallDelete]
 ; 卸载时清理运行时生成的文件
 Type: files;          Name: "{app}\imgui.ini"
-; WebView2 默认在 EXE 旁创建用户数据目录，其中包含网页登录缓存和浏览器配置。
-; 这些文件由运行时生成，不在安装文件清单中，必须显式登记递归清理。
+; 清理旧版本在 EXE 旁生成的 WebView2 数据。
+; 新版本使用当前用户 LocalAppData 下的 FluxPlayer\WebView2，不在安装目录写缓存。
 ; 只删除本程序的固定目录，不能用 {app}\* 清空整个安装目录。
 Type: filesandordirs; Name: "{app}\FluxPlayer.exe.WebView2"
 

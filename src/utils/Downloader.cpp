@@ -20,9 +20,12 @@
 #include "FluxPlayer/utils/H264NalTransformer.h"
 
 #include <chrono>
+#include <algorithm>
 #include <thread>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
+#include <vector>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -48,8 +51,6 @@ static constexpr double kProgressIntervalSecs = 0.5;
 static constexpr int kPausePollMs = 100;
 // ETA 超过一天视为无效（网络断开等异常情况）
 static constexpr double kMaxEtaSecs = 86400.0;
-// 无法从流获取码率时的默认估算值（2 Mbps）
-static constexpr int64_t kDefaultBitrate = 2000000;
 // 重连退避：第 n 次失败后等待 min(2^n, kReconnectMaxDelaySecs) 秒再重试
 // 无限重试，仅由 cancel 打断——因为"自动暂停等恢复"是明确的产品需求
 static constexpr int kReconnectMaxDelaySecs = 30;
@@ -300,6 +301,62 @@ static int computeBackoffSecs(int retryCount) {
 }
 
 // ── 辅助：单流 packet 写入 ──
+// State belongs to the output file, and survives input reconnections.
+struct MuxTiming {
+    std::vector<int64_t> lastDts;
+    uint64_t corrections = 0;
+    int64_t progressOriginUs = AV_NOPTS_VALUE;
+    double downloadedSeconds = 0;
+};
+
+static int writeDownloadPacket(AVFormatContext* output, AVPacket* packet, MuxTiming& timing) {
+    auto* stream = output->streams[packet->stream_index];
+    timing.lastDts.resize(output->nb_streams, AV_NOPTS_VALUE);
+    auto& previous = timing.lastDts[packet->stream_index];
+    const bool strict = !(output->oformat->flags & AVFMT_TS_NONSTRICT);
+    if (strict && stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO &&
+        stream->codecpar->sample_rate > 0 &&
+        av_compare_ts(1, stream->time_base, 1, AVRational{1, stream->codecpar->sample_rate}) <= 0 &&
+        packet->dts != AV_NOPTS_VALUE && packet->dts == previous) {
+        // Repair an equal audio timestamp by one output tick only. Preserve the
+        // PTS-DTS offset and all compressed data; never flatten larger regressions.
+        if (packet->dts == std::numeric_limits<int64_t>::max() ||
+            packet->pts == std::numeric_limits<int64_t>::max()) return AVERROR(EINVAL);
+        ++packet->dts;
+        if (packet->pts != AV_NOPTS_VALUE) ++packet->pts;
+        if (++timing.corrections <= 5 || timing.corrections % 100 == 0)
+            LOG_WARN("Downloader: equal audio DTS corrected by one tick, stream=" +
+                std::to_string(packet->stream_index) + ", previous=" + std::to_string(previous) +
+                ", time_base=" + std::to_string(stream->time_base.num) + "/" +
+                std::to_string(stream->time_base.den) + ", count=" + std::to_string(timing.corrections));
+    }
+    const auto dts = packet->dts;
+    const auto pts = packet->pts;
+    const int index = packet->stream_index;
+    const auto stamp = pts != AV_NOPTS_VALUE ? pts : dts;
+    const int64_t stampUs = stamp == AV_NOPTS_VALUE ? AV_NOPTS_VALUE
+        : av_rescale_q(stamp, stream->time_base, AV_TIME_BASE_Q);
+    const int ret = av_interleaved_write_frame(output, packet);
+    if (ret >= 0) {
+        if (dts != AV_NOPTS_VALUE) previous = dts;
+        if (index == 0 && stampUs != AV_NOPTS_VALUE) {
+            if (timing.progressOriginUs == AV_NOPTS_VALUE) timing.progressOriginUs = stampUs;
+            timing.downloadedSeconds = std::max(timing.downloadedSeconds,
+                static_cast<double>((static_cast<long double>(stampUs) - timing.progressOriginUs) / AV_TIME_BASE));
+        }
+    }
+    else {
+        char message[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, message, sizeof message);
+        LOG_WARN("Downloader: mux failed, stream=" + std::to_string(index) +
+            ", pts=" + std::to_string(pts) + ", dts=" + std::to_string(dts) +
+            ", previous=" + std::to_string(previous) + ", time_base=" +
+            std::to_string(stream->time_base.num) + "/" + std::to_string(stream->time_base.den) +
+            ", error=" + message);
+    }
+    return ret;
+}
+
 // 写入成功后更新 lastInputDts（原始输入时间基下的 DTS，单位 1us），用于断网/暂停后 seek 续流。
 // 跳过在 seek 续流后读到的"已写入区间"重复包（dts <= skipUntilUs 时丢弃）
 static int writeSingleStreamPacket(AVPacket* pkt,
@@ -309,7 +366,7 @@ static int writeSingleStreamPacket(AVPacket* pkt,
                                      AVFormatContext* outCtx,
                                      int64_t& bytesWritten,
                                      int64_t& lastInputDtsUs,
-                                     int64_t skipUntilUs) {
+                                     int64_t skipUntilUs, MuxTiming& timing) {
     AVStream* inStream = nullptr;
     AVStream* outStream = nullptr;
     int outIdx = -1;
@@ -326,7 +383,7 @@ static int writeSingleStreamPacket(AVPacket* pkt,
     av_packet_rescale_ts(pkt, inStream->time_base, outStream->time_base);
     pkt->stream_index = outIdx;
     const int size = pkt->size;
-    int ret = av_interleaved_write_frame(outCtx, pkt);
+    int ret = writeDownloadPacket(outCtx, pkt, timing);
     if (ret >= 0) { bytesWritten += size; if (dtsUs >= 0) lastInputDtsUs = dtsUs; }
     return ret;
 }
@@ -344,7 +401,7 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
                           bool& videoReady, bool& audioReady,
                           int64_t& bytesWritten,
                           int64_t& lastVideoDtsUs, int64_t& lastAudioDtsUs,
-                          int64_t skipVideoUntilUs, int64_t skipAudioUntilUs, bool& outputFailed) {
+                          int64_t skipVideoUntilUs, int64_t skipAudioUntilUs, bool& outputFailed, MuxTiming& timing) {
     if (!videoReady && !videoEof) {
         int ret = av_read_frame(videoCtx, videoPkt);
         if (ret == AVERROR_EOF) { videoEof = true; }
@@ -389,7 +446,7 @@ static int writeDashStep(AVFormatContext* videoCtx, AVFormatContext* audioCtx,
     const int64_t dts = packet->dts == AV_NOPTS_VALUE ? -1
         : av_rescale_q(packet->dts, stream->time_base, AV_TIME_BASE_Q);
     const int size = packet->size;
-    const int ret = av_interleaved_write_frame(outCtx, packet);
+    const int ret = writeDownloadPacket(outCtx, packet, timing);
     av_packet_unref(packet);
     (writeVideo ? videoReady : audioReady) = false;
     if (ret < 0) { outputFailed = true; return ret; }
@@ -438,6 +495,11 @@ static bool runWriteLoop(WriteContext& wc, ExtractedStream& info,
                           std::atomic<bool>& running, std::atomic<bool>& cancelled,
                           std::atomic<bool>& paused, ProgressCb& onProgress, std::string& failure) {
     int64_t bytesWritten = 0;
+    MuxTiming muxTiming;
+    const auto* progressStream = wc.videoCtx->streams[wc.videoStreamIn];
+    muxTiming.progressOriginUs = wc.videoCtx->start_time;
+    if (muxTiming.progressOriginUs == AV_NOPTS_VALUE && progressStream->start_time != AV_NOPTS_VALUE)
+        muxTiming.progressOriginUs = av_rescale_q(progressStream->start_time, progressStream->time_base, AV_TIME_BASE_Q);
     auto startTime = std::chrono::steady_clock::now();
     auto lastProgressTime = startTime;
     AVPacket* videoPkt = av_packet_alloc();
@@ -601,7 +663,7 @@ static bool runWriteLoop(WriteContext& wc, ExtractedStream& info,
             ret = writeSingleStreamPacket(pkt, wc.videoCtx, wc.videoStreamIn, wc.audioStreamIn,
                                     wc.streams, wc.outCtx, bytesWritten,
                                     pkt->stream_index == wc.videoStreamIn ? lastVideoDtsUs : lastAudioDtsUs,
-                                    pkt->stream_index == wc.videoStreamIn ? skipVideoUntilUs : skipAudioUntilUs);
+                                    pkt->stream_index == wc.videoStreamIn ? skipVideoUntilUs : skipAudioUntilUs, muxTiming);
             av_packet_free(&pkt);
             if (ret < 0) { failure = "写入下载文件失败"; fatal = true; break; }
         } else {
@@ -610,7 +672,7 @@ static bool runWriteLoop(WriteContext& wc, ExtractedStream& info,
                                     wc.streams, wc.outCtx, videoPkt, audioPkt,
                                     videoEof, audioEof, videoReady, audioReady, bytesWritten,
                                     lastVideoDtsUs, lastAudioDtsUs,
-                                    skipVideoUntilUs, skipAudioUntilUs, outputFailed);
+                                    skipVideoUntilUs, skipAudioUntilUs, outputFailed, muxTiming);
             if (ret < 0) {
                 if (outputFailed) { failure = "写入下载文件失败"; fatal = true; break; }
                 intCtx.lastError = ret;
@@ -629,25 +691,23 @@ static bool runWriteLoop(WriteContext& wc, ExtractedStream& info,
         }
 
         // 定期回调进度
-        // 总大小优先用 浏览器捕获 提供的 filesize（权威），fallback 到 duration*bitrate 估算
-        // HLS manifest 的 videoCtx->bit_rate 常为 0，不能作为主要估算来源
+        // HLS/浏览器提供的大小可能只是单个分片，码率也可能低估整片。
+        // 优先按已写入的主轨媒体时间计算；无时长时才参考提供的字节总量。
         now = std::chrono::steady_clock::now();
         if (std::chrono::duration<double>(now - lastProgressTime).count() >= kProgressIntervalSecs
             && onProgress) {
             int64_t totalSize = info.filesize;
-            const char* sizeSrc = "info.filesize";
-            if (totalSize <= 0 && info.duration > 0) {
-                int64_t bitrate = wc.videoCtx->bit_rate + (wc.audioCtx ? wc.audioCtx->bit_rate : 0);
-                if (bitrate <= 0) bitrate = kDefaultBitrate;
-                totalSize = static_cast<int64_t>(info.duration * bitrate / 8);
-                sizeSrc = "duration*bitrate";
-            }
-            float progress = totalSize > 0
-                ? std::min(1.0f, static_cast<float>(bytesWritten) / totalSize) : 0.0f;
+            const bool byTime = info.duration > 0;
+            const char* sizeSrc = byTime ? "media-time/duration" : "info.filesize";
+            const double fraction = byTime ? muxTiming.downloadedSeconds / info.duration
+                : (totalSize > 0 ? static_cast<double>(bytesWritten) / totalSize : 0.0);
+            // EOF、trailer、关闭和文件提交之前，都不是下载完成。
+            const float progress = static_cast<float>(std::clamp(fraction, 0.0, 0.99));
             double elapsed = std::chrono::duration<double>(now - startTime).count();
             double speed = elapsed > 0 ? bytesWritten / elapsed : 0;
-            double eta = (speed > 0 && totalSize > 0 && progress < 1.0f)
-                ? (totalSize - bytesWritten) / speed : 0;
+            const double eta = byTime && muxTiming.downloadedSeconds > 0 && fraction < 1
+                ? elapsed * (info.duration - muxTiming.downloadedSeconds) / muxTiming.downloadedSeconds
+                : (!byTime && speed > 0 && totalSize > bytesWritten ? (totalSize - bytesWritten) / speed : -1);
 
             // 首次回调打印诊断信息：定位"一开始就 100%"的根因
             if (firstProgress) {
@@ -666,7 +726,7 @@ static bool runWriteLoop(WriteContext& wc, ExtractedStream& info,
             progressInfo.pipeline = DownloadPipeline::PacketRemux;
             progressInfo.progress = progress;
             progressInfo.speed = formatBytes(static_cast<int64_t>(speed)) + "/s";
-            progressInfo.eta = mode == DownloadMode::VodDownload ? formatEta(eta) : "";
+            progressInfo.eta = mode == DownloadMode::VodDownload ? (eta >= 0 ? formatEta(eta) : "--") : "";
             progressInfo.fileSize = formatBytes(bytesWritten);
             progressInfo.savedTime = mode == DownloadMode::LiveSave ? formatEta(elapsed) : "";
             // 当前实现始终 packet remux，不产生像素帧；BYPASS/N/A 比误报硬件零拷贝更准确。
