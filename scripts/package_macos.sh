@@ -38,7 +38,7 @@ ORT_LIBRARY="$ROOT/source/onnxruntime/macos-arm64/libonnxruntime.1.23.2.dylib"
 for required in "$FFMPEG_LIB_DIR/libavformat.dylib" "$YTDLP" \
     "$ROOT/source/pic2.png" "$ROOT/source/video/video_01.mp4" \
     "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua" \
-    "$ROOT/source/models/realesrgan/realesrgan-x2plus.onnx" \
+    "$ROOT/source/models/realesrgan/realesr-general-x4v3.onnx" \
     "$ROOT/source/models/realesrgan/LICENSE" "$ROOT/source/models/realesrgan/README.md" "$ORT_LIBRARY"; do
     if [ ! -f "$required" ]; then
         echo "Missing packaging input: $required" >&2
@@ -82,7 +82,7 @@ cp "$ROOT/source/video/video_01.mp4" "$APP_BUNDLE/Contents/Resources/video/video
 
 # 离线超分按 Resources 下的固定路径查找模型及动态运行库，不依赖开发目录。
 mkdir -p "$APP_BUNDLE/Contents/Resources/models/realesrgan"
-for model_resource in realesrgan-x2plus.onnx LICENSE README.md; do
+for model_resource in realesr-general-x4v3.onnx LICENSE README.md; do
     cp "$ROOT/source/models/realesrgan/$model_resource" "$APP_BUNDLE/Contents/Resources/models/realesrgan/"
 done
 cp -R "$ROOT/source/onnxruntime" "$APP_BUNDLE/Contents/Resources/"

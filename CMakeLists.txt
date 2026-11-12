@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.9.5 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.9.6 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -407,7 +407,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/source
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source
-    # 只在部署副本中清理模型；源码 x4 保留供外部选择。
+    # 清理部署副本中的旧模型，仅分发当前内置模型。
     COMMAND ${CMAKE_COMMAND} -E remove_directory
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
     COMMAND ${CMAKE_COMMAND} -E remove_directory
@@ -416,12 +416,12 @@ add_custom_command(
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/realesrgan
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/realesrgan-x2plus.onnx
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/realesr-general-x4v3.onnx
         ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/LICENSE
         ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/README.md
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/realesrgan-x2plus.onnx
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/realesr-general-x4v3.onnx
         ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/LICENSE
         ${CMAKE_CURRENT_SOURCE_DIR}/source/models/realesrgan/README.md
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/realesrgan
@@ -526,14 +526,14 @@ install(FILES source/pic2.png DESTINATION resources)
 # Config::getResourcePath("video/video_01.mp4") 查找。
 install(FILES source/video/video_01.mp4 DESTINATION resources/video)
 # 离线超分按资源路径动态加载；模型和许可不能只留在开发期 source 副本中。
-# 发行包只内置已验证的 x2 模型；清理增量 staging 的旧模型，不触碰源码。
+# 仅内置通用轻量 general-x4v3；清理增量 staging 的旧模型，不触碰源码。
 install(CODE [[
     file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/resources/models/realesrgan")
     file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/source/models/realesrgan")
 ]])
-# x4/其他模型由用户按兼容契约自行选择。
+# 其他模型由用户按兼容契约自行选择。
 install(FILES
-    source/models/realesrgan/realesrgan-x2plus.onnx
+    source/models/realesrgan/realesr-general-x4v3.onnx
     source/models/realesrgan/README.md
     source/models/realesrgan/LICENSE
     DESTINATION resources/models/realesrgan)

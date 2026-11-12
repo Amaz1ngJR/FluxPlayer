@@ -1,6 +1,6 @@
 <svg width="1440" height="900" viewBox="0 0 1440 900" fill="none" xmlns="http://www.w3.org/2000/svg">
   <title>FluxPlayer / Video Super Resolution / Configuration</title>
-  <desc>Source values illustrate a selected file, not verified export eligibility. Default: native 2x model and keep source output size. Start is enabled when basic configuration is ready; worker validates the complete input contract before exporting. Source path, dimensions and installed model state come from the application.</desc>
+  <desc>Source values illustrate a selected file, not verified export eligibility. Default: realesr-general-x4v3 native 4x model and keep source output size. Start is enabled when basic configuration is ready; worker validates the complete input contract before exporting. Source path, dimensions and installed model state come from the application.</desc>
   <defs>
     <radialGradient id="bg"><stop stop-color="#071B31"/><stop offset="1" stop-color="#02040E"/></radialGradient>
     <linearGradient id="rail"><stop stop-color="#00E8FF" stop-opacity="0"/><stop offset=".3" stop-color="#00E8FF"/><stop offset=".7" stop-color="#A855FF"/><stop offset="1" stop-color="#FF3DF2" stop-opacity="0"/></linearGradient>
@@ -38,12 +38,12 @@
       <rect x="576" y="112" width="800" height="598" rx="6" fill="#070D22" stroke="#6336A4"/>
       <text x="600" y="145" font-size="13" fill="#A855FF">02 / ENHANCEMENT MODEL</text>
       <rect x="600" y="164" width="368" height="34" rx="4" fill="#A855FF" fill-opacity=".18" stroke="#A855FF"/>
-      <text x="784" y="186" text-anchor="middle" font-size="12" fill="#A855FF">Built-in Real-ESRGAN x2plus / Native 2x</text>
+      <text x="784" y="186" text-anchor="middle" font-size="12" fill="#A855FF">Built-in general-x4v3 / Native 4x</text>
       <rect x="984" y="164" width="368" height="34" rx="4" fill="#A855FF" fill-opacity=".04" stroke="#A855FF" stroke-opacity=".68"/>
       <text x="1168" y="186" text-anchor="middle" font-size="12" fill="#A855FF">CHOOSE EXTERNAL ONNX MODEL</text>
-      <text x="600" y="220" font-size="12" fill="#A855FF">Selected: realesrgan-x2plus.onnx</text>
-      <text x="984" y="220" font-size="12" fill="#6F89A8">Native scale: 2x</text>
-      <text x="600" y="243" font-size="13" fill="#A855FF">Intermediate size (read-only)  2560 × 1440</text>
+      <text x="600" y="220" font-size="12" fill="#A855FF">Selected: realesr-general-x4v3.onnx</text>
+      <text x="984" y="220" font-size="12" fill="#6F89A8">Native scale: 4x</text>
+      <text x="600" y="243" font-size="13" fill="#A855FF">Intermediate size (read-only)  5120 × 2880</text>
       <!-- External selection uses the same information row, with no manual scale buttons.
            At x=984,y=220 show "Native scale: auto-detect at export" before loading,
            then the actual scale obtained from inference; intermediate size is pending until then.

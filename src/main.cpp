@@ -424,7 +424,7 @@ int main(int argc, char* argv[]) {
         // 无窗口离线导出入口，复用生产导出器，不创建播放上下文。
         if (argc >= 2 && std::string(argv[1]) == "--sr-export") {
             if (argc < 6) {
-                LOG_ERROR("Usage: FluxPlayer --sr-export INPUT OUTPUT_DIR WIDTH HEIGHT [auto|2] [cpu|auto] [preserve-sar|square-sar] [copy-audio|aac] [TRUSTED_MODEL.onnx] (WIDTH=HEIGHT=0: native output)");
+                LOG_ERROR("Usage: FluxPlayer --sr-export INPUT OUTPUT_DIR WIDTH HEIGHT [auto|4] [cpu|auto] [preserve-sar|square-sar] [copy-audio|aac] [TRUSTED_MODEL.onnx] (WIDTH=HEIGHT=0: native output)");
                 rc=1;break;
             }
             try {
@@ -432,7 +432,7 @@ int main(int argc, char* argv[]) {
                 job.hardwareDecode=cfg.hwaccel;
                 job.input=argv[2];job.outputDirectory=argv[3];job.outputWidth=std::stoi(argv[4]);job.outputHeight=std::stoi(argv[5]);
                 job.nativeOutput=job.outputWidth==0 && job.outputHeight==0;
-                job.scale=argc>6 && std::string(argv[6])!="auto"?std::stoi(argv[6]):2;job.cpu=argc>7 && std::string(argv[7])=="cpu";
+                job.scale=argc>6 && std::string(argv[6])!="auto"?std::stoi(argv[6]):4;job.cpu=argc>7 && std::string(argv[7])=="cpu";
                 job.preserveSourceSar=argc>8 && std::string(argv[8])=="preserve-sar";
                 if(argc>9) {
                     const std::string mode=argv[9];
@@ -440,9 +440,9 @@ int main(int argc, char* argv[]) {
                     job.transcodeAudio=mode=="aac";
                 }
                 job.externalModel=argc>10;
-                if (!job.externalModel && job.scale!=2)
-                    throw std::invalid_argument("Only x2 is bundled; specify MODEL.onnx for external models");
-                job.model=job.externalModel?argv[10]:Config::getResourcePath("models/realesrgan/realesrgan-x2plus.onnx");
+                if (!job.externalModel && job.scale!=4)
+                    throw std::invalid_argument("Only native x4 is bundled; use WIDTH/HEIGHT for final output size");
+                job.model=job.externalModel?argv[10]:Config::getResourcePath("models/realesrgan/realesr-general-x4v3.onnx");
                 job.runtime=VideoSuperResolutionExporter::defaultRuntimePath();
                 VideoSuperResolutionExporter exporter;
                 offlineExportInterrupted=0;

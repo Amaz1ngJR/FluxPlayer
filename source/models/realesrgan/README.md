@@ -1,65 +1,57 @@
 # 本地超分模型资源
 
-本目录保留内置的 x2 模型、源码研究用的 x4 模型及各自来源和许可，供独立的“视频超分并保存”功能使用。发行包仅含已验证的 x2 ONNX、本文档及许可；不分发 x4。模型由离线导出器加载，不接入实时播放管线。
-当前使用普通 Git 保存资源，没有配置 Git LFS。
+仅内置 `realesr-general-x4v3.onnx`，供独立的离线视频超分工具使用，不接入播放管线。
+旧 `RealESRGAN_x2plus` 已删除。两平台安装包仅部署新模型、本文档和LICENSE。
 
-## realesrgan-x2plus.onnx
+## 来源与契约
 
-- 来源：官方 Real-ESRGAN `RealESRGAN_x2plus.pth`，经本项目 P0 实验导出为 ONNX。
-- 官方权重：https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth
 - 上游：https://github.com/xinntao/Real-ESRGAN
-- 上游许可：本目录 `LICENSE`（取自 v0.3.0，BSD-3-Clause）。
-- 输入：固定 FP32 RGB NCHW `1×3×256×256`。
-- 原生倍率：2x。模型本身不包含视频解码、分块拼接或编码保存流程。
-- 文件大小：67,072,849 字节。
-- SHA-256：`872bff6e0e5a7b28f2f9ecdeb5b941f8b79b7ea26cefe01664ec8a81fc687ec0`。
+- 官方权重：https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth
+- 权重SHA-256：`8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292`。
+- 网络：SRVGGNetCompact，64 features、32 body convolutions、PReLU、原生4x，通用场景，不是动漫专用模型。
+- 输入：FP32 RGB NCHW `[1,3,256,256]`，输出 `[1,3,1024,1024]`，RGB `[0,1]`。
+- 大小：4,870,037字节（约4.64 MiB）。
+- ONNX SHA-256：`bea8545ce3d32d6025c5f6db79749d058f19c0c2e6e6f0c843704a409edc9e9a`。
+- 导出：PyTorch 2.15.0 / ONNX 1.23.2、legacy exporter、opset17，严格加载官方参数，无量化、剪枝或输入降采样。
+- 许可：BSD-3-Clause，见LICENSE。
 
-此处保存的是已运行验证的导出产物，不是原始 PyTorch 权重。历史导出环境和
-脚本仍在仓库外 P0 实验目录，尚未完整迁入；上述哈希用于核对当前部署产物，
-不能据此声称已支持从源码逐字节重现导出。
+为适配CoreML NeuralNetwork，将最后卷积48个输出通道的权重及偏置从 `c*16+offset`
+排列为 `offset*3+c`，同时将DepthToSpace从CRD改为DCR；仅改mode会导致错误画面。
+这是数学等价的布局转换，不改变参数值。CPU对照及本机16帧CoreML对照RGB8均一致，剖析确认消除CPU回落。
+不承诺所有设备位级一致，也不宣称CoreML内部全部运行于GPU/ANE。
+交付模型产物，不保留开发期转换脚本；应用运行不需要Python。
 
-## realesrgan-x4plus.onnx（仅源码保留，不随包分发）
+当前使用单个强降噪权重（官方denoise_strength=1），不包含WDN混合，不能称为官方演示默认0.5组合。
+人脸和织物可能更平滑，不保证每个素材优于旧模型。
 
-- 来源：官方 `RealESRGAN_x4plus.pth`，本机导出，不是把2x模型重命名。
-- 官方权重：https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth
-- 权重 SHA-256：`4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1`。
-- 网络：BasicSR RRDBNet，scale=4、num_feat=64、num_block=23、num_grow_ch=32；
-  `params_ema` 严格加载，FP32 eval，无量化。
-- BasicSR commit：`651835a1b9d38dbbdaf45750f56906be2364f01a`。
-- 导出环境：PyTorch 2.5.1 / ONNX 1.17.0，legacy exporter，opset 17。
-- 固定输入：RGB FP32 NCHW `1×3×256×256`，输出 `1×3×1024×1024`。
-- 文件大小：67,051,603 字节。
-- ONNX SHA-256：`c4776b0aabaf24894450ed5cbffb06537aed13392211c09752c02e14e5bd8613`。
-- 许可同上游 Real-ESRGAN，见本目录 `LICENSE`。
+## 执行与输出
 
-Mac M3 / macOS 14.8.2 / ORT 1.23.2 单块诊断：ONNX checker 通过；
-随机输入的 CPU 与 CoreML 输出尺寸/有限值检查通过，MAE 约 1.39e-7、
-P99 约 4.77e-7；profiling 记录 CoreMLExecutionProvider 执行。
-CoreML 首次推理约 1484 ms（不含约 2.03 秒会话初始化）。
-这不是完整画质、分块接缝、GUI 或持续实时播放验收，也不能确认 GPU/ANE 内部分配。
-以上是历史实验结果；运行时曾报告 OptimizationHints 版本警告，尚未解决。
-暂停预览与实时旁路不属于当前离线功能。Windows使用独立的DirectML运行库；
-本轮macOS快速路径验收不代表Windows实机验收。
+统一使用tile256、halo32、有效核心192、Reflect-101，精确输入/分块复用规则不变。
+旧2x专用的784×640整帧选择和 `FLUX_SR_FIXED_TILES` 开关已移除。
+每帧均增强，最终尺寸独立于原生倍率；默认保持源尺寸，也可选原生4x、预设或自定义画布。
+输出2x意味着4x增强后Lanczos缩小，不是原生2x。较小画布不减少模型的4x中间图。
+中间尺寸、像素数和512 MiB图像缓冲估算上限不变，大输入可能被拒绝；此上限不含ORT/设备内部资源。
 
-## 当前 macOS 执行路径
+macOS Auto：CoreML NeuralNetwork → MLProgram → CPU；Windows Auto：现有DirectML → CPU，不新增CUDA/Vulkan。
+仅在初始化时回退，运行中不切换模型/精度。新模型Windows仍待SDK构建及DirectML实测。
+FP32输入输出和 `AllowLowPrecisionAccumulationOnGPU=0` 不保证CoreML内部纯FP32。
+`FLUX_SR_COREML_MODEL_FORMAT=MLProgram`用于诊断。内置模型编译缓存按模型散列、ORT版本及EP配置隔离，
+外部模型不复用持久编译缓存。音轨保留、编码器策略不变。
 
-Auto默认使用CoreML `NeuralNetwork`快速路径；内置 x2 与兼容外部模型共用原ONNX、权重及
-tile256/halo32。模型文件和输入输出仍为FP32，但内部允许设备相关的FP16精度，
-不保证与标准路径逐像素一致；`AllowLowPrecisionAccumulationOnGPU=0`不改变这一点。
-初始化失败按快速CoreML、标准`MLProgram`、CPU的顺序重试，仅在输出开始前发生。
-环境变量 `FLUX_SR_COREML_MODEL_FORMAT=MLProgram` 可用于标准FP32对照；
-强制CPU模式不受该变量影响。两种CoreML格式的编译缓存独立，首次加载会另行编译。
+Mac M3上两个64帧任务（每段16帧重复4遍，无精确复用）：新模型约2.79fps，旧整帧2x约2.43–2.46fps，
+吞吐提高约13%–15%。不是Windows、长片或所有分辨率的性能承诺。
 
-2026-10-20的实拍/适配器及短片回归见
-`docs/macOS离线超分硬解码验证记录.md`第12/13节。历史数值不代表快速路径同精度，
-短片通过也不等于任意素材和完整画质均已验收。
+随后仅优化输出调度，不改模型或推理：将RGB→YUV/Lanczos和编码放在已有writer，与下一帧推理重叠。
+两组同轮64帧实测从约2.93/3.11fps到3.52fps，像素及时间戳一致；不应和上一轮冷/热缓存数值混算。
+最多额外持有两帧对齐RGB，计入512 MiB图像预算；预算不足回到原串行转换，不拒绝原本可完成的任务。
+`FLUX_SR_SERIAL_OUTPUT=1`用于同构建对照，`FLUX_SR_SERIAL_ENCODE=1`恢复完全串行；无需UI/INI新选项。
+这段平台无关C++逻辑保留Windows兼容，但新路径仍待Windows真机性能/取消验收。
 
-## 资源管理
+## 外部模型与分发
 
-仅提交本目录的 `.onnx`、本文件和 `LICENSE`，不要提交 build 下的副本。
-模型部署采用白名单，仅内置 x2 保留固定 SHA-256 校验。外部模型通过文件选择器加载：必须是可信来源的 ONNX，恰有一个 FP32 RGB NCHW 输入和一个同类型输出。输入必须能接受 `[1,3,256,256]`；输出必须为 `[1,3,256*s,256*s]`。加载时执行一次真实推理，按实际输出自动识别等比整数倍率 `s`，不限定 2x/4x，也不需手动选择倍率。当前输出 tile 边长上限为 4096，即 `1 <= s <= 16`；动态维度可在实际满足此契约时使用，`.pth` 不受支持。归一化 RGB 输入/输出范围约定为 `[0,1]`，必须兼容 tile=256、halo=32、有效核心192 的 Reflect-101 分块推理，ORT 还必须支持其算子。每帧输出必须保持已识别形状，源/中间/最终尺寸和图像缓冲仍有安全上限。形状检查不能证明模型的 RGB 语义、画质或可信性，不代表任意 ONNX 可用。
-外部模型不复用 CoreML 持久编译缓存，避免独立权重文件变化而主 ONNX 散列不变造成缓存污染。
-不要以运行库或模型缺失时的CPU/初始化失败结果冒充快速路径性能。
+可选择可信ONNX，不支持PTH。须有单个FP32 RGB NCHW输入/输出，输入可接受 `[1,3,256,256]`，
+实际输出为 `[1,3,256*s,256*s]`，等比整数倍率1–16、输出tile边长不超过4096。
+动态维度仅在真实推理满足契约时支持；创建输出前校验并识别倍率。形状不能证明RGB语义或画质。
+安全检查、归一化、分块及有限值要求不因外部模型而放宽。
 
-模型较大，频繁替换会增大普通 Git 历史；若迁移 LFS，必须同时配置团队和 CI 的
-LFS 拉取流程，不可只提交一个本地无法还原的 LFS 指针。
+仅提交本目录模型、README和LICENSE，不提交build下实验、缓存及部署副本；使用普通Git，不使用LFS。

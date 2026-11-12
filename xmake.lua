@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.9.5"
+local version = "0.9.6"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -391,12 +391,12 @@ target("FluxPlayer")
         local resources_dir = path.join(target:targetdir(), "resources")
         os.mkdir(resources_dir)
         cp_if_changed("source/pic2.png", resources_dir)
-        -- 模型采用明确白名单；清理两个部署目录，避免增量构建残留 x4。
+        -- 模型采用明确白名单；清理两个部署目录，避免增量构建残留旧模型。
         for _, base in ipairs({source_dst, resources_dir}) do
             local model_dir = path.join(base, "models/realesrgan")
             os.tryrm(model_dir)
             os.mkdir(model_dir)
-            for _, name in ipairs({"realesrgan-x2plus.onnx", "LICENSE", "README.md"}) do
+            for _, name in ipairs({"realesr-general-x4v3.onnx", "LICENSE", "README.md"}) do
                 cp_if_changed(path.join("source/models/realesrgan", name), model_dir)
             end
         end

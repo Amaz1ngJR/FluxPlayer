@@ -6,7 +6,7 @@
 #include <vector>
 
 namespace FluxPlayer {
-/// 私有模型适配器：固定 256 tile、32 像素 halo，输出有效 RGB24 图像。
+/// 私有模型适配器：256 分块、32 像素 halo，输出有效 RGB24 图像。
 class RealESRGAN {
 public:
     RealESRGAN();
@@ -21,6 +21,8 @@ public:
                  std::vector<uint8_t>& result, const std::atomic<bool>& cancelled,
                  const std::vector<uint8_t>& previousRgb);
     uint64_t reusedTiles() const;
+    /// Planned host FP32 tensor storage; excludes EP/device intermediates.
+    uint64_t tensorBufferBytes() const;
     /// 返回模型加载后的原生倍率（外部模型通过实际推理输出识别）。
     int scale() const;
     /// 实际会话 EP 描述，不宣称全部 GPU/ANE。

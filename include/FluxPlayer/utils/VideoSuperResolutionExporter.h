@@ -7,7 +7,7 @@ namespace FluxPlayer {
 /// 单个离线任务的不可变配置；路径由 UI 在开始时复制，不在 Worker 读取 Config。
 struct SuperResolutionJob {
     std::string input, outputDirectory, model, runtime;
-    int scale = 2;
+    int scale = 4;
     bool nativeOutput = false; ///< Use the model's detected native dimensions after model validation.
     int outputWidth = 0, outputHeight = 0;
     bool cpu = false;

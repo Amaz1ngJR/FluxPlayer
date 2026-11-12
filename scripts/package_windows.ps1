@@ -133,6 +133,16 @@ Step "icon" {
 }
 
 # ── 2. CMake 构建（Release 模式）──────────────────────────────────────────────
+# Windows 不允许覆盖正在运行的 exe；只检查当前仓库的产物，避免误报已安装版本。
+$playerExe = [System.IO.Path]::GetFullPath((Join-Path $root 'build\bin\FluxPlayer.exe'))
+$runningPlayers = @(Get-Process -Name FluxPlayer -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and [string]::Equals($_.Path, $playerExe, [System.StringComparison]::OrdinalIgnoreCase)
+})
+if ($runningPlayers.Count -gt 0) {
+    $processIds = ($runningPlayers | ForEach-Object { $_.Id }) -join ', '
+    throw "Cannot build while $playerExe is running (PID: $processIds). Close this FluxPlayer instance and run the packaging script again."
+}
+
 # 打包流程每次都会先显式执行 configure，所以不需要 Ninja 再启动 CMake 检查 glob。
 # 当前 MSYS2 CMake 4.4 在 Ninja 子进程中执行 VerifyGlobs.cmake 时可能长期阻塞；
 # 关闭自动再生成只作用于这个打包专用目录，新增源文件仍会在上面的 configure 中发现。
@@ -230,13 +240,15 @@ foreach ($line in Get-Content -LiteralPath $ortManifest) {
         }
     }
 }
-foreach ($name in @("realesrgan-x2plus.onnx", "LICENSE", "README.md")) {
+foreach ($name in @("realesr-general-x4v3.onnx", "LICENSE", "README.md")) {
     if (-not (Test-Path -LiteralPath "$stage\resources\models\realesrgan\$name" -PathType Leaf)) {
         throw "Offline SR model resource missing: $name"
     }
 }
-if (Test-Path -LiteralPath "$stage\resources\models\realesrgan\realesrgan-x4plus.onnx") {
-    throw "The source x4 model must not be included in the installer staging directory."
+foreach ($model in Get-ChildItem -LiteralPath "$stage\resources\models\realesrgan" -Filter "*.onnx" -File) {
+    if ($model.Name -ne "realesr-general-x4v3.onnx") {
+        throw "Unexpected bundled model in installer staging: $($model.Name)"
+    }
 }
 foreach ($directory in @("shaders", "fonts")) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage $directory) -PathType Container)) {

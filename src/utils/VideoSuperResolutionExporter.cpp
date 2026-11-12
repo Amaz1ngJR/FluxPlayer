@@ -99,7 +99,7 @@ void validateFrame(const AVFrame* f) {
     if (f->crop_left || f->crop_right || f->crop_top || f->crop_bottom) throw std::runtime_error("Frame crop is not supported yet");
     if(av_frame_get_side_data(f,AV_FRAME_DATA_DISPLAYMATRIX))throw std::runtime_error("Per-frame display matrices are not supported");
 }
-/// 单个任务的 FFmpeg/文件资源仅由 Worker 持有；析构不发布成功。
+/// 任务独占上下文；输出转换/编码可交接给单个 writer，复用音频前必须等待；析构不发布成功。
 struct Pipeline {
     SuperResolutionJob job;
     std::atomic<bool>& cancelled;
@@ -111,6 +111,7 @@ struct Pipeline {
     Codec encode;
     std::unique_ptr<SRSerialWorker> frameWriter;
     bool encodePending = false;
+    bool canOverlapOutput = false, overlapOutput = false;
     struct OutputFormat {
         AVPixelFormat pix_fmt = AV_PIX_FMT_YUV420P;
         AVRational sample_aspect_ratio{1,1};
@@ -120,6 +121,7 @@ struct Pipeline {
         AVColorTransferCharacteristic color_trc = AVCOL_TRC_UNSPECIFIED;
     } outputFormat;
     std::atomic<int64_t> encodeNanoseconds{0};
+    std::atomic<int64_t> outputNanoseconds{0};
     std::unique_ptr<SRAudioTranscoder> audioTranscoder;
     bool copyAudioTrack = false;
     std::string container = "mp4";
@@ -144,7 +146,7 @@ struct Pipeline {
     int coefficients=SWS_CS_ITU709;
     int64_t frames = 0;
     int64_t enhancedFrames = 0;
-    double rgbSeconds = 0, inferenceSeconds = 0, outputSeconds = 0;
+    double rgbSeconds = 0, inferenceSeconds = 0;
     double colorSeconds = 0;
     std::map<int64_t, int64_t> durations;
     Pipeline(const SuperResolutionJob& j, std::atomic<bool>& c, decltype(update) u) : job(j), cancelled(c), update(std::move(u)) {}
@@ -172,7 +174,7 @@ struct Pipeline {
     void openInput(bool openVideoDecoder = true) {
         stage("probing", "Probing source and validating export configuration");
         if (!fs::is_regular_file(fs::u8path(job.input))) throw std::runtime_error("Input must be one local regular file");
-        if (!job.externalModel && job.scale!=2)throw std::runtime_error("Bundled model must use native scale 2");
+        if (!job.externalModel && job.scale!=4)throw std::runtime_error("Bundled model must use native scale 4");
         if (!job.nativeOutput) {
             sizeCheck(job.outputWidth,job.outputHeight);
             if (job.outputWidth%2 || job.outputHeight%2) throw std::runtime_error("Output dimensions must be even");
@@ -262,8 +264,12 @@ struct Pipeline {
         uint64_t rgbFrameBytes=0;
         for(const auto* buffer:rgbFrame->buf)if(buffer)rgbFrameBytes+=buffer->size;
         const uint64_t pixelBytes=uint64_t(sourceW)*sourceH*(6+3*job.scale*job.scale)+uint64_t(job.outputWidth)*job.outputHeight*6+
-            uint64_t(3)*256*256*(1+job.scale*job.scale)*sizeof(float)+colors.scratchBytes()+decode.scratchBytes()+rgbFrameBytes;
+            model.tensorBufferBytes()+colors.scratchBytes()+decode.scratchBytes()+rgbFrameBytes;
         if(pixelBytes>512ULL*1024*1024)throw std::runtime_error("Image buffers exceed 512 MiB safety budget");
+        // One queued RGB frame and one in the writer; include conservative row/height padding.
+        const uint64_t rgbStride=(uint64_t(sourceW)*job.scale*3+63)/64*64;
+        const uint64_t rgbRows=(uint64_t(sourceH)*job.scale+63)/64*64+64;
+        canOverlapOutput=pixelBytes+2*(rgbStride*rgbRows+64)<=512ULL*1024*1024;
         if (sourceW != video->codecpar->width || sourceH != video->codecpar->height) throw std::runtime_error("Source dimensions changed during decode");
         // FFmpeg 4.x VideoToolbox 在 VFR 样本上产生 PTS<DTS；先使用支持源时序的 libx264。
         // 未经验证的硬件编码器不能在写输出后静默切换。
@@ -409,7 +415,14 @@ struct Pipeline {
         if(!frameWriter) {encodeFrame(frame);++frames;return;}
         auto copy=std::shared_ptr<AVFrame>(av_frame_clone(frame),FrameDelete{});
         if(!copy)throw std::bad_alloc();
-        frameWriter->submit([this,copy]{stopCheck();encodeFrame(copy.get());});
+        frameWriter->submit([this,copy]{
+            stopCheck();
+            if(copy->format==AV_PIX_FMT_RGB24) {
+                auto converted=convertOutput(copy->data[0],copy->linesize[0]);
+                converted->pts=copy->pts;setDuration(converted.get(),getDuration(copy.get()));
+                stopCheck();encodeFrame(converted.get());
+            } else encodeFrame(copy.get());
+        });
         encodePending=true;
     }
     Frame convert(const AVFrame* source) {
@@ -451,6 +464,26 @@ struct Pipeline {
         stopCheck();
         const auto outputStart=Clock::now();
         inferenceSeconds+=std::chrono::duration<double>(outputStart-inferenceStart).count();
+        if(overlapOutput) {
+            auto pending=newFrame();pending->width=sourceW*job.scale;pending->height=sourceH*job.scale;
+            pending->format=AV_PIX_FMT_RGB24;
+            check(av_frame_get_buffer(pending.get(),32),"Allocate queued SR RGB frame");
+            const size_t bytes=size_t(pending->width)*3;
+            for(int row=0;row<pending->height;++row)
+                std::memcpy(pending->data[0]+size_t(row)*pending->linesize[0],enhancedBuffer.data()+size_t(row)*bytes,bytes);
+            outputNanoseconds.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-outputStart).count(),std::memory_order_relaxed);
+            ++enhancedFrames;
+            if(enhancedFrames==1 || enhancedFrames%30==0)logPerformance();
+            return pending;
+        }
+        auto target=convertOutput(enhancedBuffer.data(),sourceW*job.scale*3);
+        ++enhancedFrames;
+        if(enhancedFrames==1 || enhancedFrames%30==0) logPerformance();
+        return target;
+    }
+    // Only the writer accesses toYuv in overlap mode; otherwise only the pipeline worker does.
+    Frame convertOutput(const uint8_t* rgb,int stride) {
+        const auto outputStart=Clock::now();
         auto target=newFrame(); target->width=job.outputWidth; target->height=job.outputHeight; target->format=outputFormat.pix_fmt;
         target->sample_aspect_ratio=outputFormat.sample_aspect_ratio; target->color_range=outputFormat.color_range;
         target->colorspace=outputFormat.colorspace; target->color_primaries=outputFormat.color_primaries; target->color_trc=outputFormat.color_trc;
@@ -467,11 +500,9 @@ struct Pipeline {
             if (!toYuv) throw std::runtime_error("Cannot create output converter");
             check(sws_setColorspaceDetails(toYuv.get(),sws_getCoefficients(coefficients),1,sws_getCoefficients(coefficients),0,0,1<<16,1<<16),"Output matrix");
         }
-        const uint8_t* src[]={enhancedBuffer.data(),nullptr,nullptr,nullptr};int strides[]={sourceW*job.scale*3,0,0,0};
+        const uint8_t* src[]={rgb,nullptr,nullptr,nullptr};int strides[]={stride,0,0,0};
         if (sws_scale(toYuv.get(),src,strides,0,sourceH*job.scale,planes,target->linesize)!=h) throw std::runtime_error("Incomplete output conversion");
-        outputSeconds+=std::chrono::duration<double>(Clock::now()-outputStart).count();
-        ++enhancedFrames;
-        if(enhancedFrames==1 || enhancedFrames%30==0) logPerformance();
+        outputNanoseconds.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-outputStart).count(),std::memory_order_relaxed);
         return target;
     }
     void logPerformance() const {
@@ -480,7 +511,7 @@ struct Pipeline {
             ", color ms/frame="+std::to_string(colorSeconds*1000/enhancedFrames)+
             ", RGB ms/frame="+std::to_string(rgbSeconds*1000/enhancedFrames)+
             ", model+tiles ms/frame="+std::to_string(inferenceSeconds*1000/enhancedFrames)+
-            ", output scale ms/frame="+std::to_string(outputSeconds*1000/enhancedFrames)+
+            ", output scale/copy ms/frame="+std::to_string(double(outputNanoseconds.load(std::memory_order_relaxed))/1e6/enhancedFrames)+
             ", encode/mux ms/frame="+std::to_string(double(encodeNanoseconds.load(std::memory_order_relaxed))/1e6/enhancedFrames)+
             ", exact-input reuse="+std::to_string(reusedFrames)+
             ", exact-tile reuse="+std::to_string(model.reusedTiles()));
@@ -637,6 +668,9 @@ struct Pipeline {
             try {frameWriter=std::make_unique<SRSerialWorker>();}
             catch(const std::system_error& e){LOG_WARN(std::string("Offline SR: using serial encoding: ")+e.what());}
         }
+        const char* serialOutput=std::getenv("FLUX_SR_SERIAL_OUTPUT");
+        overlapOutput=frameWriter && canOverlapOutput && !(serialOutput && std::string(serialOutput)=="1");
+        LOG_INFO(std::string("Offline SR output conversion: ")+(overlapOutput?"bounded RGB conversion+encode overlap":"serial conversion"));
         LOG_INFO(std::string("Offline SR encoding: ")+(frameWriter?"bounded one-frame overlap":"serial reference"));
         for (auto& saved:earlyAudio) copyAudio(saved.get());earlyAudio.clear();
         stage("processing","Enhancing every decoded video frame");

@@ -126,7 +126,7 @@ struct SuperResolutionScreen::Impl {
     std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
     SourceInfo source;
     std::string path, error, mode = "source", device = "auto", externalModel;
-    int scale = 2, customWidth = 1280, customHeight = 720;
+    int scale = 4, customWidth = 1280, customHeight = 720;
     bool transcodeAudio = false;
     unsigned texture = 0;
     uint64_t previewGeneration = 0;
@@ -160,7 +160,7 @@ struct SuperResolutionScreen::Impl {
         texture = 0;
     }
     std::string modelPath() const {
-        return externalModel.empty() ? Config::getResourcePath("models/realesrgan/realesrgan-x2plus.onnx") : externalModel;
+        return externalModel.empty() ? Config::getResourcePath("models/realesrgan/realesr-general-x4v3.onnx") : externalModel;
     }
     bool modelAvailable() const {
         std::error_code ec;
@@ -377,7 +377,7 @@ struct SuperResolutionScreen::Impl {
             error.clear();
         } else if (action == "srSetModel" && v == "2") {
             externalModel.clear();
-            scale = 2;
+            scale = 4;
             error.clear();
 
         } else if (action == "srSetResolution") {

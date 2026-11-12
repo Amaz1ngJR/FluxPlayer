@@ -18,6 +18,9 @@ extern "C" {
 #include <libavutil/mem.h>
 }
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <dxgi1_6.h>
 #else
@@ -30,7 +33,7 @@ using SRClock = std::chrono::steady_clock;
 double milliseconds(SRClock::time_point from, SRClock::time_point to) {
     return std::chrono::duration<double,std::milli>(to-from).count();
 }
-constexpr int kTile = 256, kHalo = 32, kCore = kTile - 2 * kHalo;
+constexpr int kTile = 256, kHalo = 32;
 /// 模型哈希锁定导出产物，禁止同名替换导致形状/前处理契约失效。
 std::string modelHash(const std::string& path) {
     std::ifstream input(std::filesystem::u8path(path), std::ios::binary);
@@ -54,7 +57,10 @@ int reflect(int x, int length) {
     return x;
 }
 #ifdef _WIN32
-struct SrAdapter { unsigned index = 0; std::string name = "adapter 0"; };
+struct SrAdapter {
+    unsigned index = 0;
+    std::string name = "adapter 0";
+};
 SrAdapter preferredSrAdapter() {
     SrAdapter result;
     IDXGIFactory1* factory = nullptr;
@@ -77,14 +83,15 @@ SrAdapter preferredSrAdapter() {
         IDXGIAdapter1* adapter = nullptr;
         if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
         if (!adapter) break;
-        DXGI_ADAPTER_DESC1 desc{}; const HRESULT rc = adapter->GetDesc1(&desc); adapter->Release();
-        if (FAILED(rc) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
+        DXGI_ADAPTER_DESC1 desc{}; const HRESULT rc = adapter->GetDesc1(&desc);
+        if (FAILED(rc) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {adapter->Release();continue;}
         const bool matches = havePreferred && desc.AdapterLuid.HighPart == preferred.HighPart && desc.AdapterLuid.LowPart == preferred.LowPart;
         if (matches || (!havePreferred && (!selected || desc.DedicatedVideoMemory > largestMemory))) {
             result.index = i; result.name = std::filesystem::path(desc.Description).u8string();
             largestMemory = desc.DedicatedVideoMemory; selected = true;
-            if (matches) break;
+            if (matches) {adapter->Release();break;}
         }
+        adapter->Release();
     }
     factory->Release();
     return result;
@@ -108,10 +115,11 @@ struct RealESRGAN::Impl {
     OrtAllocator* allocator = nullptr;
     std::string inputName, outputName, provider, digest, runtimeVersion;
     bool externalModel = false;
+    int tileWidth = kTile, tileHeight = kTile;
     std::vector<float> inputBuffer, outputBuffer;
     OrtValue *inputTensor = nullptr, *outputTensor = nullptr;
     std::array<float,256> normalized{};
-    std::vector<std::array<int,kTile>> reflectedX, reflectedY;
+    std::vector<std::vector<int>> reflectedX, reflectedY;
     int indexedWidth = 0, indexedHeight = 0;
     static int scaleFromShape(const std::array<int64_t,4>& shape) {
         if (shape[0]!=1 || shape[1]!=3 || shape[2]<=0 || shape[2]!=shape[3] || shape[2]%kTile)
@@ -148,26 +156,29 @@ struct RealESRGAN::Impl {
     }
     void prepareInput(int width,int height) {
         if(!inputTensor) {
-            inputBuffer.resize(3*kTile*kTile);
-            const int64_t shape[]={1,3,kTile,kTile};
+            inputBuffer.resize(size_t(3)*tileWidth*tileHeight);
+            const int64_t shape[]={1,3,tileHeight,tileWidth};
             check(api->CreateTensorWithDataAsOrtValue(memory,inputBuffer.data(),inputBuffer.size()*sizeof(float),
                 shape,4,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&inputTensor));
             for(size_t i=0;i<normalized.size();++i)normalized[i]=float(i)/255.f;
-            const int side=kTile*scale;
-            outputBuffer.resize(size_t(3)*side*side);
-            const int64_t outputShape[]={1,3,side,side};
+            const int outW=tileWidth*scale,outH=tileHeight*scale;
+            outputBuffer.resize(size_t(3)*outW*outH);
+            const int64_t outputShape[]={1,3,outH,outW};
             check(api->CreateTensorWithDataAsOrtValue(memory,outputBuffer.data(),outputBuffer.size()*sizeof(float),
                 outputShape,4,ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,&outputTensor));
         }
         if(indexedWidth==width && indexedHeight==height)return;
-        reflectedX.resize((width+kCore-1)/kCore);reflectedY.resize((height+kCore-1)/kCore);
+        const int coreW=tileWidth-2*kHalo,coreH=tileHeight-2*kHalo;
+        reflectedX.resize((width+coreW-1)/coreW);reflectedY.resize((height+coreH-1)/coreH);
         for(size_t block=0;block<reflectedX.size();++block)
-            for(int i=0;i<kTile;++i)reflectedX[block][i]=reflect(int(block)*kCore+i-kHalo,width);
+        { reflectedX[block].resize(tileWidth);
+            for(int i=0;i<tileWidth;++i)reflectedX[block][i]=reflect(int(block)*coreW+i-kHalo,width); }
         for(size_t block=0;block<reflectedY.size();++block)
-            for(int i=0;i<kTile;++i)reflectedY[block][i]=reflect(int(block)*kCore+i-kHalo,height);
+        { reflectedY[block].resize(tileHeight);
+            for(int i=0;i<tileHeight;++i)reflectedY[block][i]=reflect(int(block)*coreH+i-kHalo,height); }
         indexedWidth=width;indexedHeight=height;
     }
-    int scale = 2;
+    int scale = 4;
     bool profiling = false;
     unsigned profileRuns = 0;
     void endProfile() noexcept {
@@ -215,6 +226,16 @@ struct RealESRGAN::Impl {
         api->ReleaseStatus(status);
         throw std::runtime_error("ORT: " + message);
     }
+    void resetSession() {
+        endProfile();
+        if(inputTensor)api->ReleaseValue(inputTensor);
+        if(outputTensor)api->ReleaseValue(outputTensor);
+        if(session)api->ReleaseSession(session);
+        inputTensor=nullptr;outputTensor=nullptr;session=nullptr;
+        std::vector<float>().swap(inputBuffer);std::vector<float>().swap(outputBuffer);
+        reflectedX.clear();reflectedY.clear();
+        indexedWidth=0;indexedHeight=0;
+    }
     void createSession(const std::string& model, bool accelerated) {
         OrtSessionOptions* raw = nullptr;
         check(api->CreateSessionOptions(&raw));
@@ -246,7 +267,7 @@ struct RealESRGAN::Impl {
             }
             // 编译缓存以真实 ORT 版本、已校验模型及固定 EP/shape 配置隔离。
             auto cache=std::filesystem::u8path(Config::getAppDataDir())/"sr-coreml"/
-                (runtimeVersion+"-"+digest+"-256-"+coremlFormat+"-"+computeUnits+"-static-acc32");
+                (runtimeVersion+"-"+digest+"-"+std::to_string(tileWidth)+"x"+std::to_string(tileHeight)+"-"+coremlFormat+"-"+computeUnits+"-static-acc32");
             std::error_code ec;
             if (!externalModel) std::filesystem::create_directories(cache,ec);
             const std::string cachePath=cache.u8string();
@@ -325,9 +346,10 @@ struct RealESRGAN::Impl {
         if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || count != 4) throw std::runtime_error("Expected FP32 NCHW model");
         std::array<int64_t,4> shape{};
         check(api->GetDimensions(tensor, shape.data(), shape.size()));
-        const int side = output ? kTile * scale : kTile;
+        const int expectedW = output ? tileWidth * scale : tileWidth;
+        const int expectedH = output ? tileHeight * scale : tileHeight;
         if (!externalModel) {
-            if (shape != std::array<int64_t,4>{1,3,side,side}) throw std::runtime_error("Bundled model shape is invalid");
+            if (shape != std::array<int64_t,4>{1,3,expectedH,expectedW}) throw std::runtime_error("Bundled model shape is invalid");
         } else if (!output) {
             const std::array<int64_t,4> expected{1,3,kTile,kTile};
             for (size_t i=0;i<shape.size();++i)
@@ -357,11 +379,10 @@ void RealESRGAN::load(const std::string& library, const std::string& model, int 
     std::string extension=modelPath.extension().u8string();
     std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
     if (extension!=".onnx") throw std::runtime_error("External models must use the .onnx file format");
-    if (!externalModel && scale != 2) throw std::runtime_error("Bundled model must be the verified x2 model");
     const std::string digest=modelHash(model);
     if (!externalModel) {
-        if (scale != 2 || digest != "872bff6e0e5a7b28f2f9ecdeb5b941f8b79b7ea26cefe01664ec8a81fc687ec0")
-            throw std::runtime_error("Bundled model must be the verified x2 model");
+        if (scale != 4 || digest != "bea8545ce3d32d6025c5f6db79749d058f19c0c2e6e6f0c843704a409edc9e9a")
+            throw std::runtime_error("Bundled model must be the verified realesr-general-x4v3 model");
     }
     p.digest=digest;
 #ifdef _WIN32
@@ -390,11 +411,16 @@ void RealESRGAN::load(const std::string& library, const std::string& model, int 
         }
 #endif
         auto tryAccelerated = [&] {
-            try { p.createSession(model, true); }
+            auto attempt=[&] {
+                p.createSession(model,true);
+                if(!externalModel) {
+                    p.validate(false);p.validate(true);
+                }
+            };
+            try { attempt(); }
             catch (const std::exception& e) {
                 LOG_WARN(std::string("Accelerated SR initialization failed before output: ") + e.what());
-                if (p.session) p.api->ReleaseSession(p.session);
-                p.session = nullptr;
+                p.resetSession();
             }
         };
         tryAccelerated();
@@ -411,7 +437,6 @@ void RealESRGAN::load(const std::string& library, const std::string& model, int 
         auto inspect=[&] {
             p.validate(false); p.validate(true);
             if(p.externalModel)p.detectScale();
-            else if(scale!=2)throw std::runtime_error("Bundled model must be the verified x2 model");
         };
         if(p.externalModel) {
             p.scale=0;
@@ -431,11 +456,15 @@ void RealESRGAN::load(const std::string& library, const std::string& model, int 
             if(!p.session)p.createSession(model,false);
             p.validate(false);p.validate(true);
         }
-    LOG_INFO("Offline SR: ORT " + std::string(entry()->GetVersionString()) + ", " + p.provider + ", tile=256 halo=32, detected scale="+std::to_string(p.scale)+"x, load ms="+std::to_string(milliseconds(loadStart,SRClock::now())));
+    LOG_INFO("Offline SR: ORT " + std::string(entry()->GetVersionString()) + ", " + p.provider + ", tile="+std::to_string(p.tileWidth)+"x"+std::to_string(p.tileHeight)+" halo=32, detected scale="+std::to_string(p.scale)+"x, load ms="+std::to_string(milliseconds(loadStart,SRClock::now())));
 }
 int RealESRGAN::scale() const { return impl_->scale; }
 std::string RealESRGAN::device() const { return impl_->provider; }
 uint64_t RealESRGAN::reusedTiles() const { return impl_->reusedTileCount; }
+uint64_t RealESRGAN::tensorBufferBytes() const {
+    const auto& p=*impl_;
+    return uint64_t(3)*p.tileWidth*p.tileHeight*(1+uint64_t(p.scale)*p.scale)*sizeof(float);
+}
 void RealESRGAN::enhance(const std::vector<uint8_t>& rgb, int width, int height, std::vector<uint8_t>& result, const std::atomic<bool>& cancelled,
                         const std::vector<uint8_t>& previousRgb) {
     auto& p = *impl_;
@@ -443,7 +472,9 @@ void RealESRGAN::enhance(const std::vector<uint8_t>& rgb, int width, int height,
         throw std::runtime_error("Invalid RGB input");
     const int64_t wide=int64_t(width)*p.scale, high=int64_t(height)*p.scale;
     if (wide > 8192 || high > 8192 || wide * high > 7680LL * 4320) throw std::runtime_error("Intermediate size limit exceeded");
-    const int ow=static_cast<int>(wide), oh=static_cast<int>(high), side=kTile*p.scale;
+    const int ow=static_cast<int>(wide), oh=static_cast<int>(high);
+    const int tw=p.tileWidth,th=p.tileHeight,coreW=tw-2*kHalo,coreH=th-2*kHalo;
+    const int outW=tw*p.scale,outH=th*p.scale;
     const auto prepareStart=SRClock::now();
     double prepare=0,run=0,stitch=0;
     int tiles=0;
@@ -459,19 +490,19 @@ void RealESRGAN::enhance(const std::vector<uint8_t>& rgb, int width, int height,
     const char* inputName = p.inputName.c_str(); const char* outputName = p.outputName.c_str();
     const OrtValue* inputs[] = {p.inputTensor};
     prepare+=milliseconds(prepareStart,SRClock::now());
-    for (int y = 0; y < height; y += kCore) for (int x = 0; x < width; x += kCore) {
+    for (int y = 0; y < height; y += coreH) for (int x = 0; x < width; x += coreW) {
         const auto tileStart=SRClock::now();
         if (cancelled.load()) throw std::runtime_error("Cancelled");
-        const auto& xs=p.reflectedX[x/kCore];const auto& ys=p.reflectedY[y/kCore];
+        const auto& xs=p.reflectedX[x/coreW];const auto& ys=p.reflectedY[y/coreH];
         bool identical=canReuse;
-        for (int ty = 0; ty < kTile; ++ty) {
+        for (int ty = 0; ty < th; ++ty) {
             const size_t row=size_t(ys[ty])*width*3;
-            for (int tx = 0; tx < kTile; ++tx) {
+            for (int tx = 0; tx < tw; ++tx) {
                 const size_t source=row+size_t(xs[tx])*3;
                 // 包括 halo 和 Reflect-101 后的全部输入，不能仅比较输出核心区域。
                 if(identical && (rgb[source]!=previousRgb[source] || rgb[source+1]!=previousRgb[source+1] || rgb[source+2]!=previousRgb[source+2]))
                     identical=false;
-                for (int c = 0; c < 3; ++c) input[c * kTile * kTile + ty * kTile + tx] = p.normalized[rgb[source+c]];
+                for (int c = 0; c < 3; ++c) input[size_t(c) * tw * th + ty * tw + tx] = p.normalized[rgb[source+c]];
             }
         }
         OrtValue* rawOutput = p.outputTensor;
@@ -485,10 +516,10 @@ void RealESRGAN::enhance(const std::vector<uint8_t>& rgb, int width, int height,
         if (cancelled.load()) throw std::runtime_error("Cancelled");
         float* values = nullptr;
         p.check(p.api->GetTensorMutableData(rawOutput, reinterpret_cast<void**>(&values)));
-        for (int dy = 0; dy < std::min(kCore,height-y)*p.scale; ++dy) {
-            const size_t offset = size_t(dy+kHalo*p.scale)*side+kHalo*p.scale;
-            pack(values+offset, values+size_t(side)*side+offset, values+size_t(2)*side*side+offset,
-                result.data()+(size_t(y*p.scale+dy)*ow+x*p.scale)*3, size_t(std::min(kCore,width-x))*p.scale);
+        for (int dy = 0; dy < std::min(coreH,height-y)*p.scale; ++dy) {
+            const size_t offset = size_t(dy+kHalo*p.scale)*outW+kHalo*p.scale;
+            pack(values+offset, values+size_t(outW)*outH+offset, values+size_t(2)*outW*outH+offset,
+                result.data()+(size_t(y*p.scale+dy)*ow+x*p.scale)*3, size_t(std::min(coreW,width-x))*p.scale);
         }
         stitch+=milliseconds(stitchStart,SRClock::now());++tiles;
     }
