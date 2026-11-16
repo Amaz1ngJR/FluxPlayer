@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 收集 macOS FFmpeg 动态库依赖，修复安装路径并签名。
-支持用项目补丁构建的 libavformat 替换 Homebrew 对应库，其余编码能力保持不变。
+收集共同 FFmpeg 7 基线构建的完整库组，默认仅发布候选目录。
 """
 import argparse
 import hashlib
@@ -14,7 +14,16 @@ import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CORE_LIBS = ("avformat", "avcodec", "avutil", "swscale", "swresample")
+CORE_LIBS = {
+    "avformat": 61,
+    "avcodec": 61,
+    "avutil": 59,
+    "swscale": 8,
+    "swresample": 5,
+    "avfilter": 10,
+    "avdevice": 61,
+}
+SOURCE_REF = "5a1f107b4c78318f318897900acad1b6c6aa3f9d"
 
 
 def run(*args):
@@ -22,13 +31,11 @@ def run(*args):
     return subprocess.run(args, check=True, text=True, capture_output=True).stdout
 
 
-def brew_prefix(formula=None):
+def brew_prefix():
     env = dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1")
     args = ["brew", "--prefix"]
-    root = Path(subprocess.run(args, env=env, check=True, text=True,
+    return Path(subprocess.run(args, env=env, check=True, text=True,
                                capture_output=True).stdout.strip()).resolve()
-    # 已安装的 opt 链接可直接读取，避免公式查询触发 Homebrew 的联网更新。
-    return (root / "opt" / formula).resolve(strict=True) if formula else root
 
 
 def install_name(binary):
@@ -134,21 +141,33 @@ def publish_bundle(args, prefix, output, roots, visited, edges):
                     raise RuntimeError(f"打包后依赖不完整：{name}: {ref}")
             run("codesign", "--verify", "--strict", str(target))
         patch_info = []
-        if args.patch_file:
-            patch_path = args.patch_file.resolve(strict=True)
-            try:
-                recorded_path = str(patch_path.relative_to(PROJECT_ROOT))
-            except ValueError:
-                recorded_path = patch_path.name
-            patch_info.append({"file": recorded_path, "sha256": sha256(patch_path)})
+        series = PROJECT_ROOT / "scripts/ffmpeg/patches/series"
+        for line in series.read_text().splitlines():
+            if not line or line.startswith("#"):
+                continue
+            if Path(line).name != line or ".." in line:
+                raise RuntimeError("Invalid patch series")
+            patch_path = series.parent / line
+            patch_info.append({"file": str(patch_path.relative_to(PROJECT_ROOT)), "sha256": sha256(patch_path)})
+        if not patch_info:
+            raise RuntimeError("Empty patch series")
+        provenance = json.loads((prefix / "flux-build.json").read_text())
+        if provenance != {"sourceRef": SOURCE_REF,
+                          "patches": {Path(p["file"]).name: p["sha256"] for p in patch_info}}:
+            raise RuntimeError("Installed build provenance does not match current patch series")
         metadata = {
-            "ffmpegVersion": "4.4.6",
+            "ffmpegVersion": "7.1.3",
             "sourceRef": args.source_ref,
-            "basePrefix": str(prefix),
             "patches": patch_info,
             "avformatSha256": sha256(lib_dir / visited[roots[0]]),
             "libraries": sorted(visited.values()),
+            "headersSha256": sha256(prefix / "include/libavutil/ffversion.h"),
         }
+        configuration = run(str(prefix / "bin/ffmpeg"), "-version").splitlines()[2]
+        # Preserve build flags without committing developer-specific absolute paths.
+        metadata["configuration"] = configuration.replace(str(prefix), "${FFMPEG_PREFIX}").replace(
+            str(PROJECT_ROOT), "${PROJECT_ROOT}")
+        metadata["sha256"] = {name: sha256(lib_dir / name) for name in visited.values()}
         (stage / "build-info.json").write_text(json.dumps(metadata, indent=2) + "\n")
         previous = Path(temporary) / "previous"
         if output.exists():
@@ -163,33 +182,26 @@ def publish_bundle(args, prefix, output, roots, visited, edges):
 
 
 def bundle(args):
-    prefix = args.ffmpeg_prefix.resolve() if args.ffmpeg_prefix else brew_prefix("ffmpeg@4")
+    prefix = args.ffmpeg_prefix.resolve(strict=True)
     output = args.output_dir.absolute()
     if output.is_symlink():
         raise RuntimeError("输出目录不能是符号链接")
-    if args.patch_file and not args.avformat_library:
-        raise RuntimeError("--patch-file 必须同时指定 --avformat-library")
-    metadata_path = output / "build-info.json"
-    if not args.avformat_library and not args.allow_unpatched and metadata_path.is_file():
-        if json.loads(metadata_path.read_text()).get("patches"):
-            raise RuntimeError("目标已含 FLV 补丁。请使用 scripts/ffmpeg/build_ffmpeg_macos.sh；"
-                               "显式传 --allow-unpatched 才能恢复原始 Homebrew 库。")
+    if args.source_ref != SOURCE_REF:
+        raise RuntimeError("Source must match the Windows FFmpeg commit")
+    version = (prefix / "include/libavutil/ffversion.h").read_text()
+    if SOURCE_REF not in version:
+        raise RuntimeError("Prefix does not identify the pinned FFmpeg source")
 
     roots = [(prefix / "lib" / f"lib{name}.dylib").resolve(strict=True) for name in CORE_LIBS]
-    override = None
-    original_avformat = roots[0]
-    if original_avformat.name != "libavformat.58.76.100.dylib":
-        raise RuntimeError("需要 FFmpeg 4.4.6，不能混用不同版本的头文件和核心库")
-    if args.avformat_library:
-        override = args.avformat_library.resolve(strict=True)
-        if override.name != original_avformat.name:
-            raise RuntimeError(f"补丁库版本不匹配：{override.name} != {original_avformat.name}")
-        roots[0] = override
+    for (name, major), binary in zip(CORE_LIBS.items(), roots):
+        if not binary.name.startswith(f"lib{name}.{major}.") or binary.parent != (prefix / "lib").resolve():
+            raise RuntimeError(f"Mixed FFmpeg ABI or prefix: {binary}")
 
     search_dirs = [prefix / "lib", brew_prefix() / "lib"]
     visited = {}
     edges = {}
     names = {}
+
     def collect(binary):
         binary = binary.resolve(strict=True)
         if binary in visited:
@@ -203,8 +215,8 @@ def bundle(args):
             if system_library(ref):
                 continue
             dependency = resolve_dependency(binary, ref, search_dirs)
-            if override and dependency == original_avformat:
-                dependency = override
+            if re.match(r"lib(avformat|avcodec|avutil|avfilter|avdevice|swscale|swresample)\.", dependency.name) and dependency.parent != (prefix / "lib").resolve():
+                raise RuntimeError(f"FFmpeg core dependency escaped prefix: {dependency}")
             edges[binary][ref] = dependency
             collect(dependency)
 
@@ -213,18 +225,12 @@ def bundle(args):
     print(f"已解析 {len(visited)} 个动态库")
 
     publish_bundle(args, prefix, output, roots, visited, edges)
-
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ffmpeg-prefix", type=Path, help="与项目 ABI 一致的 FFmpeg 4.4.6 安装目录")
-    parser.add_argument("--avformat-library", type=Path, help="用补丁构建的 libavformat 版本库")
-    parser.add_argument("--patch-file", type=Path, help="记录补丁来源和 SHA-256")
-    parser.add_argument("--source-ref", default="Homebrew ffmpeg@4")
+    parser.add_argument("--ffmpeg-prefix", type=Path, required=True, help="共同 FFmpeg 7 基线完整安装目录")
+    parser.add_argument("--source-ref", default=SOURCE_REF)
     parser.add_argument("--output-dir", type=Path,
-                        default=PROJECT_ROOT / "third_party" / "ffmpeg-macos")
-    parser.add_argument("--allow-unpatched", action="store_true", help="允许覆盖现有补丁版本")
+                        default=PROJECT_ROOT / "build/ffmpeg7-macos/bundle")
     args = parser.parse_args()
     try:
         bundle(args)

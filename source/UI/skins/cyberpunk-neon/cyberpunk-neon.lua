@@ -1077,9 +1077,15 @@ skin.surfaces.subtitle.render = function()
     local c=canvas(width,height,function(x) return (width-1440*s)/2+x*s end,
         function(y) return height-(900-y)*s end,function(v) return v*s end)
     if data.text and data.text~="" then
-        local y=data.controlsVisible=="true" and 762 or 850
-        c.rect(413,y,614,28,"bgVoid",0.55)
-        c.text(data.text,413,y+19,614,15,"textPrimary","center")
+        local fontScale=math.max(0.5,math.min(4,tonumber(data.fontScale) or 1.4))
+        local fontSize=15*fontScale
+        local boxHeight=fontSize*1.25+10
+        local boxWidth=math.min(1320,math.max(614,614*fontScale))
+        local x=(1440-boxWidth)/2
+        local bottom=data.controlsVisible=="true" and 790 or 878
+        local y=bottom-boxHeight
+        c.rect(x,y,boxWidth,boxHeight,"bgVoid",0.55)
+        c.text(data.text,x,y+5+fontSize,boxWidth,fontSize,"textPrimary","center")
     end
     return c.finish()
 end
@@ -1287,6 +1293,7 @@ skin.surfaces.settings.render = function()
     -- section 标题占位（对应 main 的 settingsSection：上留 sectionGap、下有细线）
     local sectionH=30
     local rowH={}
+    local hintH={}
     local rowSection={}
     local contentH=0
     local lastSection=nil
@@ -1298,7 +1305,12 @@ skin.surfaces.settings.render = function()
             contentH=contentH+sectionH
         end
         local h=(row.type=="bool") and 34 or 54
-        if (row.hint or "")~="" then h=h+20 end
+        if (row.hint or "")~="" then
+            local hintW=math.max(80,contentW-((row.type=="bool") and 32 or 0))
+            -- Conservative byte-width budget also reserves enough space for CJK.
+            hintH[i]=math.max(14,math.ceil(#row.hint*10/hintW)*14)
+            h=h+hintH[i]+6
+        end
         rowH[i]=h
         contentH=contentH+h+cfg.itemGapY
     end
@@ -1417,7 +1429,8 @@ skin.surfaces.settings.render = function()
                     id=row.key,action="configChanged",text="",value=(row.value=="true")})
                 c.text(label,contentX+32,y+18,contentW-32,12,"textPrimary")
                 if (row.hint or "")~="" then
-                    c.text(row.hint,contentX+32,y+40,contentW-32,10,"textMuted")
+                    c.add("text",contentX+32,y+34,contentW-32,hintH[i],{
+                        content=row.hint,size=S(10),color="textMuted",textAlign="left",wrap=true})
                 end
             else
                 -- 标签与控件同一行，垂直居中对齐
@@ -1472,7 +1485,8 @@ skin.surfaces.settings.render = function()
                 end
 
                 if (row.hint or "")~="" then
-                    c.text(row.hint,contentX,y+38,contentW,10,"textMuted")
+                    c.add("text",contentX,y+44,contentW,hintH[i],{
+                        content=row.hint,size=S(10),color="textMuted",textAlign="left",wrap=true})
                 end
             end
         end

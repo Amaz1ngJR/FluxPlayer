@@ -194,6 +194,11 @@ bool Config::load() {
                     }
                 }
                 else if (key == "subtitleFontPath") settings_.subtitleFontPath = value;
+                else if (key == "aiSubtitlesEnabled") settings_.aiSubtitlesEnabled = (value == "true" || value == "1");
+                else if (key == "aiSubtitleModel") settings_.aiSubtitleModel = value;
+                else if (key == "aiSubtitleLanguage") settings_.aiSubtitleLanguage = value.empty() ? "auto" : value;
+                else if (key == "aiSubtitleGpu") settings_.aiSubtitleGpu = (value == "true" || value == "1");
+                else if (key == "aiSubtitleHints" && value.size() <= 1024) settings_.aiSubtitleHints = value;
                 else if (key == "playbackSpeed") {
                     try {
                         double speed = std::stod(value);
@@ -288,6 +293,12 @@ bool Config::save() {
     file << "hwaccel=" << (settings_.hwaccel ? "true" : "false") << "\n\n";
 
     file << "[Subtitle]\n";
+    file << "# AI settings apply when opening media; local Whisper model required\n";
+    file << "aiSubtitlesEnabled=" << (settings_.aiSubtitlesEnabled ? "true" : "false") << "\n";
+    file << "aiSubtitleModel=" << settings_.aiSubtitleModel << "\n";
+    file << "aiSubtitleLanguage=" << settings_.aiSubtitleLanguage << "\n";
+    file << "aiSubtitleGpu=" << (settings_.aiSubtitleGpu ? "true" : "false") << "\n";
+    file << "aiSubtitleHints=" << settings_.aiSubtitleHints << "\n";
     file << "# subtitleEnabled: 是否启用内嵌字幕流解码与渲染 (true / false)\n";
     file << "subtitleEnabled=" << (settings_.subtitleEnabled ? "true" : "false") << "\n";
     file << "# subtitleFontScale: 字幕字体缩放比例 (0.5 ~ 4.0)\n";

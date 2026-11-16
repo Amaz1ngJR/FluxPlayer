@@ -1,0 +1,191 @@
+FFmpeg shared private FLV extensions
+Base: 5a1f107b4c78318f318897900acad1b6c6aa3f9d after ffmpeg-7.1-legacy-hevc.patch
+
+Keep upstream Enhanced FLV default; legacy HEVC writing is opt-in via flvflags=legacy_hevc.
+Private raw Opus codec-id 13 has no OpusHead/pre-skip/multichannel mapping.
+Upstream files retain LGPL-2.1-or-later licensing.
+
+--- a/libavformat/flv.h
++++ b/libavformat/flv.h
+@@ -105,6 +105,7 @@
+     FLV_CODECID_PCM_MULAW            = 8 << FLV_AUDIO_CODECID_OFFSET,
+     FLV_CODECID_AAC                  = 10<< FLV_AUDIO_CODECID_OFFSET,
+     FLV_CODECID_SPEEX                = 11<< FLV_AUDIO_CODECID_OFFSET,
++    FLV_CODECID_OPUS                 = 13<< FLV_AUDIO_CODECID_OFFSET,
+ };
+ 
+ enum {
+--- a/libavformat/flvdec.c
++++ b/libavformat/flvdec.c
+@@ -251,6 +251,9 @@
+         return apar->codec_id == AV_CODEC_ID_ADPCM_SWF;
+     case FLV_CODECID_SPEEX:
+         return apar->codec_id == AV_CODEC_ID_SPEEX;
++    case FLV_CODECID_OPUS:
++        return apar->codec_id == AV_CODEC_ID_OPUS && apar->sample_rate == 48000 &&
++               apar->ch_layout.nb_channels == ((flags & FLV_AUDIO_CHANNEL_MASK) ? 2 : 1);
+     case FLV_CODECID_MP3:
+         return apar->codec_id == AV_CODEC_ID_MP3;
+     case FLV_CODECID_NELLYMOSER_8KHZ_MONO:
+@@ -320,6 +323,12 @@
+     case FLV_CODECID_PCM_ALAW:
+         apar->sample_rate = 8000;
+         apar->codec_id    = AV_CODEC_ID_PCM_ALAW;
++        break;
++    case FLV_CODECID_OPUS:
++        /* Private raw Opus: no OpusHead, pre-skip or multichannel mapping. */
++        apar->sample_rate = 48000;
++        apar->bits_per_coded_sample = 16;
++        apar->codec_id = AV_CODEC_ID_OPUS;
+         break;
+     default:
+         avpriv_request_sample(s, "Audio codec (%x)",
+--- a/libavformat/flvenc.c
++++ b/libavformat/flvenc.c
+@@ -53,6 +53,7 @@
+     { AV_CODEC_ID_VP6A,     FLV_CODECID_VP6A },
+     { AV_CODEC_ID_H264,     FLV_CODECID_H264 },
+     { AV_CODEC_ID_HEVC,     MKBETAG('h', 'v', 'c', '1') },
++    { AV_CODEC_ID_HEVC,     FLV_CODECID_HEVC },
+     { AV_CODEC_ID_AV1,      MKBETAG('a', 'v', '0', '1') },
+     { AV_CODEC_ID_VP9,      MKBETAG('v', 'p', '0', '9') },
+     { AV_CODEC_ID_NONE,     0 }
+@@ -69,6 +70,7 @@
+     { AV_CODEC_ID_PCM_MULAW,  FLV_CODECID_PCM_MULAW  >> FLV_AUDIO_CODECID_OFFSET },
+     { AV_CODEC_ID_PCM_ALAW,   FLV_CODECID_PCM_ALAW   >> FLV_AUDIO_CODECID_OFFSET },
+     { AV_CODEC_ID_SPEEX,      FLV_CODECID_SPEEX      >> FLV_AUDIO_CODECID_OFFSET },
++    { AV_CODEC_ID_OPUS,       FLV_CODECID_OPUS       >> FLV_AUDIO_CODECID_OFFSET },
+     { AV_CODEC_ID_NONE,       0 }
+ };
+ 
+@@ -78,6 +80,7 @@
+     FLV_ADD_KEYFRAME_INDEX = (1 << 2),
+     FLV_NO_METADATA = (1 << 3),
+     FLV_NO_DURATION_FILESIZE = (1 << 4),
++    FLV_LEGACY_HEVC = (1 << 5),
+ } FLVFlags;
+ 
+ typedef struct FLVFileposition {
+@@ -138,7 +141,15 @@
+     if (par->codec_id == AV_CODEC_ID_AAC) // specs force these parameters
+         return FLV_CODECID_AAC | FLV_SAMPLERATE_44100HZ |
+                FLV_SAMPLESSIZE_16BIT | FLV_STEREO;
+-    else if (par->codec_id == AV_CODEC_ID_SPEEX) {
++    else if (par->codec_id == AV_CODEC_ID_OPUS) {
++        if (par->sample_rate != 48000 ||
++            (par->ch_layout.nb_channels != 1 && par->ch_layout.nb_channels != 2)) {
++            av_log(s, AV_LOG_ERROR, "Private FLV Opus requires 48 kHz mono/stereo\n");
++            return AVERROR(EINVAL);
++        }
++        return FLV_CODECID_OPUS | FLV_SAMPLERATE_44100HZ | FLV_SAMPLESSIZE_16BIT |
++               (par->ch_layout.nb_channels == 2 ? FLV_STEREO : 0);
++    } else if (par->codec_id == AV_CODEC_ID_SPEEX) {
+         if (par->sample_rate != 16000) {
+             av_log(s, AV_LOG_ERROR,
+                    "FLV only supports wideband (16kHz) Speex audio\n");
+@@ -248,6 +259,8 @@
+ static void put_eos_tag(AVIOContext *pb, unsigned ts, enum AVCodecID codec_id)
+ {
+     uint32_t tag = ff_codec_get_tag(flv_video_codec_ids, codec_id);
++    if (codec_id == AV_CODEC_ID_HEVC)
++        tag = FLV_CODECID_HEVC;
+     /* ub[4] FrameType = 1, ub[4] CodecId */
+     tag |= 1 << 4;
+     avio_w8(pb, FLV_TAG_TYPE_VIDEO);
+@@ -340,7 +353,8 @@
+         }
+ 
+         put_amf_string(pb, "videocodecid");
+-        put_amf_double(pb, flv->video_par->codec_tag);
++        put_amf_double(pb, flv->video_par->codec_id == AV_CODEC_ID_HEVC &&
++                       (flv->flags & FLV_LEGACY_HEVC) ? FLV_CODECID_HEVC : flv->video_par->codec_tag);
+     }
+ 
+     if (flv->audio_par) {
+@@ -496,7 +510,7 @@
+     const AVPacketSideData *side_data = NULL;
+ 
+     if (flv->metadata_pkt_written) return;
+-    if (par->codec_id == AV_CODEC_ID_HEVC || par->codec_id == AV_CODEC_ID_AV1 ||
++    if ((par->codec_id == AV_CODEC_ID_HEVC && !(flv->flags & FLV_LEGACY_HEVC)) || par->codec_id == AV_CODEC_ID_AV1 ||
+         par->codec_id == AV_CODEC_ID_VP9) {
+         int flags_size = 5;
+         side_data = av_packet_side_data_get(par->coded_side_data, par->nb_coded_side_data,
+@@ -683,8 +697,14 @@
+             avio_write(pb, par->extradata, par->extradata_size);
+         } else {
+             if (par->codec_id == AV_CODEC_ID_HEVC) {
+-                avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY); // ExVideoTagHeader mode with PacketTypeSequenceStart
+-                avio_write(pb, "hvc1", 4);
++                if (flv->flags & FLV_LEGACY_HEVC) {
++                    avio_w8(pb, FLV_CODECID_HEVC | FLV_FRAME_KEY);
++                    avio_w8(pb, 0);
++                    avio_wb24(pb, 0);
++                } else {
++                    avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY);
++                    avio_write(pb, "hvc1", 4);
++                }
+             } else if (par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
+                 avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeSequenceStart | FLV_FRAME_KEY);
+                 avio_write(pb, par->codec_id == AV_CODEC_ID_AV1 ? "av01" : "vp09", 4);
+@@ -948,7 +968,8 @@
+         for (i = 0; i < s->nb_streams; i++) {
+             AVCodecParameters *par = s->streams[i]->codecpar;
+             if (par->codec_type == AVMEDIA_TYPE_VIDEO &&
+-                    (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4))
++                    (par->codec_id == AV_CODEC_ID_H264 || par->codec_id == AV_CODEC_ID_MPEG4 ||
++                     (par->codec_id == AV_CODEC_ID_HEVC && (flv->flags & FLV_LEGACY_HEVC))))
+                 put_eos_tag(pb, flv->last_ts[i], par->codec_id);
+         }
+     }
+@@ -1006,7 +1027,7 @@
+     else
+         flags_size = 1;
+ 
+-    if (par->codec_id == AV_CODEC_ID_HEVC && pkt->pts != pkt->dts)
++    if (par->codec_id == AV_CODEC_ID_HEVC && !(flv->flags & FLV_LEGACY_HEVC) && pkt->pts != pkt->dts)
+         flags_size += 3;
+ 
+     if (par->codec_id == AV_CODEC_ID_AAC || par->codec_id == AV_CODEC_ID_H264
+@@ -1037,6 +1058,11 @@
+         par->codec_id == AV_CODEC_ID_VP9) {
+         if (pkt->pts == AV_NOPTS_VALUE) {
+             av_log(s, AV_LOG_ERROR, "Packet is missing PTS\n");
++            return AVERROR(EINVAL);
++        }
++        if (par->codec_id == AV_CODEC_ID_HEVC && (flv->flags & FLV_LEGACY_HEVC) &&
++            (pkt->pts - (uint64_t)pkt->dts + 0x800000 > 0xffffff)) {
++            av_log(s, AV_LOG_ERROR, "Legacy HEVC CTS exceeds signed 24-bit range\n");
+             return AVERROR(EINVAL);
+         }
+     }
+@@ -1145,11 +1171,17 @@
+     } else {
+         av_assert1(flags>=0);
+         if (par->codec_id == AV_CODEC_ID_HEVC) {
+-            int pkttype = (pkt->pts != pkt->dts) ? PacketTypeCodedFrames : PacketTypeCodedFramesX;
+-            avio_w8(pb, FLV_IS_EX_HEADER | pkttype | frametype); // ExVideoTagHeader mode with PacketTypeCodedFrames(X)
+-            avio_write(pb, "hvc1", 4);
+-            if (pkttype == PacketTypeCodedFrames)
++            if (flv->flags & FLV_LEGACY_HEVC) {
++                avio_w8(pb, FLV_CODECID_HEVC | frametype);
++                avio_w8(pb, 1);
+                 avio_wb24(pb, pkt->pts - pkt->dts);
++            } else {
++                int pkttype = (pkt->pts != pkt->dts) ? PacketTypeCodedFrames : PacketTypeCodedFramesX;
++                avio_w8(pb, FLV_IS_EX_HEADER | pkttype | frametype);
++                avio_write(pb, "hvc1", 4);
++                if (pkttype == PacketTypeCodedFrames)
++                    avio_wb24(pb, pkt->pts - pkt->dts);
++            }
+         } else if (par->codec_id == AV_CODEC_ID_AV1 || par->codec_id == AV_CODEC_ID_VP9) {
+             avio_w8(pb, FLV_IS_EX_HEADER | PacketTypeCodedFrames | frametype);
+             avio_write(pb, par->codec_id == AV_CODEC_ID_AV1 ? "av01" : "vp09", 4);
+@@ -1239,6 +1271,7 @@
+ 
+ static const AVOption options[] = {
+     { "flvflags", "FLV muxer flags", offsetof(FLVContext, flags), AV_OPT_TYPE_FLAGS, {.i64 = 0}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
++    { "legacy_hevc", "Write private HEVC codec-id 12 instead of Enhanced FLV", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_LEGACY_HEVC}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
+     { "aac_seq_header_detect", "Put AAC sequence header based on stream data", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_AAC_SEQ_HEADER_DETECT}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
+     { "no_sequence_end", "disable sequence end for FLV", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_NO_SEQUENCE_END}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },
+     { "no_metadata", "disable metadata for FLV", 0, AV_OPT_TYPE_CONST, {.i64 = FLV_NO_METADATA}, INT_MIN, INT_MAX, AV_OPT_FLAG_ENCODING_PARAM, .unit = "flvflags" },

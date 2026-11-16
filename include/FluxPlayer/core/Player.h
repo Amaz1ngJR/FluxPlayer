@@ -35,6 +35,7 @@ class Controller;
 class Recorder;
 class SubtitleDecoder;
 class SubtitleManager;
+class RealtimeSubtitles;
 class FrameInterpolator;
 class DashMerger;
 class CommandQueue;
@@ -414,6 +415,8 @@ public:
      * Controller 每帧查询，不持有所有权。
      */
     SubtitleManager* getSubtitleManager() const { return subtitleManager_.get(); }
+    std::string getSubtitleText();
+    std::string getRealtimeSubtitleStatus() const;
 
     /** @brief 当前媒体是否有可用的内嵌字幕流 */
     bool hasSubtitleStream() const { return subtitleDecoder_ != nullptr; }
@@ -699,6 +702,7 @@ private:
     // 字幕模块（无字幕流时保持为空指针）
     std::unique_ptr<SubtitleDecoder> subtitleDecoder_;
     std::unique_ptr<SubtitleManager> subtitleManager_;
+    std::unique_ptr<RealtimeSubtitles> realtimeSubtitles_;
 
     bool audioOnly_{false};     ///< 纯音频模式（无视频流时为 true）
     bool hasVideoStream_{false}; ///< 启用的视频播放分支（EOF/Seek/直播等待用）

@@ -603,7 +603,7 @@ local function render_settings()
     end
 
     -- section 标题也要占高度（对应旧版页内的小节分隔）
-    local rowH, rowSection, contentH = {}, {}, 0
+    local rowH, rowSection, hintH, contentH = {}, {}, {}, 0
     local lastSection = nil
     for i, row in ipairs(visible) do
         local sec = row.section or ""
@@ -613,7 +613,11 @@ local function render_settings()
             contentH = contentH + 30
         end
         local h = (row.type == "bool") and 34 or 52
-        if (row.hint or "") ~= "" then h = h + 18 end
+        if (row.hint or "") ~= "" then
+            local hintW=math.max(80,panelW-((row.type=="bool") and 88 or 48))
+            hintH[i]=math.max(16,math.ceil(#row.hint*11/hintW)*16)
+            h=h+hintH[i]+8
+        end
         rowH[i] = h
         contentH = contentH + h + 8
     end
@@ -652,7 +656,7 @@ local function render_settings()
                 if (row.hint or "") ~= "" then
                     children[#children + 1] = ui.text { content = row.hint, color = "textMuted",
                         size = 11, baseline = 11, x = px + 56, y = y + 30,
-                        width = panelW - 88, height = 16, absolute = true }
+                        width = panelW - 88, height = hintH[i], wrap = true, absolute = true }
                 end
             else
                 -- 标签独占一行，控件下一行
@@ -696,7 +700,7 @@ local function render_settings()
                 if (row.hint or "") ~= "" then
                     children[#children + 1] = ui.text { content = row.hint, color = "textMuted",
                         size = 11, baseline = 11, x = px + 24, y = ctrlY + 34,
-                        width = panelW - 48, height = 16, absolute = true }
+                        width = panelW - 48, height = hintH[i], wrap = true, absolute = true }
                 end
             end
         end

@@ -2,11 +2,12 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.9.6 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.9.7 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
     enable_language(OBJCXX)
+    enable_language(OBJC)
 endif()
 
 # 要求使用 C++17 标准，且不允许降级
@@ -16,16 +17,32 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 生成 compile_commands.json，供 clangd/ccache 等工具使用
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Optional local ASR. No download during configure; use a pinned whisper.cpp checkout.
+set(FLUX_WHISPER_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/whisper.cpp" CACHE PATH "Path to whisper.cpp source; empty disables realtime subtitles")
+if(FLUX_WHISPER_SOURCE_DIR)
+    function(flux_add_whisper)
+        set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+        # Static linkage keeps packaged players independent of the source checkout.
+        set(BUILD_SHARED_LIBS OFF)
+        set(GGML_BACKEND_DL OFF)
+        set(WHISPER_BUILD_TESTS OFF)
+        set(WHISPER_BUILD_EXAMPLES OFF)
+        set(WHISPER_BUILD_SERVER OFF)
+        add_subdirectory("${FLUX_WHISPER_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/whisper" EXCLUDE_FROM_ALL)
+    endfunction()
+    flux_add_whisper()
+endif()
+
 # ========================
 # 配置路径
 # ========================
 # 如果外部没有通过 -DFFMPEG_ROOT=... 指定路径，则按平台设置默认值
 if(NOT DEFINED FFMPEG_ROOT)
     if(WIN32)
-        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg")
+        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg/windows-x64")
     elseif(APPLE)
         # macOS：使用项目内的预编译版本（与 Windows 对称）
-        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg-macos")
+        set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg/macos-arm64")
     else()
         set(FFMPEG_ROOT "/usr/local")
     endif()
@@ -201,6 +218,14 @@ if(WIN32)
 else()
     add_executable(FluxPlayer ${FLUXPLAYER_SOURCES})
 endif()
+if(FLUX_WHISPER_SOURCE_DIR)
+    target_compile_definitions(FluxPlayer PRIVATE FLUX_WHISPER=1)
+    target_link_libraries(FluxPlayer PRIVATE whisper)
+    add_custom_command(TARGET FluxPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:FluxPlayer>/resources/licenses/whisper"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FLUX_WHISPER_SOURCE_DIR}/LICENSE"
+            "$<TARGET_FILE_DIR:FluxPlayer>/resources/licenses/whisper/LICENSE")
+endif()
 
 # 皮肤资源清单：供下方资源复制步骤做 DEPENDS，确保改皮肤即重新复制。
 # （不再挂进 target_sources：HEADER_FILE_ONLY 只影响编译依赖，不会触发复制步骤。）
@@ -219,7 +244,8 @@ list(APPEND FLUXPLAYER_SKIN_ASSETS ${FLUXPLAYER_ORT_ASSETS})
 #
 # 多配置生成器（Visual Studio/Xcode）默认会追加 Debug/Release 子目录。
 # 为每种标准配置显式设置输出路径，保证所有生成器都遵守 build/bin 约定。
-set(FLUXPLAYER_RUNTIME_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/bin")
+set(FLUXPLAYER_RUNTIME_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/bin" CACHE PATH
+    "Runtime output directory (override for isolated dependency validation)")
 set_target_properties(FluxPlayer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${FLUXPLAYER_RUNTIME_OUTPUT_DIR}"
 )
@@ -407,6 +433,22 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/source
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source
+    # Only base is bundled; never copy optional downloaded Whisper weights.
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/whisper
+    COMMAND ${CMAKE_COMMAND} -E remove_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/whisper
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/whisper
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/whisper
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/ggml-base-q8_0.bin
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/README.md
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/whisper
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/ggml-base-q8_0.bin
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/README.md
+        ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/whisper
     # 清理部署副本中的旧模型，仅分发当前内置模型。
     COMMAND ${CMAKE_COMMAND} -E remove_directory
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/realesrgan
@@ -472,8 +514,9 @@ endif()
 
 # macOS：构建完成后把 FFmpeg 的 dylib 复制到可执行文件旁边（与 Windows 对称）
 if(APPLE)
-    file(GLOB FFMPEG_DYLIBS "${FFMPEG_ROOT}/lib/*.dylib")
+    file(GLOB FFMPEG_DYLIBS CONFIGURE_DEPENDS "${FFMPEG_ROOT}/lib/*.dylib")
     if(FFMPEG_DYLIBS)
+        set_property(TARGET FluxPlayer APPEND PROPERTY LINK_DEPENDS ${FFMPEG_DYLIBS})
         add_custom_command(TARGET FluxPlayer POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${FFMPEG_DYLIBS}
@@ -538,6 +581,12 @@ install(FILES
     source/models/realesrgan/LICENSE
     DESTINATION resources/models/realesrgan)
 install(DIRECTORY source/onnxruntime/ DESTINATION resources/onnxruntime)
+install(CODE [[
+    file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/resources/models/whisper")
+    file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/source/models/whisper")
+]])
+install(FILES source/models/whisper/ggml-base-q8_0.bin source/models/whisper/README.md
+    DESTINATION resources/models/whisper)
 # 安装阶段同步把单文件 Lua 皮肤包放到 resources/skins。
 install(DIRECTORY source/UI/skins/cyberpunk-neon/
     DESTINATION resources/skins/cyberpunk-neon)

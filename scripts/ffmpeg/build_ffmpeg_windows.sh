@@ -3,14 +3,14 @@
 # 必须使用匹配项目版本、已完整配置的源码/构建目录，保留原依赖和协议能力。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PATCH="$ROOT/scripts/ffmpeg/patches/ffmpeg-7.1-legacy-hevc.patch"
+SERIES="$ROOT/scripts/ffmpeg/patches/series"
 COMMIT=5a1f107b4c78318f318897900acad1b6c6aa3f9d
 SOURCE=""
 OBJECTS=""
 JOBS=4
 usage() {
     echo "用法：bash scripts/ffmpeg/build_ffmpeg_windows.sh --source-dir <原 FFmpeg Git 源码> --build-dir <已配置的构建目录> [--jobs N]"
-    echo "会修改指定源码的 libavformat/flv.h 和 flvdec.c；只构建 avformat-61.dll，不安装或覆盖项目库。"
+    echo "应用共同 FLV 补丁清单；只构建 avformat-61.dll，不安装或覆盖项目库。"
 }
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -51,10 +51,17 @@ CONFIG_SOURCE="$(sed -n 's/^SRC_PATH=//p' "$OBJECTS/ffbuild/config.mak")"
 git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet || {
     echo "源码有未提交改动，请使用干净的独立工作树；已应用补丁时直接运行 make" >&2; exit 1;
 }
-git -C "$SOURCE" apply --check "$PATCH"
-git -C "$SOURCE" apply "$PATCH"
+PATCHES=()
+while IFS= read -r name || [ -n "$name" ]; do
+    case "$name" in ''|\#*) continue ;; esac
+    case "$name" in */*|*..*) echo "Invalid patch name" >&2; exit 1 ;; esac
+    PATCHES+=("$ROOT/scripts/ffmpeg/patches/$name")
+done < "$SERIES"
+[ "${#PATCHES[@]}" -gt 0 ] || exit 1
+git -C "$SOURCE" apply --check "${PATCHES[@]}"
+git -C "$SOURCE" apply "${PATCHES[@]}"
 make -C "$OBJECTS" -j "$JOBS" libavformat/avformat-61.dll
 [ -f "$OBJECTS/libavformat/avformat-61.dll" ]
 echo "已生成 $OBJECTS/libavformat/avformat-61.dll"
-echo "尚未覆盖 third_party/ffmpeg/bin/avformat-61.dll。请先用项目其余原 DLL 验证解码与依赖加载。"
-echo "补丁仅扩展 FLV 读取；不修改 Enhanced FLV 写入，不支持私有 Opus codec-id 13。"
+echo "尚未覆盖 third_party/ffmpeg/windows-x64/bin/avformat-61.dll。请先用项目其余原 DLL 验证解码与依赖加载。"
+echo "新增 legacy HEVC 写入（flvflags=legacy_hevc）及私有 raw Opus 读写；默认 Enhanced FLV 沿用上游。"

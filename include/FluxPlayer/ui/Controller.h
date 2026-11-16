@@ -254,7 +254,6 @@ private:
 
     // ==================== 字幕状态 ====================
     bool subtitleEnabled_;       ///< 是否启用字幕渲染
-    float subtitleFontScale_;    ///< 字幕字体缩放比例
     void* subtitleFont_;         ///< ImFont* 的不透明句柄（隔离 ImGui 依赖）
 
     // ==================== 皮肤状态 ====================

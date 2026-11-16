@@ -26,6 +26,8 @@
 
 ## 功能特性
 
+- 💬 本地 AI 实时字幕（可选 whisper.cpp）：后台识别音频，无需 API Key，支持模型/语言/GPU 设置，复用 Lua 字幕层。使用方式与延迟限制见 [实时字幕](docs/实时字幕.md)。
+
 - 🎬 支持主流视频格式（MP4、MKV、AVI、FLV、MOV 等）
 - 🌐 支持网络流播放（RTSP、RTMP、HTTP、HLS）；Demuxer 已接入停止中断与 open/probe/read/seek 分阶段预算，RTMP 探测使用独立 30 秒预算，保留 FFmpeg 已成功返回的探测结果；OpeningScreen 的输入打开/探测已后台化，画质候选支持 latest-wins 与取消，DASH 管道写端使用可取消的非阻塞等待。
 - 🖥️ OpenGL YUV→RGB GPU 渲染，自适应 BT.601/BT.709/BT.2020 色彩空间 + TV/PC 量化范围
@@ -472,28 +474,34 @@ end note
 
 ### macOS
 
-FFmpeg 4.x 已集成在 `third_party/ffmpeg-macos/` 中，无需额外安装。
+FFmpeg 7 已集成在 `third_party/ffmpeg/macos-arm64/` 中，无需额外安装。源码与 Windows 固定到同一提交 `5a1f107b4c78318f318897900acad1b6c6aa3f9d`，各平台仍分别编译 dylib/DLL。
 
-项目的 FFmpeg 4.4.6 已加入 FLV 兼容补丁：支持旧式 H.265 codec-id 12、Enhanced FLV 的 H.265 / AV1 / VP9 视频，以及 codec-id 13 的私有 Opus 单/双声道音频。原有解码器与 VideoToolbox 能力保留。构建与验证脚本集中在 `scripts/ffmpeg/`，补丁文件为 `scripts/ffmpeg/patches/ffmpeg-4.4.6-flv-compat.patch`。重建时会生成 `third_party/ffmpeg-macos/build-info.json`，记录构建来源与库校验值。
+两端构建共用 `scripts/ffmpeg/patches/series`：复用旧式 HEVC codec-id 12 读取补丁，增加显式 `flvflags=legacy_hevc` 写入和私有原始 Opus codec-id 13 单/双声道读写。默认 HEVC 写入保持上游 Enhanced FLV，不迁回旧版 Enhanced 解析器；另以小型补丁保留 AV1 配置独立起播、未知 FourCC/EOS 跳过及截断检查。macOS 全套库包含 VideoToolbox、libx264 和 avfilter/zscale/tonemap，不能与旧 FFmpeg 4 库混用。
 
 如需重新生成（开发者）：
 
 ```bash
-brew install ffmpeg@4
-bash scripts/ffmpeg/build_ffmpeg_macos.sh
+# 复用本地精确提交源码；脚本不安装依赖或自动联网
+bash scripts/ffmpeg/build_ffmpeg_macos.sh --source-dir /path/to/ffmpeg
+# 或 --source-archive /path/to/FFmpeg-5a1f107b4c78318f318897900acad1b6c6aa3f9d.tar.gz
+python3 scripts/ffmpeg/verify_ffmpeg_macos.py \
+  --ffmpeg-prefix "$PWD/build/ffmpeg7-macos/install" \
+  --library-dir "$PWD/build/ffmpeg7-macos/bundle/lib"
 ```
 
-此脚本校验官方源码、应用项目补丁，再更新项目内动态库；直接收集原始 Homebrew 库会丢失补丁。当目标目录的 `build-info.json` 中包含补丁记录时，收集脚本默认禁止用未打补丁的库覆盖；删除该记录文件会失去此项保护。
+脚本仅生成 `build/ffmpeg7-macos/bundle` 候选库，不自动替换正式依赖。使用现有 Homebrew 编解码/网络依赖，缺少时失败而非静默裁剪或安装。源码包 SHA-256、共同补丁、安装来源及库校验值会核对并记录。
 
-也可离线复用已有 FFmpeg Git 仓库：`bash scripts/ffmpeg/build_ffmpeg_macos.sh --source-dir /path/to/ffmpeg`。脚本只导出官方 `n4.4.6` 标签，不修改该仓库。更新后使用 `xmake -r` 或 `cmake --build build/cmake --clean-first --parallel` 重新链接并同步运行库。回归验证：`python3 scripts/ffmpeg/verify_ffmpeg_macos.py`，测试明确加载项目库。上述命令均在项目根目录执行。
+验收后可显式部署：`python3 scripts/ffmpeg/bundle_ffmpeg_macos.py --ffmpeg-prefix "$PWD/build/ffmpeg7-macos/install" --output-dir "$PWD/third_party/ffmpeg/macos-arm64"`，再完整重编主程序。候选验证可通过 CMake 的 `FFMPEG_ROOT` 和 `FLUXPLAYER_RUNTIME_OUTPUT_DIR` 隔离库及可执行文件。详见 `scripts/ffmpeg/README.md`。
 
 ### Windows
 
-项目 Windows FFmpeg 已集成在 `third_party/ffmpeg/` 中，版本标识为 `n7.1.3-43-g5a1f107b4c-20260331`（头文件与 DLL 一致），无需额外安装。
+项目 Windows FFmpeg 已集成在 `third_party/ffmpeg/windows-x64/` 中，版本标识为 `n7.1.3-43-g5a1f107b4c-20260331`（头文件与 DLL 一致），无需额外安装。两平台资源归于同一个 FFmpeg 目录，但各自保留 include/lib/bin，不能交叉覆盖。
+
+Windows 的 CMake/xmake 默认使用该新路径。`scripts/package_windows.ps1` 会先检查头文件、导入库和核心 DLL，再显式传入 `FFMPEG_ROOT` 和 `build/bin` 输出目录，覆盖旧打包缓存中的路径；安装阶段继续按依赖闭包收集 DLL 到 staging 根目录，Inno Setup 将它们安装到 EXE 同级。手工 CMake 构建若使用过旧的显式路径，可执行 `cmake -S . -B build/cmake -DFFMPEG_ROOT:PATH="$PWD/third_party/ffmpeg/windows-x64"` 更新缓存；xmake 迁移后建议运行 `xmake -r`。
 
 上游原生支持 Enhanced FLV 的 `hvc1` H.265，但不原生支持旧式私有 FLV 的 HEVC codec-id 12。项目为对应源码新增 `scripts/ffmpeg/patches/ffmpeg-7.1-legacy-hevc.patch` 与 Windows 构建入口；验证统一使用 `scripts/ffmpeg/verify_ffmpeg_windows.py`，由 Python 编译小型 C 探针，在隔离目录加载项目 DLL 与候选补丁 DLL，对比实际解码帧、时间戳与像素摘要，不依赖系统 `ffmpeg.exe` / `ffprobe.exe`。详见[FFmpeg 封装兼容补丁](docs/硬件加速解码技术文档.md#ffmpeg-封装兼容补丁)。
 
-Windows `avformat-61.dll` 已基于匹配提交应用该补丁并更新到项目依赖目录；导出符号与原 DLL 一致，且未新增项目外运行库依赖。补丁仅扩展旧式 HEVC FLV 读取，不添加私有 Opus codec-id 13。实际播放与解码结果仍以 Windows 验证入口为准。
+Windows 现有 `avformat-61.dll` 保留不变，只有旧式 HEVC 读取补丁；**尚未包含本轮共同清单新增的写入、Opus 和 Enhanced 修复**。构建脚本已统一读取完整 series，但仍只生成候选 DLL，不自动替换；需在原 Windows 构建环境重编并实际验证后交付，不能把 macOS 回归当作 Windows DLL 验收。
 
 使用 xmake 构建时，需要 MinGW-w64 编译器，运行 `setup_env.ps1` 初始化构建环境：
 

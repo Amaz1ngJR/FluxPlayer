@@ -97,7 +97,6 @@ Controller::Controller(Player& player, Window& window)
     , speedMenuPosX_(0.0f)
     , speedMenuPosY_(0.0f)
     , subtitleEnabled_(Config::getInstance().get().subtitleEnabled)
-    , subtitleFontScale_(Config::getInstance().get().subtitleFontScale)
     , subtitleFont_(nullptr)
 {
 }
@@ -166,7 +165,8 @@ bool Controller::init() {
         return false;
     }
 
-    luaBackend_ = std::make_unique<FluxUI::ImGuiBackend>(ImGui::GetFont(), ImGui::GetFont(), monoFont);
+    luaBackend_ = std::make_unique<FluxUI::ImGuiBackend>(ImGui::GetFont(), ImGui::GetFont(), monoFont,
+        static_cast<ImFont*>(subtitleFont_));
     SkinManager::instance().setLuaActionHandler(
         [this](const std::string& action, const std::unordered_map<std::string, std::string>& payload) {
             handleLuaAction(action, payload);
@@ -216,7 +216,7 @@ bool Controller::init(UiContext& ui) {
         appliedSkinGeneration_ = snap->generation;
     }
     subtitleFont_ = static_cast<void*>(ui.subtitleFont());
-    luaBackend_ = std::make_unique<FluxUI::ImGuiBackend>(ui.defaultFont(), ui.titleFont(), ui.monoFont());
+    luaBackend_ = std::make_unique<FluxUI::ImGuiBackend>(ui.defaultFont(), ui.titleFont(), ui.monoFont(), ui.subtitleFont());
     SkinManager::instance().setLuaActionHandler(
         [this](const std::string& action,
                const std::unordered_map<std::string, std::string>& payload) {
@@ -301,6 +301,7 @@ void Controller::render() {
     if (luaBackend_) {
         const bool playerInput = !showSettingsMenu_;
         luaBackend_->setSurfaceInputEnabled("player", playerInput);
+        luaBackend_->setSurfaceInputEnabled("subtitle", playerInput);
         luaBackend_->setInputEnabled(true);
         // 只在状态翻转那一帧打日志：设置面板打开后如果 player 仍可点，就会穿透到
         // 视频控件；反过来如果 settings 被冻住，这个开关就是罪魁。
@@ -493,8 +494,9 @@ std::string optionsText(const SettingEntry& entry) {
 std::vector<std::unordered_map<std::string, std::string>>
 Controller::provideLuaData(const std::string& name) const {
     if (name == "subtitle") {
-        auto* manager = subtitleEnabled_ ? player_.getSubtitleManager() : nullptr;
-        return {{{"text", manager ? manager->getCurrentText(player_.getCurrentTime()) : ""},
+        return {{{"text", subtitleEnabled_ ? player_.getSubtitleText() : ""},
+                 {"fontScale", std::to_string(Config::getInstance().get().subtitleFontScale)},
+                 {"aiStatus", player_.getRealtimeSubtitleStatus()},
                  {"controlsVisible", visible_ ? "true" : "false"}}};
     }
     if (name == "qualities") {
@@ -947,11 +949,14 @@ void Controller::loadSubtitleFont() {
     // MergeMode 将后续字体的字形合并到同一 ImFont 中，缺失字形自动回退
     for (const auto& path : candidates) {
         if (!fileExists(path)) continue;
-        // 使用常用简体中文字形范围（~2500 字），避免 GetGlyphRangesChineseFull 生成
-        // 巨大的字体纹理图集（Full 约 2 万字符，纹理 100-200MB；Common 约 10-20MB）
+        // ASR can emit traditional and less common characters. Keep the full CJK
+        // range on the subtitle font only; 1x oversampling limits atlas memory.
+        ImFontConfig subtitleConfig;
+        subtitleConfig.OversampleH = subtitleConfig.OversampleV = 1;
+        subtitleConfig.PixelSnapH = true;
         ImFont* f = io.Fonts->AddFontFromFileTTF(
-            path.c_str(), 22.0f, nullptr,
-            io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+            path.c_str(), 22.0f, &subtitleConfig,
+            io.Fonts->GetGlyphRangesChineseFull());
         if (!f) continue;
         subtitleFont_ = static_cast<void*>(f);
         LOG_INFO("Subtitle font loaded: " + path);

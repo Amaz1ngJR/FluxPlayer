@@ -35,7 +35,23 @@ $root  = Split-Path $PSScriptRoot -Parent
 # 两套构建系统只在 build\bin 共享最终运行产物，该路径由 CMakeLists.txt/xmake.lua
 # 统一配置。这样既允许最后一次构建覆盖 exe，又不会混用对象文件或生成器缓存。
 $build = "$root\build\cmake"
+$ffmpegRoot = Join-Path $root 'third_party\ffmpeg\windows-x64'
+$runtimeDir = Join-Path $root 'build\bin'
 $t0 = Get-Date
+
+# 使用平台子目录，不从 PATH 或旧 third_party\ffmpeg 根目录回退寻找依赖。
+foreach ($file in @(
+    'include\libavformat\avformat.h',
+    'lib\avformat.lib', 'lib\avcodec.lib', 'lib\avutil.lib',
+    'lib\avfilter.lib', 'lib\swscale.lib', 'lib\swresample.lib',
+    'bin\avformat-61.dll', 'bin\avcodec-61.dll', 'bin\avutil-59.dll',
+    'bin\avfilter-10.dll', 'bin\swscale-8.dll', 'bin\swresample-5.dll'
+)) {
+    $required = Join-Path $ffmpegRoot $file
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        throw "Windows FFmpeg dependency missing: $required"
+    }
+}
 
 function Step($name, $block) {
     $t = Get-Date
@@ -151,6 +167,8 @@ Step "CMake configure" {
         "-DCMAKE_MAKE_PROGRAM=$ninjaExe" `
         "-DCMAKE_C_COMPILER=$cCompiler" `
         "-DCMAKE_CXX_COMPILER=$cxxCompiler" `
+        "-DFFMPEG_ROOT:PATH=$ffmpegRoot" `
+        "-DFLUXPLAYER_RUNTIME_OUTPUT_DIR:PATH=$runtimeDir" `
         -DCMAKE_BUILD_TYPE=Release `
         -DCMAKE_SUPPRESS_REGENERATION=ON
 }
@@ -249,6 +267,14 @@ foreach ($model in Get-ChildItem -LiteralPath "$stage\resources\models\realesrga
     if ($model.Name -ne "realesr-general-x4v3.onnx") {
         throw "Unexpected bundled model in installer staging: $($model.Name)"
     }
+}
+foreach ($name in @("ggml-base-q8_0.bin", "README.md")) {
+    if (-not (Test-Path -LiteralPath "$stage\resources\models\whisper\$name" -PathType Leaf)) {
+        throw "Whisper resource missing: $name"
+    }
+}
+foreach ($model in Get-ChildItem -LiteralPath "$stage\resources\models\whisper" -Filter "*.bin" -File) {
+    if ($model.Name -ne "ggml-base-q8_0.bin") { throw "Unexpected bundled Whisper model: $($model.Name)" }
 }
 foreach ($directory in @("shaders", "fonts")) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage $directory) -PathType Container)) {

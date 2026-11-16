@@ -24,6 +24,7 @@
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/subtitle/SubtitleDecoder.h"
 #include "FluxPlayer/subtitle/SubtitleManager.h"
+#include "FluxPlayer/subtitle/RealtimeSubtitles.h"
 #include "FluxPlayer/video/FrameInterpolator.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Timer.h"
@@ -1359,6 +1360,14 @@ void Player::startWorkerThreads() {
     // 启动 packet / frame 队列（QueueManager 聚合）
     queueManager_->startAll();
 
+    const auto& settings = Config::getInstance().get();
+    if (settings.aiSubtitlesEnabled && hasAudioStream_) {
+        realtimeSubtitles_ = std::make_unique<RealtimeSubtitles>(
+            settings.aiSubtitleModel.empty() ? Config::getResourcePath("models/whisper/ggml-base-q8_0.bin") : settings.aiSubtitleModel,
+            settings.aiSubtitleLanguage, settings.aiSubtitleGpu, settings.aiSubtitleHints);
+        realtimeSubtitles_->reset(queueManager_->audioPacketQueue()->serial());
+    }
+
     // 创建并启动 Worker 对象
     demuxWorker_ = std::make_unique<DemuxWorker>(this);
     demuxWorker_->start();
@@ -1378,6 +1387,7 @@ void Player::joinWorkerThreads(bool abortQueues) {
     const bool hadWorkers = demuxWorker_ || videoDecodeWorker_ || audioDecodeWorker_;
     // 中断回调读取 Player 的稳定原子成员，不跨线程访问可能由 demux 替换的输入。
     shouldQuit_.store(true, std::memory_order_release);
+    if (realtimeSubtitles_) realtimeSubtitles_->requestStop();
     // demux 可能正阻塞在 DASH 两路 HTTP open/read；先改变 generation，FFmpeg 的
     // interrupt_callback 才能在队列 abort 之后及时退出，避免 stop/join 再等待 15 秒。
     // 已安装的候选 merger 不借用旧 shouldQuit_，由拥有者显式中断。
@@ -1398,6 +1408,7 @@ void Player::joinWorkerThreads(bool abortQueues) {
     demuxWorker_.reset();
     videoDecodeWorker_.reset();
     audioDecodeWorker_.reset();
+    realtimeSubtitles_.reset();
     if (hadWorkers) {
         LOG_INFO("Worker cancellation/join elapsed=" + std::to_string(
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1436,6 +1447,20 @@ PlayerState Player::getState() const {
 
 bool Player::isPlaying() const {
     return stateManager_->isPlaying();
+}
+
+std::string Player::getSubtitleText() {
+    if (realtimeSubtitles_) {
+        const auto text = realtimeSubtitles_->text(getCurrentTime(), queueManager_->audioPacketQueue()->serial());
+        if (!text.empty()) return text;
+        const auto status = realtimeSubtitles_->status();
+        return status == "AI: listening..." ? std::string{} : status;
+    }
+    return subtitleManager_ ? subtitleManager_->getCurrentText(getCurrentTime()) : std::string{};
+}
+
+std::string Player::getRealtimeSubtitleStatus() const {
+    return realtimeSubtitles_ ? realtimeSubtitles_->status() : "";
 }
 
 bool Player::isPaused() const {

@@ -32,6 +32,11 @@ public:
         bool subtitleEnabled = true;          ///< 字幕总开关（解码+渲染）
         float subtitleFontScale = 1.4f;       ///< 字幕字体缩放比例（1.0 ~ 2.5）
         std::string subtitleFontPath = "";    ///< 自定义字体路径（留空按平台自动探测 CJK 字体）
+        bool aiSubtitlesEnabled = false;     ///< AI captions override embedded captions; applies on open
+        std::string aiSubtitleModel;         ///< Empty selects bundled models/whisper/ggml-base-q8_0.bin
+        std::string aiSubtitleLanguage = "zh";
+        bool aiSubtitleGpu = true;
+        std::string aiSubtitleHints;         ///< Domain terms for ASR, not replacement rules
 
         // ==================== 网络代理设置 ====================
         std::string httpProxy = "http://127.0.0.1:7890";    ///< HTTP/HTTPS 代理

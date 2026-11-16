@@ -221,6 +221,8 @@ void Text::emit(IFluxUIBackend& backend, const SkinSnapshot& skin) const {
     cmd.fontSize = fontSize;
     cmd.baseline = baseline;
     cmd.textAlign = textAlign;
+    cmd.ellipsis = ellipsis;
+    cmd.wrap = wrap;
     backend.submit(cmd);
 }
 

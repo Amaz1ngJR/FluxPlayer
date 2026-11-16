@@ -13,6 +13,7 @@
 #include "FluxPlayer/audio/AudioOutput.h"
 #include "FluxPlayer/core/PlayerState.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/subtitle/RealtimeSubtitles.h"
 
 #include <cmath>
 
@@ -200,6 +201,7 @@ void DecodeWorker::runAudio() {
 
         if (serial != lastSerial) {
             audioDecoder_->flush();
+            if (player_->realtimeSubtitles_) player_->realtimeSubtitles_->reset(serial);
             // 帧队列已由控制路径清空，残留消费偏移按凭证身份失效。
             player_->audioDrainedEof_.store(false);  // 退出 EOF 停泊态，恢复消费
             lastSerial = serial;
@@ -263,6 +265,8 @@ void DecodeWorker::runAudio() {
             // 只有目标帧完成格式转换并真正入队后才能恢复设备；目标前丢弃帧返回 true
             // 但 enqueued=false，不能过早解除门控重现 underrun/AClock 回跳。
             if (audioEnqueued) {
+                if (player_->realtimeSubtitles_ && audioPktQueue_->serial() == serial)
+                    player_->realtimeSubtitles_->push(rawFrame.getAVFrame(), rawFrame.getPTS(), serial);
                 std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
                 if (audioPktQueue_->serial() == serial &&
                     player_->seekDemuxReady_.load(std::memory_order_acquire) &&
@@ -284,6 +288,7 @@ void DecodeWorker::runAudio() {
         av_packet_unref(packet);
 
         if (isEof && decoderEof) {
+            if (player_->realtimeSubtitles_) player_->realtimeSubtitles_->finish(serial);
             // 确认 receive EOF 后停泊，等待 Seek 的新 serial 或 abort。
             std::lock_guard<std::mutex> lock(player_->audioCallbackMutex_);
             if (audioPktQueue_->serial() == serial) player_->audioDrainedEof_.store(true);

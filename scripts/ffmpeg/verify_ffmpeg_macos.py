@@ -151,18 +151,19 @@ def without_av1_sequence(payload):
 
 
 class FixtureSuite:
-    def __init__(self, prefix, work):
+    def __init__(self, prefix, work, library_dir):
         self.work = work.resolve()
         self.work.mkdir(parents=True, exist_ok=True)
         self.ffmpeg = str(prefix / "bin" / "ffmpeg")
         self.ffprobe = str(prefix / "bin" / "ffprobe")
         self.base_env = dict(os.environ)
         self.base_env.pop("DYLD_LIBRARY_PATH", None)
-        lib_dir = (ROOT / "third_party" / "ffmpeg-macos" / "lib").resolve()
+        lib_dir = library_dir.resolve()
         self.project_env = dict(self.base_env, DYLD_LIBRARY_PATH=str(lib_dir))
         # 先证明进程加载项目库，防止误测系统 FFmpeg 而产生假阳性。
         loaded = invoke([self.ffprobe, "-version"], dict(self.project_env, DYLD_PRINT_LIBRARIES="1"))
-        if loaded.returncode or str(lib_dir / "libavformat.58.76.100.dylib") not in loaded.stderr:
+        avformat = (lib_dir / "libavformat.dylib").resolve(strict=True)
+        if loaded.returncode or str(avformat) not in loaded.stderr:
             raise RuntimeError("测试进程没有加载项目 libavformat\n" + loaded.stderr)
 
     def generate(self):
@@ -181,7 +182,9 @@ class FixtureSuite:
 
         for source, output in [("hevc.mp4", "legacy-hevc.flv"), ("hevc-no-b.mp4", "legacy-hevc-no-b.flv")]:
             checked([self.ffmpeg, "-v", "error", "-y", "-i", str(self.work / source), "-c", "copy",
-                     "-f", "flv", str(self.work / output)], self.project_env)
+                     "-f", "flv", "-flvflags", "legacy_hevc", str(self.work / output)], self.project_env)
+        checked([self.ffmpeg, "-v", "error", "-y", "-i", str(self.work / "hevc.mp4"),
+                 "-c", "copy", "-f", "flv", str(self.work / "upstream-default.flv")], self.project_env)
         enhanced_hevc(self.work / "legacy-hevc.flv", self.work / "enhanced-hevc.flv")
         enhanced_hevc(self.work / "legacy-hevc-no-b.flv", self.work / "enhanced-hevc-x.flv", coded_x=True)
 
@@ -228,6 +231,12 @@ class FixtureSuite:
             assert sum(line.startswith("0,") for line in frames) == 12, name
             print(f"PASS {name}: {codec}, 12 decoded frames")
         assert self.decoded("legacy-hevc.flv") == self.decoded("enhanced-hevc.flv"), "HEVC 画面/时间戳不一致"
+        assert self.decoded("legacy-hevc.flv") == self.decoded("upstream-default.flv")
+        for name, enhanced in [("legacy-hevc.flv", False), ("upstream-default.flv", True)]:
+            _, tags = read_flv(self.work / name)
+            video = [payload for kind, _, payload in tags if kind == 9]
+            assert video and all(bool(payload[0] & 0x80) == enhanced for payload in video), name
+        print("PASS default Enhanced writer and explicit legacy HEVC writer")
         assert self.decoded("legacy-hevc-no-b.flv") == self.decoded("enhanced-hevc-x.flv"), "CodedFramesX 时间戳不一致"
         header, tags = read_flv(self.work / "enhanced-av1.flv")
         stripped = []
@@ -248,6 +257,11 @@ class FixtureSuite:
             assert info["codec_name"] == "opus" and info["channels"] == channels and info["sample_rate"] == "48000"
             self.decoded(name)
             print(f"PASS {name}: Opus {channels} channel(s)")
+        rejected = invoke([self.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+                           "anullsrc=r=48000:cl=5.1", "-t", "0.1", "-c:a", "libopus", "-f", "flv",
+                           str(self.work / "rejected-multichannel.flv")], self.project_env)
+        assert rejected.returncode != 0 and "Private FLV Opus requires 48 kHz mono/stereo" in rejected.stderr
+        print("PASS private Opus rejects multichannel audio")
 
 
     def verify_bad_tags(self):
@@ -279,22 +293,19 @@ class FixtureSuite:
             missing = names(self.base_env) - names(self.project_env)
             assert not missing, f"能力减少 {option}: {sorted(missing)}"
         print("PASS demuxer/protocol capability regression")
-        print("All FFmpeg FLV compatibility checks passed.")
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--ffmpeg-prefix", type=Path)
+    parser.add_argument("--ffmpeg-prefix", type=Path, required=True, help="FFmpeg 7 installation including CLI tools")
+    parser.add_argument("--library-dir", type=Path, default=ROOT / "third_party/ffmpeg/macos-arm64/lib")
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build" / "ffmpeg-flv-tests")
     args = parser.parse_args()
-    prefix = args.ffmpeg_prefix
-    if prefix is None:
-        env = dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1")
-        prefix = Path(checked(["brew", "--prefix"], env).strip()) / "opt" / "ffmpeg@4"
-    suite = FixtureSuite(prefix, args.work_dir)
+    suite = FixtureSuite(args.ffmpeg_prefix, args.work_dir, args.library_dir)
     suite.generate()
     suite.verify_media()
     suite.verify_bad_tags()
     suite.verify_capabilities()
+    print("All FFmpeg FLV compatibility checks passed.")
 
 
 

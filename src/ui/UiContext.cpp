@@ -253,14 +253,12 @@ void UiContext::loadFonts() {
     };
 
     // ── 默认字体（16px，CJK 简体常用） ──
-    std::string usedCjk;
     for (const auto& path : cjkCandidates) {
         if (!fileExists(path)) continue;
         defaultFont_ = io.Fonts->AddFontFromFileTTF(
             path.c_str(), 16.0f, nullptr,
             io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
         if (defaultFont_) {
-            usedCjk = path;
             LOG_INFO("UiContext default font: " + path);
             break;
         }
@@ -282,11 +280,19 @@ void UiContext::loadFonts() {
                  + "); falling back to default for title");
     }
 
-    // ── 字幕字体（22px CJK + 扩展范围） ──
-    if (!usedCjk.empty()) {
+    // Subtitle text may contain traditional/less common Chinese emitted by ASR.
+    // Keep the larger range on this font only, with 1x oversampling.
+    auto subtitleCandidates = cjkCandidates;
+    const auto& customSubtitleFont = Config::getInstance().get().subtitleFontPath;
+    if (!customSubtitleFont.empty()) subtitleCandidates.insert(subtitleCandidates.begin(), customSubtitleFont);
+    for (const auto& subtitlePath : subtitleCandidates) {
+        if (!fileExists(subtitlePath)) continue;
+        ImFontConfig subtitleConfig;
+        subtitleConfig.OversampleH = subtitleConfig.OversampleV = 1;
+        subtitleConfig.PixelSnapH = true;
         subtitleFont_ = io.Fonts->AddFontFromFileTTF(
-            usedCjk.c_str(), 22.0f, nullptr,
-            io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+            subtitlePath.c_str(), 22.0f, &subtitleConfig,
+            io.Fonts->GetGlyphRangesChineseFull());
         if (subtitleFont_) {
             // 静态数组必须在 atlas 构建期间保持有效
             static const ImWchar rangesExtra[] = {
@@ -304,13 +310,15 @@ void UiContext::loadFonts() {
             ImFontConfig mcfg;
             mcfg.MergeMode = true;
             mcfg.PixelSnapH = true;
-            io.Fonts->AddFontFromFileTTF(usedCjk.c_str(), 22.0f, &mcfg, rangesExtra);
+            io.Fonts->AddFontFromFileTTF(subtitlePath.c_str(), 22.0f, &mcfg, rangesExtra);
 #if defined(__APPLE__)
             const char* arialUnicode = "/Library/Fonts/Arial Unicode.ttf";
             if (fileExists(arialUnicode)) {
                 io.Fonts->AddFontFromFileTTF(arialUnicode, 22.0f, &mcfg, rangesExtra);
             }
 #endif
+            LOG_INFO("UiContext subtitle font (full CJK): " + subtitlePath);
+            break;
         }
     }
     if (!subtitleFont_) {

@@ -31,7 +31,7 @@ APP_NAME="FluxPlayer"
 VERSION=$(grep -m1 'project(FluxPlayer VERSION' "$ROOT/CMakeLists.txt" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
 APP_BUNDLE="$BIN_DIR/$APP_NAME.app"
 DMG_OUT="$ROOT/dist/$APP_NAME-$VERSION.dmg"
-FFMPEG_LIB_DIR="$ROOT/third_party/ffmpeg-macos/lib"
+FFMPEG_LIB_DIR="$ROOT/third_party/ffmpeg/macos-arm64/lib"
 YTDLP="$ROOT/third_party/yt-dlp/yt-dlp_macos"
 ORT_LIBRARY="$ROOT/source/onnxruntime/macos-arm64/libonnxruntime.1.23.2.dylib"
 
@@ -39,7 +39,8 @@ for required in "$FFMPEG_LIB_DIR/libavformat.dylib" "$YTDLP" \
     "$ROOT/source/pic2.png" "$ROOT/source/video/video_01.mp4" \
     "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua" \
     "$ROOT/source/models/realesrgan/realesr-general-x4v3.onnx" \
-    "$ROOT/source/models/realesrgan/LICENSE" "$ROOT/source/models/realesrgan/README.md" "$ORT_LIBRARY"; do
+    "$ROOT/source/models/realesrgan/LICENSE" "$ROOT/source/models/realesrgan/README.md" \
+    "$ROOT/source/models/whisper/ggml-base-q8_0.bin" "$ROOT/source/models/whisper/README.md" "$ORT_LIBRARY"; do
     if [ ! -f "$required" ]; then
         echo "Missing packaging input: $required" >&2
         exit 1
@@ -65,6 +66,9 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
 mkdir -p "$APP_BUNDLE/Contents/Resources/licenses"
 cp -R "$ROOT/third_party/cctv_h5e" "$APP_BUNDLE/Contents/Resources/licenses/"
+if [ -d "$BIN_DIR/resources/licenses/whisper" ]; then
+    cp -R "$BIN_DIR/resources/licenses/whisper" "$APP_BUNDLE/Contents/Resources/licenses/"
+fi
 
 # shaders/fonts 必须与可执行文件同目录：
 # GLRenderer 用 getExeDir()+"/shaders/..." 定位着色器，字体按可执行文件同级 fonts/
@@ -86,6 +90,10 @@ for model_resource in realesr-general-x4v3.onnx LICENSE README.md; do
     cp "$ROOT/source/models/realesrgan/$model_resource" "$APP_BUNDLE/Contents/Resources/models/realesrgan/"
 done
 cp -R "$ROOT/source/onnxruntime" "$APP_BUNDLE/Contents/Resources/"
+mkdir -p "$APP_BUNDLE/Contents/Resources/models/whisper"
+for model_resource in ggml-base-q8_0.bin README.md; do
+    cp "$ROOT/source/models/whisper/$model_resource" "$APP_BUNDLE/Contents/Resources/models/whisper/"
+done
 
 # 皮肤包：Config::getResourcePath("skins") 在 macOS 优先解析到 ../Resources/skins，
 # 单文件 Lua 皮肤是唯一运行时入口；保留目录内 SVG 预览和设计稿。

@@ -102,6 +102,12 @@ recordDir=Record
 hwaccel=true
 
 [Subtitle]
+aiSubtitlesEnabled=false
+# Empty uses bundled base Q8. Optional small: see source/models/whisper/README.md
+aiSubtitleModel=
+aiSubtitleLanguage=zh
+aiSubtitleGpu=true
+aiSubtitleHints=
 # subtitleEnabled: 是否启用内嵌字幕流解码与渲染 (true / false)
 # 修改后需重新打开媒体才会启停解码；运行时仅通过设置菜单开关影响渲染
 subtitleEnabled=true

@@ -11,7 +11,7 @@ namespace FluxPlayer::FluxUI {
 class ImGuiBackend final : public IFluxUIBackend {
 public:
     ImGuiBackend(ImFont* bodyFont = nullptr, ImFont* displayFont = nullptr,
-                 ImFont* monoFont = nullptr);
+                 ImFont* monoFont = nullptr, ImFont* subtitleFont = nullptr);
 
     void beginSurface(const std::string& name, const Rect& bounds) override;
     void submit(const DrawCommand& command) override;
@@ -46,6 +46,7 @@ private:
     ImFont* bodyFont_ = nullptr;
     ImFont* displayFont_ = nullptr;
     ImFont* monoFont_ = nullptr;
+    ImFont* subtitleFont_ = nullptr;
     ImDrawList* drawList_ = nullptr;
     Rect surface_;
     std::vector<BackendEvent> events_;
@@ -59,6 +60,10 @@ private:
     /// 按 surface 名单独禁用的输入（见 setSurfaceInputEnabled）
     std::unordered_map<std::string, bool> disabledSurfaces_;
     std::string currentSurface_;
+    bool textCopyEnabled_ = false;
+    bool openCopyPopup_ = false;
+    std::string copySurface_;
+    std::vector<char> copyBuffer_;
 
     // 滚动区域状态。Scroll 命令提交时压入裁剪矩形；Lua 侧把偏移量算进子控件坐标，
     // backend 只负责按 id 记录偏移、提供滚轮增量，并把 input() 的鼠标坐标一起

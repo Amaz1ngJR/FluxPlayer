@@ -21,9 +21,9 @@ build/
 !source/onnxruntime/windows-x64/DirectML.dll
 
 # Allow FFmpeg prebuilt binaries
-!third_party/ffmpeg/bin/*.dll
-!third_party/ffmpeg/lib/*.lib
-!third_party/ffmpeg-macos/lib/*.dylib
+!third_party/ffmpeg/windows-x64/bin/*.dll
+!third_party/ffmpeg/windows-x64/lib/*.lib
+!third_party/ffmpeg/macos-arm64/lib/*.dylib
 
 # Allow yt-dlp prebuilt binaries
 !third_party/yt-dlp/yt-dlp_macos
@@ -56,3 +56,10 @@ build/
 # Packaging output
 dist/
 *.dmg
+
+# Vendored Whisper CMake modules are source files, not generated build output.
+!third_party/whisper.cpp/**/*.cmake
+
+# Only base Q8 is bundled; keep original and optional upgrade weights out of Git.
+/source/models/whisper/ggml-base.bin
+/source/models/whisper/ggml-small.bin

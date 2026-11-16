@@ -75,6 +75,7 @@ struct DrawCommand {
     float fontSize = 0.0f;
     std::optional<float> baseline; // Offset from bounds.y; unset keeps vertical centering.
     bool ellipsis = false;
+    bool wrap = false;
     std::string id;
     /// 控件声明的事件名（如皮肤写的 action="configChanged"）。后端把它原样带回
     /// BackendEvent，runtime 用它分派；为空时才回退到通用的 widgetChanged。
@@ -207,6 +208,7 @@ public:
     float fontSize = 0.0f;
     std::optional<float> baseline;
     bool ellipsis = false;
+    bool wrap = false;
     std::string textAlign = "center";
 
     Size measure() const override;

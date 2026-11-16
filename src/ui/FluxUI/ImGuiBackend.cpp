@@ -117,8 +117,8 @@ void drawGradientSegment(ImDrawList* drawList, ImVec2 start, ImVec2 end,
 }
 }
 
-ImGuiBackend::ImGuiBackend(ImFont* bodyFont, ImFont* displayFont, ImFont* monoFont)
-    : bodyFont_(bodyFont), displayFont_(displayFont), monoFont_(monoFont) {}
+ImGuiBackend::ImGuiBackend(ImFont* bodyFont, ImFont* displayFont, ImFont* monoFont, ImFont* subtitleFont)
+    : bodyFont_(bodyFont), displayFont_(displayFont), monoFont_(monoFont), subtitleFont_(subtitleFont) {}
 
 void ImGuiBackend::beginSurface(const std::string& name, const Rect& bounds) {
     surface_ = bounds;
@@ -128,6 +128,7 @@ void ImGuiBackend::beginSurface(const std::string& name, const Rect& bounds) {
     const auto disabled = disabledSurfaces_.find(name);
     const bool surfaceInput = inputEnabled_ &&
         (disabled == disabledSurfaces_.end() || !disabled->second);
+    textCopyEnabled_ = surfaceInput;
     // subtitle / toast 是纯展示叠层：皮肤在这两个 surface 里只提交 rect / text，没有任何
     // 可点控件，因此它们不需要鼠标输入。但它们的宿主窗口是【全屏】的，一旦带上
     // 接收鼠标的资格，就会和真正需要输入的 surface 争抢 g.HoveredWindow。
@@ -223,6 +224,9 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
         case DrawType::Text: {
             ImFont* font = cmd.fontRole == "mono" && monoFont_ ? monoFont_ :
                            (cmd.fontRole == "display" && displayFont_ ? displayFont_ : bodyFont_);
+            if (subtitleFont_ && (cmd.fontRole == "subtitle" ||
+                (currentSurface_ == "subtitle" && cmd.fontRole == "body")))
+                font = subtitleFont_;
             if (!font) font = ImGui::GetFont();
             const float size = cmd.fontSize > 0.0f ? cmd.fontSize : font->FontSize;
             const ImVec2 textSize = font->CalcTextSizeA(size, FLT_MAX, 0.0f, cmd.text.c_str());
@@ -233,7 +237,12 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
                 ? cmd.bounds.y + *cmd.baseline - font->Ascent * size / font->FontSize
                 : cmd.bounds.y + std::max(0.0f, (cmd.bounds.height - textSize.y) * 0.5f);
             const ImVec2 pos(textX, textY);
-            if (cmd.ellipsis) {
+            if (cmd.wrap) {
+                drawList_->PushClipRect(min, max, true);
+                drawList_->AddText(font, size, {min.x, min.y}, colorOf(cmd.color),
+                    cmd.text.c_str(), nullptr, std::max(1.0f, cmd.bounds.width));
+                drawList_->PopClipRect();
+            } else if (cmd.ellipsis) {
                 const float ellipsisWidth = font->CalcTextSizeA(size, FLT_MAX, 0.0f, "...").x;
                 const float textWidth = std::max(1.0f, cmd.bounds.width - ellipsisWidth);
                 const char* textEnd = nullptr;
@@ -252,6 +261,21 @@ void ImGuiBackend::submit(const DrawCommand& cmd) {
                 }
             } else {
                 drawList_->AddText(font, size, pos, colorOf(cmd.color), cmd.text.c_str());
+            }
+            // Do not register an input widget over the label: that would steal
+            // normal button clicks. Right click opens a selectable read-only copy.
+            const auto clipMin = drawList_->GetClipRectMin();
+            const auto clipMax = drawList_->GetClipRectMax();
+            const ImVec2 hitMin(std::max(min.x, clipMin.x), std::max(min.y, clipMin.y));
+            const ImVec2 hitMax(std::min(max.x, clipMax.x), std::min(max.y, clipMax.y));
+            if (textCopyEnabled_ && !cmd.text.empty() &&
+                (ImGui::IsWindowHovered() || currentSurface_ == "subtitle") &&
+                ImGui::IsMouseHoveringRect(hitMin, hitMax, false) &&
+                ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+                copyBuffer_.assign(cmd.text.begin(), cmd.text.end());
+                copyBuffer_.push_back('\0');
+                copySurface_ = currentSurface_;
+                openCopyPopup_ = true;
             }
             break;
         }
@@ -639,7 +663,8 @@ InputSnapshot ImGuiBackend::input(const std::string& surface) const {
     const auto disabled = disabledSurfaces_.find(which);
     const bool surfaceInput = inputEnabled_ &&
         (disabled == disabledSurfaces_.end() || !disabled->second);
-    const bool acceptsMouse = surfaceInput && (!hostWindowBegun_ || ImGui::IsWindowHovered());
+    const bool popupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    const bool acceptsMouse = surfaceInput && !popupOpen && (!hostWindowBegun_ || ImGui::IsWindowHovered());
     return {{io.MousePos.x, io.MousePos.y}, acceptsMouse && io.MouseDown[0],
             acceptsMouse && ImGui::IsMouseClicked(0), acceptsMouse ? io.MouseWheel : 0.0f};
 }
@@ -651,6 +676,34 @@ std::vector<BackendEvent> ImGuiBackend::takeEvents() {
 }
 
 void ImGuiBackend::endSurface() {
+    if (copySurface_ == currentSurface_) {
+        if (openCopyPopup_) {
+            ImGui::OpenPopup("Select / copy text");
+            openCopyPopup_ = false;
+        }
+        if (ImGui::BeginPopup("Select / copy text")) {
+            ImGui::TextUnformatted("Select text, then Ctrl+C / Cmd+C");
+            const float width = std::min(640.0f, ImGui::GetIO().DisplaySize.x * .8f);
+            ImGui::InputTextMultiline("##copy_text", copyBuffer_.data(), copyBuffer_.size(),
+                {width, 150}, ImGuiInputTextFlags_ReadOnly);
+            if (ImGui::Button("Copy all")) {
+                ImGui::SetClipboardText(copyBuffer_.data());
+                ImGui::CloseCurrentPopup();
+            }
+            const std::string value(copyBuffer_.data());
+            auto url = value.find("https://");
+            if (url == std::string::npos) url = value.find("http://");
+            if (url != std::string::npos) {
+                ImGui::SameLine();
+                if (ImGui::Button("Copy link")) {
+                    const auto end = value.find_first_of(" \r\n\t<>\"", url);
+                    ImGui::SetClipboardText(value.substr(url, end == std::string::npos ? end : end - url).c_str());
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndPopup();
+        }
+    }
     // 弹出 Scroll 压入的裁剪矩形（Lua 侧可能在一次渲染里开多个滚动区）
     while (clipDepth_ > 0) {
         drawList_->PopClipRect();

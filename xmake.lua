@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.9.6"
+local version = "0.9.7"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -41,15 +41,27 @@ option("tcp_log")
     set_description("Enable TCP log server for remote log viewing")
 option_end()
 
+option("whisper_root")
+    set_default("")
+    set_showmenu(true)
+    set_description("Whisper source directory; empty uses third_party/whisper.cpp")
+option_end()
+
+option("ai_subtitles")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Build local AI subtitles with the vendored Whisper library")
+option_end()
+
 -- ========================
 -- FFmpeg 路径配置
 -- ========================
 -- 根据当前编译平台自动选择 FFmpeg 的安装路径
 local ffmpeg_root = ""
 if is_plat("windows") then
-    ffmpeg_root = "third_party/ffmpeg"          -- Windows：使用项目内的预编译版本
+    ffmpeg_root = "third_party/ffmpeg/windows-x64" -- Windows x64 预编译版本
 elseif is_plat("macosx") then
-    ffmpeg_root = "third_party/ffmpeg-macos"    -- macOS：使用项目内的预编译版本（与 Windows 对称）
+    ffmpeg_root = "third_party/ffmpeg/macos-arm64" -- macOS arm64 预编译版本
 else
     ffmpeg_root = "/usr/local"                  -- Linux：系统默认安装路径
 end
@@ -203,6 +215,45 @@ rule("flux.ort.asset")
 
 target("FluxPlayer")
     set_kind("binary")  -- 编译为可执行文件
+    local whisper_root = get_config("whisper_root")
+    if not whisper_root or #whisper_root == 0 then whisper_root = "third_party/whisper.cpp" end
+    if has_config("ai_subtitles") then
+        local whisper_build = path.join("build", "whisper", get_config("plat") or os.host(), get_config("arch") or os.arch(), get_config("mode") or "release")
+        local whisper_mode = get_config("mode") == "debug" and "Debug" or "Release"
+        add_defines("FLUX_WHISPER=1")
+        add_includedirs(path.join(whisper_root, "include"), path.join(whisper_root, "ggml/include"))
+        add_linkdirs(path.join(whisper_build, "lib"))
+        add_links("whisper", "ggml", "ggml-cpu")
+        if is_plat("macosx") then
+            add_links("ggml-blas", "ggml-metal")
+            add_frameworks("Accelerate", "Foundation", "Metal", "MetalKit")
+        end
+        add_links("ggml-base")
+        -- Use the same CMake library graph as the main build, with static archives
+        -- in a stable directory. Empty legacy whisper_root no longer disables ASR.
+        before_build(function(target)
+            local builddir = path.absolute(whisper_build)
+            local cc = target:tool("cc")
+            local cxx = target:tool("cxx")
+            local args = {"-S", path.absolute("scripts/whisper"), "-B", builddir,
+                "-DFLUX_WHISPER_SOURCE_DIR=" .. path.absolute(whisper_root),
+                "-DCMAKE_BUILD_TYPE=" .. whisper_mode,
+                "-DCMAKE_C_COMPILER=" .. cc, "-DCMAKE_CXX_COMPILER=" .. cxx,
+                "-DGGML_BLAS=" .. (target:is_plat("macosx") and "ON" or "OFF"),
+                "-DGGML_METAL=" .. (target:is_plat("macosx") and "ON" or "OFF")}
+            if target:is_plat("macosx") then
+                table.insert(args, "-DCMAKE_OSX_ARCHITECTURES=" .. target:arch())
+            elseif target:is_plat("windows") then
+                table.insert(args, "-G")
+                table.insert(args, "MinGW Makefiles")
+            end
+            os.vrunv("cmake", args)
+            os.vrunv("cmake", {"--build", builddir, "--target", "whisper", "--config",
+                whisper_mode, "--parallel", "4"})
+            os.mkdir("build/bin/resources/licenses/whisper")
+            os.cp(path.join(whisper_root, "LICENSE"), "build/bin/resources/licenses/whisper/LICENSE")
+        end)
+    end
 
     -- CMake 和 xmake 共用最终运行目录。后执行的构建可以覆盖 FluxPlayer.exe，
     -- 但两者的对象文件与缓存分别留在 build/cmake、build/windows，不会互相污染。
@@ -391,6 +442,15 @@ target("FluxPlayer")
         local resources_dir = path.join(target:targetdir(), "resources")
         os.mkdir(resources_dir)
         cp_if_changed("source/pic2.png", resources_dir)
+        -- Match CMake: only the built-in base Q8 model is deployed.
+        for _, base in ipairs({source_dst, resources_dir}) do
+            local model_dir = path.join(base, "models/whisper")
+            os.tryrm(model_dir)
+            os.mkdir(model_dir)
+            for _, name in ipairs({"ggml-base-q8_0.bin", "README.md"}) do
+                cp_if_changed(path.join("source/models/whisper", name), model_dir)
+            end
+        end
         -- 模型采用明确白名单；清理两个部署目录，避免增量构建残留旧模型。
         for _, base in ipairs({source_dst, resources_dir}) do
             local model_dir = path.join(base, "models/realesrgan")
@@ -419,7 +479,7 @@ target("FluxPlayer")
         os.cp("source/UI/skins/minimal-lua", lua_skin_dst)
         if is_plat("windows") then
             -- Windows：把 FFmpeg 的 DLL 增量复制到可执行文件旁边，否则运行时找不到
-            local ffmpeg_bin = path.join(os.projectdir(), "third_party", "ffmpeg", "bin")
+            local ffmpeg_bin = path.join(os.projectdir(), ffmpeg_root, "bin")
             if os.isdir(ffmpeg_bin) then
                 for _, dll in ipairs(os.files(path.join(ffmpeg_bin, "*.dll"))) do
                     cp_if_changed(dll, target:targetdir())
@@ -444,7 +504,7 @@ target("FluxPlayer")
             end
         elseif is_plat("macosx") then
             -- macOS：把 FFmpeg 的 dylib 复制到可执行文件旁边（与 Windows 对称）
-            local ffmpeg_lib = path.join(os.projectdir(), "third_party", "ffmpeg-macos", "lib")
+            local ffmpeg_lib = path.join(os.projectdir(), ffmpeg_root, "lib")
             if os.isdir(ffmpeg_lib) then
                 os.cp(path.join(ffmpeg_lib, "*.dylib"), target:targetdir())
             end

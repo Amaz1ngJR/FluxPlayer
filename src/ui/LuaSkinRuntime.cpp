@@ -318,6 +318,7 @@ FluxUI::WidgetPtr parseWidget(lua_State* state, int index, int depth, std::strin
         if (lua_isnumber(state, -1)) text->baseline = static_cast<float>(lua_tonumber(state, -1));
         lua_pop(state, 1);
         text->ellipsis = boolField(state, index, "ellipsis", false);
+        text->wrap = boolField(state, index, "wrap", false);
         widget = std::move(text);
     } else if (type == "button") {
         auto button = std::make_unique<FluxUI::Button>();

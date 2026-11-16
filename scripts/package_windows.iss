@@ -26,7 +26,9 @@ WizardStyle=modern
 ; 主程序
 Source: "..\dist\staging\FluxPlayer.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\dist\staging\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
-; 运行时 DLL（由 cmake --install + file(GET_RUNTIME_DEPENDENCIES) 精确收集）
+; 运行时 DLL：FFmpeg 源依赖位于 third_party\ffmpeg\windows-x64，
+; 由 cmake --install + file(GET_RUNTIME_DEPENDENCIES) 收集到 staging 根目录。
+; 安装时仍放在 EXE 旁边，不把 third_party 的平台目录结构带入安装目录。
 Source: "..\dist\staging\*.dll";          DestDir: "{app}"; Flags: ignoreversion
 ; GLSL 着色器（运行时从可执行文件目录相对路径加载）
 Source: "..\dist\staging\shaders\*";      DestDir: "{app}\shaders"; Flags: ignoreversion recursesubdirs

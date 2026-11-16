@@ -179,6 +179,37 @@ bool volume_write(const std::string& value) {
 }
 
 // ── Subtitles ──
+std::string aiHints_read() { return Config::getInstance().get().aiSubtitleHints; }
+bool aiHints_write(const std::string& value) {
+    if (value.size() > 1024 || value.find_first_of("\r\n") != std::string::npos) return false;
+    Config::getInstance().getMutable().aiSubtitleHints = value;
+    persist(); return true;
+}
+std::string aiEnabled_read() { return boolText(Config::getInstance().get().aiSubtitlesEnabled); }
+bool aiEnabled_write(const std::string& value) {
+    bool enabled;
+    if (!parseBool(value, enabled)) return false;
+    Config::getInstance().getMutable().aiSubtitlesEnabled = enabled;
+    persist(); return true;
+}
+std::string aiModel_read() { return Config::getInstance().get().aiSubtitleModel; }
+bool aiModel_write(const std::string& value) {
+    Config::getInstance().getMutable().aiSubtitleModel = value;
+    persist(); return true;
+}
+std::string aiLanguage_read() { return Config::getInstance().get().aiSubtitleLanguage; }
+bool aiLanguage_write(const std::string& value) {
+    if (value.empty() || value.size() > 16 || value.find_first_not_of("abcdefghijklmnopqrstuvwxyz-") != std::string::npos) return false;
+    Config::getInstance().getMutable().aiSubtitleLanguage = value;
+    persist(); return true;
+}
+std::string aiGpu_read() { return boolText(Config::getInstance().get().aiSubtitleGpu); }
+bool aiGpu_write(const std::string& value) {
+    bool enabled;
+    if (!parseBool(value, enabled)) return false;
+    Config::getInstance().getMutable().aiSubtitleGpu = enabled;
+    persist(); return true;
+}
 std::string subtitleEnabled_read() { return boolText(Config::getInstance().get().subtitleEnabled); }
 bool subtitleEnabled_write(const std::string& value) {
     bool enabled = false;
@@ -381,6 +412,12 @@ const SettingEntry kSettings[] = {
     {"hwaccel",           "Hardware Decoding",     SettingType::Boolean, "playback", "PLAYBACK", 0, 0, 0, true,  hwaccel_read,   hwaccel_write,   "Takes effect when you open the next media or start an offline SR task."},
 
     // ── SUBTITLES（旧版在 GENERAL 页内的小节）───────────────────────────
+    {"aiSubtitlesEnabled", "AI Subtitles", SettingType::Boolean, "subtitle", "SUBTITLES", 0, 0, 0, true, aiEnabled_read, aiEnabled_write, "Local speech recognition; replaces embedded subtitles. Reopen media to apply."},
+    {"aiSubtitleModel", "Whisper Model", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiModel_read, aiModel_write, "Empty uses built-in base Q8. Optional small: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin (466 MiB). Select the downloaded file and reopen media.",
+        nullptr, 0, 0.75, PathKind::File, "*.bin", "Select Whisper Model"},
+    {"aiSubtitleLanguage", "Speech Language", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiLanguage_read, aiLanguage_write, "zh / en / ja / auto. Reopen media to apply.", nullptr, 0, 0.55},
+    {"aiSubtitleHints", "Recognition Hints", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiHints_read, aiHints_write, "Names and domain terms, e.g. email, account, login. Use a short list. Reopen media to apply.", nullptr, 0, 0.75},
+    {"aiSubtitleGpu", "AI GPU Acceleration", SettingType::Boolean, "subtitle", "SUBTITLES", 0, 0, 0, true, aiGpu_read, aiGpu_write, "Uses the backend enabled in whisper.cpp. Reopen media to apply."},
     {"subtitleEnabled",   "Subtitles",             SettingType::Boolean, "subtitle", "SUBTITLES", 0, 0, 0, false, subtitleEnabled_read, subtitleEnabled_write, nullptr},
     {"subtitleFontScale", "Font Scale",            SettingType::Number,  "subtitle", "SUBTITLES", 1.4, 1.0, 2.5, false, subtitleScale_read, subtitleScale_write, nullptr,
                           nullptr, 0, 0.55},

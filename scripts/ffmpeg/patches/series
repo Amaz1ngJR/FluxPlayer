@@ -1,0 +1,4 @@
+# Shared source: 5a1f107b4c78318f318897900acad1b6c6aa3f9d
+ffmpeg-7.1-legacy-hevc.patch
+ffmpeg-7.1-private-flv.patch
+ffmpeg-7.1-enhanced-flv-fixes.patch

@@ -90,7 +90,7 @@ def main(argv=None):
     parser.add_argument("--legacy", type=Path, default=ROOT / "build/ffmpeg-flv-tests/legacy-hevc.flv")
     parser.add_argument("--enhanced", type=Path, default=ROOT / "build/ffmpeg-flv-tests/enhanced-hevc.flv",
                         help="与 legacy 由同一码流生成的 Enhanced FLV")
-    parser.add_argument("--ffmpeg-dir", type=Path, default=ROOT / "third_party/ffmpeg",
+    parser.add_argument("--ffmpeg-dir", type=Path, default=ROOT / "third_party/ffmpeg/windows-x64",
                         help="项目 FFmpeg 目录（含 include/lib/bin）")
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/ffmpeg-windows-tests")
     parser.add_argument("--cc", default="cl", help="x64 MSVC cl.exe 路径")
