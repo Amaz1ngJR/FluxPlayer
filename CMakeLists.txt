@@ -503,6 +503,7 @@ add_dependencies(FluxPlayer FluxPlayerResources)
 if(WIN32)
     file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
     if(FFMPEG_DLLS)
+        set_property(TARGET FluxPlayer APPEND PROPERTY LINK_DEPENDS ${FFMPEG_DLLS})
         add_custom_command(TARGET FluxPlayer POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${FFMPEG_DLLS}
@@ -526,10 +527,14 @@ if(APPLE)
     endif()
 endif()
 
-# Windows + MinGW：把 3 个 GCC 运行时 DLL 拷到 exe 旁边，方便直接从 build/bin 启动调试
+# Windows + MinGW：把 GCC 和 Whisper OpenMP 运行时拷到 exe 旁边。
 if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     get_filename_component(_MINGW_BIN_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    foreach(_dll libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
+    set(_MINGW_RUNTIME_DLLS libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
+    if(TARGET whisper)
+        list(APPEND _MINGW_RUNTIME_DLLS libgomp-1.dll)
+    endif()
+    foreach(_dll IN LISTS _MINGW_RUNTIME_DLLS)
         if(EXISTS "${_MINGW_BIN_DIR}/${_dll}")
             add_custom_command(TARGET FluxPlayer POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different

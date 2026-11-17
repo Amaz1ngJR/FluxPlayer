@@ -1,0 +1,58 @@
+{
+  "sourceCommit": "5a1f107b4c78318f318897900acad1b6c6aa3f9d",
+  "version": "n7.1.3-43-g5a1f107b4c-20260331",
+  "platform": "windows-x64",
+  "scope": "Rebuilt avformat only; original codec/util/filter/scale/resample DLLs, headers and import libraries retained.",
+  "compiler": "MSYS2 GCC 16.1.0",
+  "configuration": "--prefix=${PROJECT_ROOT}/build/ffmpeg-windows-objects/install --pkg-config-flags=--static --arch=x86_64 --target-os=mingw32 --enable-gpl --enable-version3 --disable-debug --enable-shared --disable-static --disable-w32threads --enable-pthreads --enable-iconv --enable-zlib --enable-bzlib --enable-lzma --enable-gnutls --disable-schannel --disable-openssl --disable-mbedtls --disable-libtls --enable-libxml2 --enable-gmp --enable-libbluray --enable-libdvdread --enable-libdvdnav --enable-libgme --enable-libopenmpt --enable-librist --enable-libssh --enable-libzmq --enable-libsrt --enable-chromaprint --disable-programs --disable-doc --disable-avdevice --disable-avfilter --disable-postproc --disable-swscale --disable-swresample --extra-version=20260331 --extra-cflags='-DCHROMAPRINT_NODLL -DLIBSSH_STATIC -DZMQ_STATIC' --extra-ldflags='-L${PROJECT_ROOT}/build/ffmpeg-windows-objects/../ffmpeg-windows-static-compat -static' --extra-libs='-lstdc++ -lcrypto -lz -lws2_32 -liphlpapi -lcrypt32 -lbcrypt'",
+  "patches": {
+    "ffmpeg-7.1-legacy-hevc.patch": "0a32c11239898403bc6088fb74d1bc288869c24e190ffafd961a1d5705220b1a",
+    "ffmpeg-7.1-private-flv.patch": "487409e82a5a50a07adf4494706fe517e12dfdc2b2ebbbee299f0882cd2a143b",
+    "ffmpeg-7.1-enhanced-flv-fixes.patch": "95a27a1358eedbccb70d3025a37490fc5138faf35960aae9b6eb11b6850aecd0",
+    "ffmpeg-7.1-hls-fmp4-seek.patch": "d06868d6b5bd6868dcacc1788ee1f2ac04e3c6a0904806096d31f955a2d8eac4"
+  },
+  "previousAvformatSha256": "1bb452a8d2f28e6ae17c4f3667efeaa141e2a25f02e56c9b882086a4a75d4b1e",
+  "libraries": {
+    "bin/avcodec-61.dll": "ba01811512200f271ca1eb56e2d4271e577b4f76b160e4b18b443f78f5085135",
+    "bin/avdevice-61.dll": "2ebe48d80fed3739d7d607d0aba249428035e950937e8a72258b36c34d5c3c12",
+    "bin/avfilter-10.dll": "87426ec633780b2f95fa08631a4f5f777d35f7e293529fbde0a85484dc548874",
+    "bin/avformat-61.dll": "fb5c186a938ae3ce25b309a0754340c215c760f73e27151a95bf8fe8022c5507",
+    "bin/avutil-59.dll": "18a271c884b2a3e75e7c9543a398b86c6627b925d4e65a740af0bf10c57a40eb",
+    "bin/postproc-58.dll": "6e6092a2da070054ad3bab00d66a35ed6ea017a259dd107d9eab4e4b003f3642",
+    "bin/swresample-5.dll": "47cec8e53bb5cc289921ec6100a2e112b26c7e111c5d9ca703a236b4905edaf0",
+    "bin/swscale-8.dll": "d68f12ed59b6759ae7ab6e8325b0b82f490bc4ecd93f90bdc9c2dbca8cf68444"
+  },
+  "validation": {
+    "isolatedWindowsDlls": true,
+    "preservedContainerProtocolCapabilities": 611,
+    "externalHevcFrames": 300,
+    "cases": [
+      "default Enhanced HEVC writer",
+      "explicit legacy HEVC writer",
+      "HEVC decoded timestamps and pixel hashes",
+      "mono/stereo private Opus encoding and decoding",
+      "multichannel private Opus rejection",
+      "Enhanced AV1 and VP9 decoding",
+      "AV1 config-only sequence header",
+      "duplicate config, unknown FourCC and EOS",
+      "truncated Enhanced headers"
+    ],
+    "playerCmakeReleaseBuild": true,
+    "installDependencyClosure": true,
+    "remainingAcceptance": [
+      "GUI playback and seek/reconnect",
+      "hardware decoding backends",
+      "real HTTP-FLV/RTMP sources",
+      "record/download/merge integration",
+      "long-running playback"
+    ],
+    "hlsFmp4Seek": {
+      "scope": "unencrypted EXT-X-MAP MOV playlists",
+      "unpatchedRealFixtureReproducesInvalidNal": true,
+      "postTargetDecodedFrames": 12,
+      "timestampsAndPixelMd5MatchDirectDecode": true,
+      "existingFlvRegressionPassed": true
+    }
+  },
+  "beforeHlsFixAvformatSha256": "f788e08606e759a5c71c2e5454c7111d6c17bbd9cb7a194c0fdb63b5cd90c417"
+}

@@ -160,7 +160,11 @@ bool DemuxWorker::processSeekRequest() {
     if (player_->recordingService_) player_->recordingService_->finishForStreamReplacement();
     LOG_INFO("Processing seek request: " + std::to_string(seekTime) + " seconds");
 
-    if (player_->lastExtractedInfo_.isDash) {
+    const auto* input = player_->demuxer_ ? player_->demuxer_->getFormatContext() : nullptr;
+    const bool hls = input && input->iformat && input->iformat->name &&
+        std::string(input->iformat->name) == "hls";
+
+    if (player_->lastExtractedInfo_.isDash || hls) {
         // 用户连续点击/拖动会在数百毫秒内产生多个离散 seek。立即建连只会反复取消 TLS，
         // 日志中 175→167→145→163→72→220 共浪费约 5 秒。等待短暂静默并持续吸收最新
         // 目标，一次手势只建立最终一组视频/音频连接。
@@ -176,7 +180,7 @@ bool DemuxWorker::processSeekRequest() {
         // 静默期结束前恰好到达的最后目标再取一次，避免 10ms 边界竞态。
         double newestTarget;
         if (takePendingSeek(newestTarget, &generation)) seekTime = newestTarget;
-        LOG_INFO("DASH seek debounce settled at " + std::to_string(seekTime) + " seconds");
+        LOG_INFO("Network seek debounce settled at " + std::to_string(seekTime) + " seconds");
     }
 
     // DASH 类型不能用 dashMerger_ 是否非空判断：一次网络失败会清空对象，但下一次 seek
@@ -206,7 +210,30 @@ bool DemuxWorker::processSeekRequest() {
             player_->releaseAudioSeekGateLocked();
         return false;
     }
-    bool seekOk = !forceSourceRefresh_ && player_->demuxer_->seek(seekTimestamp, &seekGeneration_, generation);
+    bool seekOk = false;
+    if (hls && !forceSourceRefresh_ && !sourceSession_.videoUrl.empty()) {
+        // Interrupting a nested HLS read may leave its init-section / child
+        // MOV AVIO in a failed state. A successful top-level seek does not
+        // repair those objects. Reopen the playlist before relocating.
+        auto candidate = std::make_unique<Demuxer>(&player_->shouldQuit_);
+        if (candidate->open(sourceSession_.videoUrl, sourceSession_.headers, sourceSession_.duration,
+                            sourceSession_.httpCookies, sourceSession_.cctvProtection, &seekGeneration_, generation) &&
+            candidate->seek(seekTimestamp, &seekGeneration_, generation) &&
+            compatibleInputs(player_->demuxer_.get(), candidate.get())) {
+            std::unique_ptr<Demuxer> oldInput;
+            {
+                std::lock_guard<std::mutex> lock(seekMutex_);
+                if (!player_->shouldQuit_.load() && seekGeneration_.load(std::memory_order_acquire) == generation) {
+                    oldInput = std::move(player_->demuxer_);
+                    player_->demuxer_ = std::move(candidate);
+                    seekOk = true;
+                }
+            }
+            LOG_INFO(seekOk ? "HLS seek installed fresh input" : "HLS seek superseded before install");
+        }
+    } else if (!hls) {
+        seekOk = !forceSourceRefresh_ && player_->demuxer_->seek(seekTimestamp, &seekGeneration_, generation);
+    }
     if (!seekOk && !player_->shouldQuit_.load() && sourceSession_.resolver != StreamResolverKind::Direct) {
         forceSourceRefresh_ = false;
         auto refreshed = sourceSession_;

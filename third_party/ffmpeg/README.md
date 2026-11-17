@@ -16,6 +16,8 @@ to a complete candidate prefix for isolated CMake validation. Explicit overrides
 must point to a platform subdirectory or complete candidate prefix, not this parent directory.
 Deployment output layouts next to the executable are unchanged.
 
-macOS build provenance is in `macos-arm64/build-info.json`. Windows artifacts still
-contain only the prior legacy HEVC read patch until rebuilt and validated on Windows.
+Build provenance is in each platform's `build-info.json`. Both platform artifacts
+include the four patches in `scripts/ffmpeg/patches/series`, including HLS/fMP4 seek.
+Windows retains the original matching codec/util/filter/scale/resample DLLs,
+headers and import libraries; only avformat was rebuilt there.
 Keep upstream licensing and corresponding-source obligations when distributing the libraries.

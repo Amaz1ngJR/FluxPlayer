@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成短测试码流，验证项目动态库的 FLV 解复用与实际解码，不启动 GUI。"""
+"""生成短测试码流，验证项目动态库的 FLV 兼容及 HLS/fMP4 定位，不启动 GUI。"""
 import argparse
 import json
 import os
@@ -294,6 +294,28 @@ class FixtureSuite:
             assert not missing, f"能力减少 {option}: {sorted(missing)}"
         print("PASS demuxer/protocol capability regression")
 
+    def verify_hls_seek(self):
+        source = self.work / "hls-source.mp4"
+        playlist = self.work / "hls-index.m3u8"
+        checked([self.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+                 "testsrc2=size=96x64:rate=12", "-t", "12", "-c:v", "libx264",
+                 "-g", "12", "-keyint_min", "12", "-sc_threshold", "0", "-bf", "0",
+                 str(source)], self.project_env)
+        checked([self.ffmpeg, "-v", "error", "-y", "-i", str(source), "-c", "copy",
+                 "-hls_time", "1", "-hls_list_size", "0", "-hls_segment_type", "fmp4",
+                 str(playlist)], self.project_env)
+        for target in ("5.25", "8.5", "1.25"):
+            def frames(path):
+                result = invoke([self.ffmpeg, "-v", "error", "-xerror", "-ss", target,
+                                 "-i", str(path), "-frames:v", "12", "-f", "framemd5", "-"],
+                                self.project_env)
+                # Some HLS parser errors still return exit code 0 with no frames.
+                assert result.returncode == 0 and not result.stderr, result.stderr
+                return [line for line in result.stdout.splitlines() if line.startswith("0,")]
+            expected = frames(source)
+            assert len(expected) == 12 and frames(playlist) == expected
+        print("PASS unencrypted HLS/fMP4 seek: timestamps and pixels match MP4 at 3 targets")
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ffmpeg-prefix", type=Path, required=True, help="FFmpeg 7 installation including CLI tools")
@@ -305,7 +327,8 @@ def main():
     suite.verify_media()
     suite.verify_bad_tags()
     suite.verify_capabilities()
-    print("All FFmpeg FLV compatibility checks passed.")
+    suite.verify_hls_seek()
+    print("All FFmpeg FLV and HLS compatibility checks passed.")
 
 
 

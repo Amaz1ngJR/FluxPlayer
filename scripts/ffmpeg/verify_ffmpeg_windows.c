@@ -13,6 +13,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/md5.h>
+#include "verify_ffmpeg_windows_contracts.h"
 
 static int receive_frames(AVCodecContext *codec, AVFrame *frame, FILE *output, int *count)
 {
@@ -38,6 +39,9 @@ static int receive_frames(AVCodecContext *codec, AVFrame *frame, FILE *output, i
     return ret == AVERROR(EAGAIN) || ret == AVERROR_EOF ? 0 : ret;
 }
 
+static enum AVCodecID expected_codec = AV_CODEC_ID_HEVC;
+static int expected_frames = 0;
+
 static int decode(const char *path, FILE *output)
 {
     AVFormatContext *format = NULL;
@@ -49,9 +53,15 @@ static int decode(const char *path, FILE *output)
     if (!packet || !frame) goto done;
     if ((ret = avformat_open_input(&format, path, NULL, NULL)) < 0) goto done;
     if ((ret = avformat_find_stream_info(format, NULL)) < 0) goto done;
+    {
+        unsigned i, videos = 0;
+        for (i = 0; i < format->nb_streams; ++i)
+            videos += format->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO;
+        if (videos != 1) { ret = AVERROR_INVALIDDATA; goto done; }
+    }
     stream = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, &decoder, 0);
     if (stream < 0) { ret = stream; goto done; }
-    if (format->streams[stream]->codecpar->codec_id != AV_CODEC_ID_HEVC) {
+    if (format->streams[stream]->codecpar->codec_id != expected_codec) {
         ret = AVERROR_INVALIDDATA; goto done;
     }
     codec = avcodec_alloc_context3(decoder);
@@ -70,8 +80,8 @@ static int decode(const char *path, FILE *output)
     if (ret != AVERROR_EOF) goto done;
     ret = avcodec_send_packet(codec, NULL);
     if (ret >= 0) ret = receive_frames(codec, frame, output, &count);
-    if (ret >= 0 && count == 0) ret = AVERROR_INVALIDDATA;
-    fprintf(stderr, "%s: %d decoded HEVC frames\n", path, count);
+    if (ret >= 0 && (count == 0 || (expected_frames && count != expected_frames))) ret = AVERROR_INVALIDDATA;
+    fprintf(stderr, "%s: %d decoded video frames\n", path, count);
 done:
     av_frame_free(&frame);
     av_packet_free(&packet);
@@ -118,6 +128,34 @@ int main(int argc, char **argv)
 #endif
     fprintf(stderr, "avformat=%u avcodec=%u avutil=%s\n", avformat_version(),
             avcodec_version(), av_version_info());
+    if (argc == 2 && !strcmp(argv[1], "--contracts")) return contracts();
+    if (argc == 2 && !strcmp(argv[1], "--capabilities")) {
+        void *state = NULL;
+        const AVInputFormat *input;
+        const AVOutputFormat *output;
+        const char *protocol;
+        while ((input = av_demuxer_iterate(&state))) printf("demuxer:%s\n", input->name);
+        state = NULL;
+        while ((output = av_muxer_iterate(&state))) printf("muxer:%s\n", output->name);
+        state = NULL;
+        while ((protocol = avio_enum_protocols(&state, 0))) printf("input:%s\n", protocol);
+        state = NULL;
+        while ((protocol = avio_enum_protocols(&state, 1))) printf("output:%s\n", protocol);
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--reject")) {
+        FILE *sink = tmpfile();
+        int result;
+        if (!sink) return 1;
+        result = decode(argv[2], sink);
+        fclose(sink);
+        return result < 0 ? 0 : 1;
+    }
+    if (argc == 5 && !strcmp(argv[1], "--compare")) {
+        expected_codec = !strcmp(argv[2], "av1") ? AV_CODEC_ID_AV1 : AV_CODEC_ID_VP9;
+        expected_frames = 12;
+        argv += 2; argc -= 2;
+    }
     if (argc != 3) { fprintf(stderr, "Usage: verify_ffmpeg_windows legacy.flv enhanced.flv\n"); return 1; }
     legacy = tmpfile(); enhanced = tmpfile();
     if (!legacy || !enhanced) goto done;
@@ -128,7 +166,7 @@ int main(int argc, char **argv)
         if (a != b) { fprintf(stderr, "FAIL: decoded timestamps/pixels differ\n"); goto done; }
     } while (a != EOF);
     if (ferror(legacy) || ferror(enhanced)) goto done;
-    fprintf(stderr, "PASS: legacy/Enhanced HEVC decoded timestamps and pixel hashes match\n");
+    fprintf(stderr, "PASS: decoded timestamps and pixel hashes match\n");
     ret = 0;
 done:
     if (legacy) fclose(legacy);

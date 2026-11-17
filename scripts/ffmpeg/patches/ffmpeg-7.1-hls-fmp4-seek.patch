@@ -1,0 +1,55 @@
+From: FluxPlayer local compatibility patch
+Subject: Reset unencrypted fMP4 child demuxers on HLS seek
+Base: 5a1f107b4c78318f318897900acad1b6c6aa3f9d
+
+Re-reading an init section at reset AVIO offsets must not reuse stale MOV
+fragment/sample indexes. Scope: unencrypted EXT-X-MAP + MOV playlists.
+
+diff --git a/libavformat/hls.c b/libavformat/hls.c
+index fe008eee9a..ff5dd9effa 100644
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -2581,6 +2581,43 @@ static int hls_read_seek(AVFormatContext *s, int stream_index,
+             pls->seek_stream_index = -1;
+             pls->seek_flags |= AVSEEK_FLAG_ANY;
+         }
++
++        /* A byte-position reset is not a MOV demuxer reset: its fragment/sample
++         * indexes still describe the pre-seek segment at those same offsets.
++         * Re-read the init section with a fresh child for unencrypted fMP4. */
++        if (pls->ctx && pls->n_init_sections &&
++            strstr(pls->ctx->iformat->name, "mov") &&
++            current_segment(pls) && current_segment(pls)->key_type == KEY_NONE) {
++            AVFormatContext *next = avformat_alloc_context();
++            AVDictionary *options = NULL;
++            int ret;
++            if (!next)
++                return AVERROR(ENOMEM);
++            next->pb = pb;
++            next->io_open = nested_io_open;
++            next->interrupt_callback = s->interrupt_callback;
++            next->flags |= s->flags & ~AVFMT_FLAG_CUSTOM_IO;
++            next->probesize = pls->ctx->probesize;
++            next->max_analyze_duration = pls->ctx->max_analyze_duration;
++            pb->error = 0;
++            ret = ff_copy_whiteblacklists(next, s);
++            if (ret < 0) {
++                avformat_free_context(next);
++                return ret;
++            }
++            av_dict_copy(&options, c->seg_format_opts, 0);
++            ret = avformat_open_input(&next, current_segment(pls)->url,
++                                      pls->ctx->iformat, &options);
++            av_dict_free(&options);
++            if (ret < 0)
++                return ret;
++            if (next->nb_streams != pls->ctx->nb_streams) {
++                avformat_close_input(&next);
++                return AVERROR_INVALIDDATA;
++            }
++            avformat_close_input(&pls->ctx);
++            pls->ctx = next;
++        }
+     }
+ 
+     c->cur_timestamp = seek_timestamp;

@@ -2362,6 +2362,16 @@ void Player::seekInternal(double seconds) {
     seconds = std::max(0.0, seconds);
     if (duration_ > 0.0) seconds = std::min(seconds, duration_);
 
+    // Slider release can repeat the last dispatched target. While alignment is
+    // pending, that duplicate must not flush the new queues or interrupt HLS I/O.
+    if ((!seekDemuxReady_.load(std::memory_order_acquire) ||
+         !seekVideoAligned_.load(std::memory_order_acquire) ||
+         !seekAudioAligned_.load(std::memory_order_acquire)) &&
+        std::abs(seconds - seekUiTargetPTS_.load()) < .001) {
+        LOG_DEBUG("Ignoring duplicate pending seek: " + std::to_string(seconds));
+        return;
+    }
+
     if (qualitySwitch_.pending) {
         // 只使旧位置候选失效，保留请求 ID/目标画质；退出后按最新 Seek 位置重建。
         cancelQualityCandidate(false);

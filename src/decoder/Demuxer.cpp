@@ -724,10 +724,19 @@ bool Demuxer::open(const std::string& filename,
                    const std::string& httpHeaders,
                    double knownDuration,
                    const std::string& httpCookies,
-                   CctvProtectionMode cctvProtection) {
+                   CctvProtectionMode cctvProtection,
+                   const std::atomic<uint64_t>* generation,
+                   uint64_t expectedGeneration) {
+    expectedSeekGeneration_.store(expectedGeneration, std::memory_order_release);
+    seekGeneration_.store(generation, std::memory_order_release);
+    struct GenerationScope {
+        std::atomic<const std::atomic<uint64_t>*>& value;
+        std::atomic<int64_t>& deadline;
+        ~GenerationScope() { value.store(nullptr, std::memory_order_release); deadline.store(0); }
+    } generationScope{seekGeneration_, deadlineNs_};
     if (openInternal(filename, httpHeaders, knownDuration, /*useConfiguredProxy=*/true, httpCookies, cctvProtection)) return true;
 
-    if (isCancelled()) return false; // 用户取消不得触发代理回退。
+    if (isCancelled() || isSuperseded()) return false; // 取消/过期目标不得触发代理回退。
     const auto& cfg = Config::getInstance().get();
     if (FluxPlayer::isHttpUrl(filename) && cfg.proxyEnabled && !cfg.httpProxy.empty()) {
         LOG_WARN("HTTP open via proxy failed, retrying direct once");

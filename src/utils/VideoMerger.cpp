@@ -29,6 +29,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/samplefmt.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 }
@@ -54,6 +55,7 @@ extern "C" {
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <cstring>
 #include <limits>
 #include <system_error>
@@ -776,9 +778,11 @@ struct TranscodeCtx {
     VideoMerger& merger;
     VideoMerger::HWAccelInfo hardware;  ///< 会话局部事实；并行 worker 不读共享 UI 发布块
     bool publishHardware = true;
+    std::function<void(const VideoMerger::HWAccelInfo&)> hardwareChanged;
     void updateHardware(bool decoding, const std::string& decoder, bool encoding,
                         const std::string& encoder, bool zeroCopy, const std::string& device) {
         hardware = {decoding, decoder, encoding, encoder, zeroCopy, device};
+        if (hardwareChanged) hardwareChanged(hardware);
         if (publishHardware)
             merger.updateHWAccelInfo(decoding, decoder, encoding, encoder, zeroCopy, device);
     }
@@ -834,6 +838,45 @@ struct TranscodeCtx {
 /// 通用：把一帧送编码器并把产出的包写入输出（frame==nullptr 表示 flush）
 int encodeWriteFrame(AVFormatContext* out, AVCodecContext* enc, int streamIdx,
                      AVFrame* frame, AVPacket* pkt) {
+    AVFrame* uploaded = nullptr;
+    AVFrame* converted = nullptr;
+    SwsContext* converter = nullptr;
+    auto cleanupUpload = onExit([&]() {
+        av_frame_free(&uploaded);
+        av_frame_free(&converted);
+        sws_freeContext(converter);
+    });
+    if (frame && enc->hw_frames_ctx && frame->format != enc->pix_fmt) {
+        // NVENC opened with D3D11 input cannot accept CPU YUV pointers. This
+        // occurs when a decoder falls back to software (e.g. AV1/libdav1d).
+        const auto* desc = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
+        if (!desc || (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) return AVERROR(ENOSYS);
+        const auto* pool = reinterpret_cast<AVHWFramesContext*>(enc->hw_frames_ctx->data);
+        AVFrame* source = frame;
+        if (frame->format != pool->sw_format) {
+            converted = av_frame_alloc();
+            if (!converted) return AVERROR(ENOMEM);
+            converted->format = pool->sw_format;
+            converted->width = frame->width;
+            converted->height = frame->height;
+            int ret = av_frame_get_buffer(converted, 32);
+            if (ret < 0) return ret;
+            converter = sws_getContext(frame->width, frame->height,
+                static_cast<AVPixelFormat>(frame->format), frame->width, frame->height,
+                pool->sw_format, SWS_BILINEAR, nullptr, nullptr, nullptr);
+            if (!converter) return AVERROR(EINVAL);
+            if (sws_scale(converter, frame->data, frame->linesize, 0, frame->height,
+                          converted->data, converted->linesize) != frame->height) return AVERROR(EINVAL);
+            source = converted;
+        }
+        uploaded = av_frame_alloc();
+        if (!uploaded) return AVERROR(ENOMEM);
+        int ret = av_hwframe_get_buffer(enc->hw_frames_ctx, uploaded, 0);
+        if (ret >= 0) ret = av_hwframe_transfer_data(uploaded, source, 0);
+        if (ret >= 0) ret = av_frame_copy_props(uploaded, frame);
+        if (ret < 0) return ret;
+        frame = uploaded;
+    }
     int ret = avcodec_send_frame(enc, frame);
     if (ret < 0) return ret;
     while (ret >= 0) {
@@ -966,6 +1009,12 @@ bool setupHardwareVideoEncoder(TranscodeCtx& tc, int w, int h, AVRational frameR
     // AVCodecContext 接管该引用；编码器关闭时会自动释放帧池。
     tc.vEnc->hw_frames_ctx = framesCtx;
 #endif
+
+    if (std::string(encName).find("_nvenc") != std::string::npos) {
+        // Bound retained input frames; the encoder pool has 16 surfaces.
+        const int delayRet = av_opt_set_int(tc.vEnc->priv_data, "delay", 4, 0);
+        if (delayRet < 0) { err = "Cannot configure NVENC input delay"; avcodec_free_context(&tc.vEnc); return false; }
+    }
 
     // GLOBAL_HEADER：KeepOriginal 阶段一必须设（容器 extradata），阶段二不设（SPS/PPS in-band）
     if (globalHeader || (tc.out->oformat->flags & AVFMT_GLOBALHEADER)) {
@@ -1408,7 +1457,11 @@ static enum AVPixelFormat hwGetFormat(AVCodecContext* ctx, const enum AVPixelFor
 #endif
     }
     // 回退软件格式
-    return pixFmts[0];
+    for (const AVPixelFormat* p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
+        const auto* desc = av_pix_fmt_desc_get(*p);
+        if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) return *p;
+    }
+    return AV_PIX_FMT_NONE;
 }
 
 /// 尝试以硬件加速打开视频解码器
@@ -1419,9 +1472,24 @@ AVCodecContext* openHardwareDecoder(AVStream* st, TranscodeCtx& tc, std::string&
         return nullptr;
     }
 
-    const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+    const AVCodec* dec = nullptr;
+    void* iterator = nullptr;
+    const AVCodec* candidate;
+    while ((candidate = av_codec_iterate(&iterator))) {
+        if (!av_codec_is_decoder(candidate) || candidate->id != st->codecpar->codec_id) continue;
+        for (int i = 0; ; ++i) {
+            const auto* config = avcodec_get_hw_config(candidate, i);
+            if (!config) break;
+            if (config->pix_fmt == tc.hwPixFmt &&
+                (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                dec = candidate;
+                break;
+            }
+        }
+        if (dec) break;
+    }
     if (!dec) {
-        err = "Decoder not found";
+        err = "No decoder supports the selected hardware pixel format";
         return nullptr;
     }
 
@@ -1433,6 +1501,11 @@ AVCodecContext* openHardwareDecoder(AVStream* st, TranscodeCtx& tc, std::string&
 
     avcodec_parameters_to_context(ctx, st->codecpar);
     ctx->thread_count = tc.codecThreadLimit;
+    // D3D11 decoder reference/thread surfaces plus in-flight output. AV1's
+    // default fixed pool (12) leaves no room for downstream consumers.
+#if defined(_WIN32)
+    ctx->extra_hw_frames = 32;
+#endif
     ctx->hw_device_ctx = av_buffer_ref(tc.hwDevice->avDeviceContext());
     ctx->get_format = hwGetFormat;
 
@@ -1445,7 +1518,7 @@ AVCodecContext* openHardwareDecoder(AVStream* st, TranscodeCtx& tc, std::string&
         return nullptr;
     }
 
-    LOG_INFO(std::string("VideoMerger: hardware video decoder opened: ") + dec->name +
+    LOG_INFO(std::string("VideoMerger: hardware-capable video decoder opened: ") + dec->name +
              " (" + std::to_string(st->codecpar->width) + "x" + std::to_string(st->codecpar->height) + ")");
     return ctx;
 }
@@ -1453,6 +1526,45 @@ AVCodecContext* openHardwareDecoder(AVStream* st, TranscodeCtx& tc, std::string&
 // ─────────────────────────────────────────────
 // 视频帧处理：硬件/软件分支
 // ─────────────────────────────────────────────
+
+#if defined(_WIN32)
+// Do not lend decoder surfaces to an asynchronous encoder. A GPU copy into
+// the encoder-owned pool releases the decoder's small fixed pool immediately.
+AVFrame* copyFrameToEncoderPool(TranscodeCtx& tc, AVFrame* source, std::string& err) {
+    auto* sourcePool = reinterpret_cast<AVHWFramesContext*>(source->hw_frames_ctx->data);
+    auto* targetPool = reinterpret_cast<AVHWFramesContext*>(tc.vEnc->hw_frames_ctx->data);
+    if (sourcePool->sw_format != targetPool->sw_format) {
+        if (!tc.d3d11VidDev && !initD3D11VideoProcessor(tc, source->width, source->height,
+                                                      tc.vEnc->width, tc.vEnc->height, err)) return nullptr;
+        auto* converted = scaleFrameHardware(tc, source, tc.vEnc->width, tc.vEnc->height);
+        if (!converted) err = "Cannot convert GPU frame into encoder pool";
+        return converted;
+    }
+    AVFrame* target = av_frame_alloc();
+    if (!target) { err = "Cannot allocate GPU output frame"; return nullptr; }
+    int ret = av_hwframe_get_buffer(tc.vEnc->hw_frames_ctx, target, 0);
+    if (ret < 0) { av_frame_free(&target); err = "Encoder GPU surface pool exhausted"; return nullptr; }
+    auto* srcTexture = reinterpret_cast<ID3D11Texture2D*>(source->data[0]);
+    auto* dstTexture = reinterpret_cast<ID3D11Texture2D*>(target->data[0]);
+    const auto srcSlice = static_cast<UINT>(reinterpret_cast<uintptr_t>(source->data[1]));
+    const auto dstSlice = static_cast<UINT>(reinterpret_cast<uintptr_t>(target->data[1]));
+    D3D11_TEXTURE2D_DESC srcDesc{}, dstDesc{};
+    srcTexture->GetDesc(&srcDesc); dstTexture->GetDesc(&dstDesc);
+    if (srcDesc.Format != dstDesc.Format || srcSlice >= srcDesc.ArraySize || dstSlice >= dstDesc.ArraySize ||
+        source->width > static_cast<int>(srcDesc.Width) || source->height > static_cast<int>(srcDesc.Height) ||
+        source->width > static_cast<int>(dstDesc.Width) || source->height > static_cast<int>(dstDesc.Height)) {
+        av_frame_free(&target); err = "Incompatible decoder/encoder GPU surfaces"; return nullptr;
+    }
+    auto* device = reinterpret_cast<AVD3D11VADeviceContext*>(targetPool->device_ctx->hwctx);
+    D3D11_BOX box{0, 0, 0, static_cast<UINT>(source->width), static_cast<UINT>(source->height), 1};
+    device->lock(device->lock_ctx);
+    device->device_context->CopySubresourceRegion(dstTexture, dstSlice, 0, 0, 0, srcTexture, srcSlice, &box);
+    device->unlock(device->lock_ctx);
+    ret = av_frame_copy_props(target, source);
+    if (ret < 0) { av_frame_free(&target); err = "Cannot copy GPU frame properties"; return nullptr; }
+    return target;
+}
+#endif
 
 /// 处理一个解码后的视频帧（硬件或软件路径）
 /// 返回处理后的编码器输入帧（nullptr 表示跳过或失败）
@@ -1463,6 +1575,26 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
 
     int srcW = srcFrame->width;
     int srcH = srcFrame->height;
+    AVFrame* downloaded = nullptr;
+    auto cleanupDownload = onExit([&]() { av_frame_free(&downloaded); });
+    auto downloadSource = [&]() {
+        downloaded = av_frame_alloc();
+        if (!downloaded) { err = "Cannot allocate hardware download frame"; return false; }
+        const int ret = av_hwframe_transfer_data(downloaded, srcFrame, 0);
+        if (ret < 0) { err = "Cannot download hardware frame for software conversion"; return false; }
+        srcFrame = downloaded;
+        return true;
+    };
+    const bool gpuFrame = srcFrame->hw_frames_ctx && srcFrame->format == tc.hwPixFmt;
+    const bool zeroCopy = gpuFrame && tc.hardware.isHardwareEncoding &&
+        (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal ||
+         (srcW == targetW && srcH == targetH) || tc.hardware.isZeroCopy);
+    if (tc.hardware.isHardwareDecoding != gpuFrame || tc.hardware.isZeroCopy != zeroCopy) {
+        const auto info = tc.hardware;
+        tc.updateHardware(gpuFrame, info.decoderName, info.isHardwareEncoding,
+                          info.encoderName, zeroCopy, info.hwDeviceType);
+    }
+    if (srcFrame->hw_frames_ctx && !tc.hardware.isHardwareEncoding && !downloadSource()) return nullptr;
 
     // KeepOriginal 模式：检测分辨率、源帧率提示或 GOP 是否需要切换。
     if (options.resolutionMode == MergeOptions::ResolutionMode::KeepOriginal) {
@@ -1477,7 +1609,11 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
         }
         // KeepOriginal 不缩放，直接返回源帧（或克隆）
         if (srcFrame->hw_frames_ctx) {
+#if defined(_WIN32)
+            return copyFrameToEncoderPool(tc, srcFrame, err);
+#else
             return av_frame_clone(srcFrame);  // 硬件帧必须克隆（解码器帧池会复用）
+#endif
         } else {
             // 软件帧：需要转换为编码器输入格式（YUV420P）
             if (!sws) {
@@ -1501,7 +1637,11 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
     if (srcW == targetW && srcH == targetH) {
         // 尺寸已匹配，无需缩放
         if (srcFrame->hw_frames_ctx) {
+#if defined(_WIN32)
+            return copyFrameToEncoderPool(tc, srcFrame, err);
+#else
             return av_frame_clone(srcFrame);
+#endif
         } else {
             if (!sws) {
                 sws = sws_getContext(srcW, srcH, (AVPixelFormat)srcFrame->format,
@@ -1525,11 +1665,18 @@ AVFrame* processVideoFrame(TranscodeCtx& tc, AVFrame* srcFrame, int targetW, int
         // 硬件路径：GPU 缩放
         AVFrame* scaledFrame = scaleFrameHardware(tc, srcFrame, targetW, targetH);
         if (scaledFrame) {
+            const auto info = tc.hardware;
+            if (!info.isZeroCopy)
+                tc.updateHardware(info.isHardwareDecoding, info.decoderName, info.isHardwareEncoding,
+                                  info.encoderName, true, info.hwDeviceType);
             return scaledFrame;  // 新分配的帧，调用方需释放
         }
         // GPU 缩放失败，回退软件（需先下载到 CPU）
         LOG_WARN("VideoMerger: GPU scaling failed, falling back to software");
-        tc.useHardware = false;  // 标记回退，后续帧走软件路径
+        if (!downloadSource()) return nullptr;
+        const auto info = tc.hardware;
+        tc.updateHardware(info.isHardwareDecoding, info.decoderName, info.isHardwareEncoding,
+                          info.encoderName, false, info.hwDeviceType);
     }
 
     // 软件路径：sws_scale
@@ -1786,6 +1933,7 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
                    double timelineBaseSec, double& outConsumedSec, std::string& err) {
     AVFormatContext* in = nullptr;
     AVCodecContext* vDec = nullptr;
+    bool videoDecoderProducedFrame = false;
     AVCodecContext* aDec = nullptr;
     SwrContext* swr = nullptr;
     auto closeSource = onExit([&]() {
@@ -1826,13 +1974,13 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
         }
 
         // 填充解码器���息（仅首个片段，供 UI 显示）
-        if (timelineBaseSec == 0.0) {
+        {
             std::string decoderName = vDec->codec ? vDec->codec->name : "";
             // 获取当前编码器信息
             auto currentInfo = tc.hardware;
-            tc.updateHardware(tc.useHardware, decoderName,
+            tc.updateHardware(false, decoderName,
                                         currentInfo.isHardwareEncoding, currentInfo.encoderName,
-                                        currentInfo.isZeroCopy, currentInfo.hwDeviceType);
+                                        false, currentInfo.hwDeviceType);
         }
     }
 
@@ -2017,8 +2165,31 @@ bool transcodeClip(const ClipInfo& info, TranscodeCtx& tc, int targetW, int targ
 
         // ── 视频包 ──
         if (pkt->stream_index == info.vIdx && !videoEnd) {
-            if (avcodec_send_packet(vDec, pkt) >= 0) {
+            int sendResult = avcodec_send_packet(vDec, pkt);
+            if (sendResult < 0 && vDec->hw_device_ctx && !videoDecoderProducedFrame) {
+                // Some devices reject a codec/profile only on the first
+                // packet. Reopen the software decoder and retry that packet.
+                const AVCodec* software = avcodec_find_decoder(in->streams[info.vIdx]->codecpar->codec_id);
+                AVCodecContext* fallback = software ? avcodec_alloc_context3(software) : nullptr;
+                if (!fallback) { err = "Cannot allocate fallback decoder"; cleanup(); return false; }
+                fallback->thread_count = tc.codecThreadLimit;
+                int ret = avcodec_parameters_to_context(fallback, in->streams[info.vIdx]->codecpar);
+                if (ret >= 0) ret = avcodec_open2(fallback, software, nullptr);
+                if (ret < 0) {
+                    avcodec_free_context(&fallback); err = "Cannot open fallback decoder"; cleanup(); return false;
+                }
+                avcodec_free_context(&vDec);
+                vDec = fallback;
+                const auto hardware = tc.hardware;
+                tc.updateHardware(false, software->name, hardware.isHardwareEncoding,
+                    hardware.encoderName, false, hardware.hwDeviceType);
+                LOG_WARN(std::string("VideoMerger: hardware decoder rejected input; using ") + software->name);
+                sendResult = avcodec_send_packet(vDec, pkt);
+            }
+            if (sendResult < 0) { err = "Video decoder rejected a packet"; cleanup(); return false; }
+            if (sendResult >= 0) {
                 while (avcodec_receive_frame(vDec, frame) >= 0) {
+                    videoDecoderProducedFrame = true;
                     // 帧源时间（0 基准秒）：绝对 PTS 减去统一基准偏移；缺时间戳按帧时长递推
                     int64_t ts = (frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                  ? frame->best_effort_timestamp : frame->pts;
@@ -2156,10 +2327,12 @@ bool runTranscode(VideoMerger& merger, const std::vector<ClipInfo>& infos, const
                   std::atomic<bool>& cancelFlag, std::atomic<double>& processed,
                   std::string& err, const ClipInfo* outputPolicy = nullptr,
                   double* consumedDuration = nullptr, int codecThreadLimit = 0,
-                  VideoMerger::HWAccelInfo* hardwareResult = nullptr) {
+                  VideoMerger::HWAccelInfo* hardwareResult = nullptr,
+                  std::function<void(const VideoMerger::HWAccelInfo&)> hardwareChanged = {}) {
     const ClipInfo& policy = outputPolicy ? *outputPolicy : infos.front();
     TranscodeCtx tc{merger};
     tc.publishHardware = hardwareResult == nullptr;
+    tc.hardwareChanged = std::move(hardwareChanged);
     tc.codecThreadLimit = codecThreadLimit;
     tc.keepAudio = keepAudio;
     if (keepAudio) {
@@ -2575,6 +2748,31 @@ bool runParallelTranscode(VideoMerger& merger, const std::vector<ClipInfo>& info
     std::mutex wakeMutex;
     std::condition_variable wake;
     std::vector<std::thread> threads;
+    std::mutex hardwareMutex;
+    std::vector<VideoMerger::HWAccelInfo> liveHardware(infos.size());
+    std::vector<bool> hardwareReady(infos.size(), false);
+    auto reportHardware = [&](size_t index, const VideoMerger::HWAccelInfo& info) {
+        std::lock_guard<std::mutex> lock(hardwareMutex);
+        liveHardware[index] = info;
+        hardwareReady[index] = true;
+        VideoMerger::HWAccelInfo combined;
+        bool first = true;
+        for (size_t i = 0; i < liveHardware.size(); ++i) {
+            if (!hardwareReady[i]) continue;
+            const auto& nextInfo = liveHardware[i];
+            if (first) { combined = nextInfo; first = false; continue; }
+            if (combined.decoderName != nextInfo.decoderName ||
+                combined.isHardwareDecoding != nextInfo.isHardwareDecoding) combined.decoderName = "Mixed";
+            if (combined.encoderName != nextInfo.encoderName ||
+                combined.isHardwareEncoding != nextInfo.isHardwareEncoding) combined.encoderName = "Mixed";
+            if (combined.hwDeviceType != nextInfo.hwDeviceType) combined.hwDeviceType = "Mixed";
+            combined.isHardwareDecoding &= nextInfo.isHardwareDecoding;
+            combined.isHardwareEncoding &= nextInfo.isHardwareEncoding;
+            combined.isZeroCopy &= nextInfo.isZeroCopy;
+        }
+        merger.updateHWAccelInfo(combined.isHardwareDecoding, combined.decoderName,
+            combined.isHardwareEncoding, combined.encoderName, combined.isZeroCopy, combined.hwDeviceType);
+    };
     auto joinWorkers = onExit([&]() {
         stop.store(true);
         for (auto& thread : threads) if (thread.joinable()) thread.join();
@@ -2591,7 +2789,8 @@ bool runParallelTranscode(VideoMerger& merger, const std::vector<ClipInfo>& info
                     try {
                         result.ok = runTranscode(merger, {infos[i]}, result.path, false, false,
                             unified, stop, result.processed, result.error, &infos.front(),
-                            &result.duration, codecThreads, &result.hardware);
+                            &result.duration, codecThreads, &result.hardware,
+                            [&, i](const VideoMerger::HWAccelInfo& info) { reportHardware(i, info); });
                     } catch (const std::exception& e) {
                         result.error = e.what();
                     } catch (...) {

@@ -58,12 +58,15 @@ public:
      * @param httpHeaders   HTTP headers（"Key: Value\r\n" 格式），空则不注入
      * @param knownDuration 已知时长（秒），>0 时手动注入 duration（解决 pipe 流被误判为直播流）
      * @param httpCookies   FFmpeg Cookie jar，保留 domain/path，供分片请求和重连复用
+     * @param generation 可选 Seek 代际；本次 open/probe 期间必须有效，新目标可取消旧打开。
      */
     bool open(const std::string& filename,
               const std::string& httpHeaders,
               double knownDuration = 0.0,
               const std::string& httpCookies = "",
-              CctvProtectionMode cctvProtection = CctvProtectionMode::None);
+              CctvProtectionMode cctvProtection = CctvProtectionMode::None,
+              const std::atomic<uint64_t>* generation = nullptr,
+              uint64_t expectedGeneration = 0);
 
     /**
      * @brief 打开输入但不调用 avformat_find_stream_info。

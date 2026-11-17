@@ -1,4 +1,6 @@
 #include "FluxPlayer/subtitle/RealtimeSubtitles.h"
+#include "FluxPlayer/subtitle/SpeechChunker.h"
+#include "FluxPlayer/subtitle/TranscriptBoundary.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <atomic>
 #include <algorithm>
@@ -25,7 +27,7 @@ struct RealtimeSubtitles::Impl {
         int serial;
         uint64_t epoch;
     };
-    struct Caption { std::string text; double end; uint64_t epoch; };
+    struct Caption { std::string text; double end; uint64_t epoch; double displayedAt = -1; };
     mutable std::mutex mutex;
     std::condition_variable ready;
     std::deque<Input> queue;
@@ -74,7 +76,10 @@ struct RealtimeSubtitles::Impl {
         struct LayoutOwner { AVChannelLayout& value; ~LayoutOwner() { av_channel_layout_uninit(&value); } } layoutOwner{layout};
         int rate = 0, format = -1;
         std::vector<float> samples;
-        size_t analyzed = 0, quietSamples = 0;
+        std::vector<float> overlap;
+        bool overlapSpeech = false;
+        std::string previousTranscript;
+        SpeechChunker chunker;
         bool resetContext = true;
         double start = 0, expected = -1;
         uint64_t active = UINT64_MAX;
@@ -85,6 +90,11 @@ struct RealtimeSubtitles::Impl {
         params.n_max_text_ctx = 192;
         params.print_progress = params.print_realtime = params.print_timestamps = false;
         params.beam_search.beam_size = 5;
+        // The chunk already supplies media timing. Avoid decoding timestamps
+        // and bound runaway/repetitive text on noisy or music-backed input.
+        params.no_timestamps = true;
+        params.single_segment = true;
+        params.max_tokens = 160;
         params.temperature_inc = 0;
         params.suppress_nst = true;
         params.abort_callback = [](void* data) {
@@ -100,62 +110,140 @@ struct RealtimeSubtitles::Impl {
             if (count < 0) tokens.clear(); else tokens.resize(count);
             return tokens;
         };
-        const std::string prompt = (language == "zh" ? "以下是普通话的简体中文字幕。" : "") + hints;
-        auto hintTokens = tokenize(prompt);
+        // Whisper's prompt is transcript context, not an instruction channel.
+        // A style instruction can leak into the transcript on weak/noisy audio.
+        auto hintTokens = tokenize(hints);
         if (hintTokens.size() > 96) hintTokens.resize(96);
         std::vector<whisper_token> history;
-        struct Candidate { std::string text; double score = -100; };
-        auto recognize = [&](size_t n) {
+        struct Candidate {
+            std::string text;
+            double score = -100;
+            double weakFraction = 1;
+            bool repeated = false;
+            bool truncated = false;
+        };
+        auto clearContinuity = [&] {
+            resetContext = true;
+            history.clear(); overlap.clear(); previousTranscript.clear();
+            overlapSpeech = false;
+        };
+        auto recognize = [&](size_t n, size_t retain = 0, bool forced = false) {
             if (n < 6400 || active != epoch.load() || stopping.load()) return;
-            double energy = 0;
-            for (size_t i = 0; i < n; ++i) energy += samples[i] * samples[i];
-            if (energy / n < 0.00001) { resetContext = true; return; }
+            // Overlap must never turn an otherwise silent new chunk into speech.
+            auto input = SpeechAudio::prepare(samples.data(), n);
+            LOG_DEBUG("AI chunk: start=" + std::to_string(start) + " duration=" + std::to_string(n / 16000.) + " accepted=" + std::to_string(!input.empty()));
+            if (input.empty()) { clearContinuity(); return; }
+            // Keep the chunker's timeline disjoint. Only the inference input
+            // includes the previous 480 ms, so EOF never replays an overlap alone.
+            if (!overlap.empty()) {
+                std::vector<float> audio = overlap;
+                audio.insert(audio.end(), samples.begin(), samples.begin() + n);
+                input = SpeechAudio::prepare(audio.data(), audio.size());
+                if (input.empty()) { clearContinuity(); return; }
+            }
             abort.epoch = active;
-            auto decode = [&](bool useHistory, int beams) {
-                auto tokens = hintTokens;
+            auto decode = [&](bool useHistory, bool useHints, int beams) {
+                auto tokens = useHints ? hintTokens : std::vector<whisper_token>{};
                 if (useHistory && !resetContext) tokens.insert(tokens.end(), history.begin(), history.end());
                 params.no_context = true;
                 params.prompt_tokens = tokens.empty() ? nullptr : tokens.data();
                 params.prompt_n_tokens = static_cast<int>(tokens.size());
                 params.beam_search.beam_size = beams;
                 Candidate result;
-                if (whisper_full(ctx.get(), params, samples.data(), static_cast<int>(n)) != 0) {
+                if (whisper_full(ctx.get(), params, input.data(), static_cast<int>(input.size())) != 0) {
                     if (active == epoch.load() && !stopping.load()) throw std::runtime_error("inference failed");
                     return result;
                 }
-                double total = 0; size_t count = 0;
+                double total = 0; size_t count = 0, weak = 0;
+                std::vector<whisper_token> outputTokens;
                 for (int i = 0; i < whisper_full_n_segments(ctx.get()); ++i) {
-                    result.text += whisper_full_get_segment_text(ctx.get(), i);
+                    double segmentTotal = 0;
+                    std::vector<whisper_token> segmentTokens;
                     for (int j = 0; j < whisper_full_n_tokens(ctx.get(), i); ++j) {
                         const auto token = whisper_full_get_token_data(ctx.get(), i, j);
                         if (token.id >= whisper_token_eot(ctx.get())) continue;
-                        total += std::log(std::max(1e-6f, token.p)); ++count;
+                        segmentTotal += std::log(std::max(1e-6f, token.p));
+                        segmentTokens.push_back(token.id);
                     }
+                    if (segmentTokens.empty()) continue;
+                    // Combine acoustic and decoding evidence: quiet volume by
+                    // itself is not a reason to throw away genuine speech.
+                    if (whisper_full_get_segment_no_speech_prob(ctx.get(), i) > .8f &&
+                        segmentTotal / segmentTokens.size() < -1.2) continue;
+                    result.text += whisper_full_get_segment_text(ctx.get(), i);
+                    total += segmentTotal; count += segmentTokens.size();
+                    for (int j = 0; j < whisper_full_n_tokens(ctx.get(), i); ++j) {
+                        const auto token = whisper_full_get_token_data(ctx.get(), i, j);
+                        if (token.id < whisper_token_eot(ctx.get()) && token.p < .2f) ++weak;
+                    }
+                    outputTokens.insert(outputTokens.end(), segmentTokens.begin(), segmentTokens.end());
                 }
                 if (count) result.score = total / count;
+                if (count) result.weakFraction = static_cast<double>(weak) / count;
+                result.truncated = count >= static_cast<size_t>(params.max_tokens);
+                // Three consecutive copies of a multi-token phrase are a
+                // decoding warning, not proof of what the speaker said.
+                for (size_t length = 2; length <= 8; ++length) {
+                    for (size_t offset = 0; offset + 3 * length <= outputTokens.size(); ++offset) {
+                        const auto first = outputTokens.begin() + offset;
+                        if (std::equal(first, first + length, first + length) &&
+                            std::equal(first, first + length, first + 2 * length)) result.repeated = true;
+                    }
+                }
                 return result;
             };
-            auto result = decode(true, 5);
+            // Acoustic-first: an inherited mistake cannot bias the first pass.
+            auto result = decode(false, true, 5);
             if (active != epoch.load() || stopping.load()) return;
-            if (result.score < -0.8) {
-                // One bounded retry, without recent transcript. Scores are a
-                // heuristic, not calibrated accuracy or a semantic correction.
-                const auto retry = decode(false, 8);
+            bool behind = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                behind = queue.size() > 1 && queue.back().pts - queue.front().pts >= .75;
+            }
+            bool corroborated = false;
+            const bool reliable = result.score >= -.35 && result.weakFraction <= .1 &&
+                !result.repeated && !result.truncated;
+            if (!behind && (result.score < -.8 || result.weakFraction > .2 ||
+                            result.repeated || result.truncated || reliable || !resetContext)) {
+                // One verification at most. A reliable previous transcript may
+                // influence only this second pass, never the acoustic baseline.
+                const auto retry = decode(!resetContext && reliable, !result.repeated, 8);
+                corroborated = reliable && retry.score >= -.35 && retry.weakFraction <= .1 &&
+                    !retry.repeated && !retry.truncated &&
+                    TranscriptBoundary::equivalent(result.text, retry.text);
                 const bool comparable = result.text.empty() ||
                     (retry.text.size() * 2 >= result.text.size() && retry.text.size() <= result.text.size() * 2);
-                if (comparable && retry.score > result.score) result = retry;
+                // Disagreement never seeds history. Require a meaningful score
+                // margin and no increase in weak tokens before replacing text.
+                if (!retry.text.empty() && !retry.repeated && !retry.truncated &&
+                    (result.repeated || result.text.empty() ||
+                     (comparable && retry.score > result.score + .15 &&
+                      retry.weakFraction <= result.weakFraction))) result = retry;
             }
             if (active != epoch.load() || stopping.load()) return;
-            if (result.text.find_first_not_of(" \r\n\t") == std::string::npos) { resetContext = true; return; }
+            if (result.text.find_first_not_of(" \r\n\t") == std::string::npos) { clearContinuity(); return; }
             history.clear();
-            resetContext = result.score < -0.8;
+            // Agreement is additional evidence, not proof of correctness. Keep
+            // only a small, independently corroborated transcript as history.
+            resetContext = !corroborated;
             if (!resetContext) {
                 history = tokenize(result.text);
-                if (history.size() > 96) history.erase(history.begin(), history.end() - 96);
+                if (history.size() > 24) history.erase(history.begin(), history.end() - 24);
             }
+            auto displayText = !overlapSpeech ? result.text :
+                TranscriptBoundary::removeOverlap(previousTranscript, result.text);
+            previousTranscript = result.text;
+            // Raw PCM avoids applying automatic gain twice to the overlap.
+            // At a natural pause retain only the pause, not half of its last
+            // spoken word. Forced cuts need spoken lookback and text dedup.
+            const size_t retained = std::min(n, retain);
+            overlap.assign(samples.begin() + n - retained, samples.begin() + n);
+            overlapSpeech = forced && retained > 0;
+            if (displayText.empty()) return;
             std::lock_guard<std::mutex> lock(mutex);
             if (active != epoch.load() || stopping.load()) return;
-            captions.push_back({std::move(result.text), start + n / 16000., active});
+            captions.push_back({std::move(displayText), start + n / 16000., active});
+            LOG_DEBUG("AI result: end=" + std::to_string(captions.back().end) + " bytes=" + std::to_string(captions.back().text.size()) + " score=" + std::to_string(result.score) + " history_verified=" + std::to_string(corroborated));
             while (captions.size() > 8) captions.pop_front();
         };
         while (!stopping.load()) {
@@ -167,7 +255,7 @@ struct RealtimeSubtitles::Impl {
                 if (stopping.load()) break;
                 if (active != epoch.load()) {
                     active = epoch.load(); samples.clear(); expected = -1; swr_free(&swr);
-                    analyzed = quietSamples = 0; resetContext = true;
+                    chunker.reset(); clearContinuity();
                 }
                 if (!queue.empty()) { in = std::move(queue.front()); queue.pop_front(); }
                 else if (eof) { eof = false; tail = true; }
@@ -175,7 +263,7 @@ struct RealtimeSubtitles::Impl {
             }
             if (tail) {
                 recognize(samples.size()); samples.clear(); expected = -1;
-                analyzed = quietSamples = 0; resetContext = true;
+                chunker.reset(); clearContinuity();
                 continue;
             }
             if (in.epoch != active) continue;
@@ -186,7 +274,7 @@ struct RealtimeSubtitles::Impl {
                 av_channel_layout_compare(&layout, &f->ch_layout) != 0;
             if (gap || changed || !swr) {
                 samples.clear(); start = in.pts;
-                analyzed = quietSamples = 0; resetContext = true;
+                chunker.reset(); clearContinuity();
                 swr_free(&swr);
                 av_channel_layout_uninit(&layout);
                 if (av_channel_layout_copy(&layout, &f->ch_layout) < 0) throw std::runtime_error("audio layout allocation failed");
@@ -206,22 +294,14 @@ struct RealtimeSubtitles::Impl {
                 const_cast<const uint8_t**>(f->extended_data), f->nb_samples);
             if (n < 0) throw std::runtime_error("audio conversion failed");
             samples.insert(samples.end(), converted.begin(), converted.begin() + n);
-            // Analyze 20ms blocks once. Prefer a 400ms quiet boundary after 2.5s,
-            // with an 8s cap for continuous speech. Keep chunks non-overlapping so
-            // the UI never repeats rolling text. This is an energy gate, not VAD.
-            while (analyzed + 320 <= samples.size() && active == epoch.load() && !stopping.load()) {
-                double blockEnergy = 0;
-                for (size_t i = analyzed; i < analyzed + 320; ++i)
-                    blockEnergy += samples[i] * samples[i];
-                quietSamples = blockEnergy / 320 < 0.00001 ? quietSamples + 320 : 0;
-                analyzed += 320;
-                if ((analyzed >= 40000 && quietSamples >= 6400) || analyzed >= 128000) {
-                    const size_t count = analyzed;
-                    recognize(count);
-                    samples.erase(samples.begin(), samples.begin() + count);
-                    start += count / 16000.;
-                    analyzed = quietSamples = 0;
-                }
+            while (active == epoch.load() && !stopping.load()) {
+                const auto boundary = chunker.next(samples);
+                if (!boundary.count) break;
+                if (boundary.recognize) recognize(boundary.count, boundary.overlap, boundary.forced);
+                else clearContinuity();
+                samples.erase(samples.begin(), samples.begin() + boundary.count);
+                start += boundary.count / 16000.;
+                chunker.reset();
             }
         }
 #endif
@@ -259,11 +339,19 @@ std::string RealtimeSubtitles::text(double now, int serial) {
     if (serial != impl_->serial || !std::isfinite(now)) return {};
     // Use media time: pause freezes visibility, speed changes do not alter PTS.
     // Decoding can run ahead; never display captions before their source audio ends.
-    std::string result;
-    for (const auto& caption : impl_->captions)
-        if (caption.epoch == impl_->epoch.load() && now >= caption.end - .1 && now < caption.end + 6)
-            result = caption.text;
-    return result;
+    Impl::Caption* latest = nullptr;
+    for (auto& caption : impl_->captions)
+        if (caption.epoch == impl_->epoch.load() && now >= caption.end - .1)
+            latest = &caption;
+    if (!latest) return {};
+    // Inference can finish seconds after the source chunk. Give the newest
+    // eligible caption its reading time from first display, not from audio end.
+    // Media time still freezes expiry while paused; a new result replaces it.
+    if (latest->displayedAt < 0) {
+        latest->displayedAt = now;
+        LOG_DEBUG("AI display: media=" + std::to_string(now) + " end=" + std::to_string(latest->end));
+    }
+    return now < latest->displayedAt + 6 ? latest->text : std::string{};
 }
 std::string RealtimeSubtitles::status() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);

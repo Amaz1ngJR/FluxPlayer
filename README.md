@@ -476,6 +476,8 @@ end note
 
 FFmpeg 7 已集成在 `third_party/ffmpeg/macos-arm64/` 中，无需额外安装。源码与 Windows 固定到同一提交 `5a1f107b4c78318f318897900acad1b6c6aa3f9d`，各平台仍分别编译 dylib/DLL。
 
+macOS 预编译库已补齐共同清单中的 HLS/fMP4 Seek 修复，与 Windows 保持一致。未加密 EXT-X-MAP 播放列表定位时会重建 MOV 子解复用器，避免旧分片索引导致无效 NAL 长度；本地三个定位点的时间戳及像素摘要回归通过，不等于加密 HLS、真实网络或 GUI 连续拖动验收。
+
 两端构建共用 `scripts/ffmpeg/patches/series`：复用旧式 HEVC codec-id 12 读取补丁，增加显式 `flvflags=legacy_hevc` 写入和私有原始 Opus codec-id 13 单/双声道读写。默认 HEVC 写入保持上游 Enhanced FLV，不迁回旧版 Enhanced 解析器；另以小型补丁保留 AV1 配置独立起播、未知 FourCC/EOS 跳过及截断检查。macOS 全套库包含 VideoToolbox、libx264 和 avfilter/zscale/tonemap，不能与旧 FFmpeg 4 库混用。
 
 如需重新生成（开发者）：
@@ -501,7 +503,7 @@ Windows 的 CMake/xmake 默认使用该新路径。`scripts/package_windows.ps1`
 
 上游原生支持 Enhanced FLV 的 `hvc1` H.265，但不原生支持旧式私有 FLV 的 HEVC codec-id 12。项目为对应源码新增 `scripts/ffmpeg/patches/ffmpeg-7.1-legacy-hevc.patch` 与 Windows 构建入口；验证统一使用 `scripts/ffmpeg/verify_ffmpeg_windows.py`，由 Python 编译小型 C 探针，在隔离目录加载项目 DLL 与候选补丁 DLL，对比实际解码帧、时间戳与像素摘要，不依赖系统 `ffmpeg.exe` / `ffprobe.exe`。详见[FFmpeg 封装兼容补丁](docs/硬件加速解码技术文档.md#ffmpeg-封装兼容补丁)。
 
-Windows 现有 `avformat-61.dll` 保留不变，只有旧式 HEVC 读取补丁；**尚未包含本轮共同清单新增的写入、Opus 和 Enhanced 修复**。构建脚本已统一读取完整 series，但仍只生成候选 DLL，不自动替换；需在原 Windows 构建环境重编并实际验证后交付，不能把 macOS 回归当作 Windows DLL 验收。
+Windows `avformat-61.dll` 已在匹配的源码/构建环境中应用完整共同清单并更新，包含显式 legacy HEVC 写入、私有 Opus 和 Enhanced 修复；其余 DLL、头文件和导入库保持原配套版本。Windows 隔离加载回归已验证 300 帧 HEVC 画面及时间戳、新写入路径、单/双声道 Opus、AV1/VP9、AV1 配置独立起播、异常标签与截断头，并保留原有 611 项容器/协议能力。来源、配置、补丁和 DLL 哈希见 `third_party/ffmpeg/windows-x64/build-info.json`。可用 `python scripts/ffmpeg/verify_ffmpeg_windows.py --self-test --cc C:/msys64/mingw64/bin/gcc.exe --avformat-dll third_party/ffmpeg/windows-x64/bin/avformat-61.dll` 复验；GUI、硬件解码和真实网络流另行验收。
 
 使用 xmake 构建时，需要 MinGW-w64 编译器，运行 `setup_env.ps1` 初始化构建环境：
 

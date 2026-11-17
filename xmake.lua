@@ -219,6 +219,10 @@ target("FluxPlayer")
     if not whisper_root or #whisper_root == 0 then whisper_root = "third_party/whisper.cpp" end
     if has_config("ai_subtitles") then
         local whisper_build = path.join("build", "whisper", get_config("plat") or os.host(), get_config("arch") or os.arch(), get_config("mode") or "release")
+        -- Keep Ninja's cache separate from previous MinGW Makefiles builds.
+        if is_plat("windows") then
+            whisper_build = path.join(whisper_build, "ninja")
+        end
         local whisper_mode = get_config("mode") == "debug" and "Debug" or "Release"
         add_defines("FLUX_WHISPER=1")
         add_includedirs(path.join(whisper_root, "include"), path.join(whisper_root, "ggml/include"))
@@ -229,12 +233,27 @@ target("FluxPlayer")
             add_frameworks("Accelerate", "Foundation", "Metal", "MetalKit")
         end
         add_links("ggml-base")
+        if is_plat("windows") then
+            -- CMake's OpenMP dependency does not propagate through static
+            -- archives to xmake. Keep the runtime after GGML in the link order.
+            add_syslinks("gomp")
+        end
         -- Use the same CMake library graph as the main build, with static archives
         -- in a stable directory. Empty legacy whisper_root no longer disables ASR.
         before_build(function(target)
             local builddir = path.absolute(whisper_build)
             local cc = target:tool("cc")
             local cxx = target:tool("cxx")
+            -- xmake may omit .exe even for absolute Windows tool paths;
+            -- CMake requires those paths to name an existing file.
+            if target:is_plat("windows") then
+                if not os.isfile(cc) and os.isfile(cc .. ".exe") then
+                    cc = cc .. ".exe"
+                end
+                if not os.isfile(cxx) and os.isfile(cxx .. ".exe") then
+                    cxx = cxx .. ".exe"
+                end
+            end
             local args = {"-S", path.absolute("scripts/whisper"), "-B", builddir,
                 "-DFLUX_WHISPER_SOURCE_DIR=" .. path.absolute(whisper_root),
                 "-DCMAKE_BUILD_TYPE=" .. whisper_mode,
@@ -244,8 +263,13 @@ target("FluxPlayer")
             if target:is_plat("macosx") then
                 table.insert(args, "-DCMAKE_OSX_ARCHITECTURES=" .. target:arch())
             elseif target:is_plat("windows") then
+                import("lib.detect.find_tool")
+                local ninja = find_tool("ninja", {paths = {path.directory(cc)}})
+                assert(ninja, "Ninja is required to build Whisper; install Ninja and add it to PATH.")
                 table.insert(args, "-G")
-                table.insert(args, "MinGW Makefiles")
+                table.insert(args, "Ninja")
+                table.insert(args, "-DCMAKE_MAKE_PROGRAM=" .. ninja.program)
+                table.insert(args, "-DCMAKE_ASM_COMPILER=" .. cc)
             end
             os.vrunv("cmake", args)
             os.vrunv("cmake", {"--build", builddir, "--target", "whisper", "--config",
@@ -270,8 +294,13 @@ target("FluxPlayer")
     add_files("source/UI/skins/**/*.svg", {rule = "flux.skin.asset"})
     if is_plat("macosx") then
         add_files("source/onnxruntime/**/*.dylib", {rule = "flux.ort.asset"})
+        -- Match Windows: library-only changes must also redeploy the runtime.
+        add_files(path.join(ffmpeg_root, "lib/*.dylib"), {rule = "flux.ort.asset"})
     elseif is_plat("windows") then
         add_files("source/onnxruntime/windows-x64/*.dll", {rule = "flux.ort.asset"})
+        -- Updating a bundled FFmpeg DLL must trigger runtime deployment even
+        -- when none of the player's C++ files need recompiling.
+        add_files(path.join(ffmpeg_root, "bin/*.dll"), {rule = "flux.ort.asset"})
     end
 
     -- 平台相关 WebLogin 源文件：macOS 用 WKWebView (.mm)，Windows 用 WebView2 (.cpp)。
@@ -495,6 +524,9 @@ target("FluxPlayer")
             -- MinGW 运行时 DLL：从编译器同目录拷贝，方便直接从 build/bin 启动调试
             -- （与 CMakeLists.txt 的 POST_BUILD 逻辑保持一致）
             local mingw_dlls = {"libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll"}
+            if has_config("ai_subtitles") then
+                table.insert(mingw_dlls, "libgomp-1.dll")
+            end
             local mingw_bin = path.directory(target:tool("cxx"))
             for _, dll in ipairs(mingw_dlls) do
                 local src = path.join(mingw_bin, dll)

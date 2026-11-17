@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""编译小型 C 探针，在隔离目录中验证 Windows 候选 DLL 的 legacy HEVC FLV 解码。
+"""编译 C 探针，在隔离目录中验证 Windows FFmpeg 的 FLV 读写与解码。
 
-在 x64 VS Developer Command Prompt 中运行；仅使用 Python 标准库。
+支持 x64 MSVC 或 MinGW GCC；仅使用 Python 标准库。
 不调用系统 ffmpeg/ffprobe，不修改项目 DLL，不负责构建 FFmpeg。
 """
 import argparse
@@ -40,16 +40,18 @@ def run(command, cwd, env, timeout):
                             timeout=timeout)
     # cl 使用本地代码页；探针路径和 FFmpeg 日志可能包含 UTF-8。
     output = result.stdout.decode("utf-8", errors="replace")
-    print(output, end="" if output.endswith("\n") else "\n", flush=True)
+    if "--capabilities" not in command or result.returncode:
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
     if result.returncode:
         raise RuntimeError(f"进程失败，退出码 {result.returncode}；参见上方输出")
+    return output
 
 
-def verify(candidate, legacy, enhanced, project, compiler, work_dir, timeout):
-    candidate, legacy, enhanced, project = [
-        Path(path).resolve(strict=True) for path in (candidate, legacy, enhanced, project)
+def verify(candidate, legacy, enhanced, project, compiler, work_dir, timeout, self_test=False):
+    candidate, project = [
+        Path(path).resolve(strict=True) for path in (candidate, project)
     ]
-    for fixture in (legacy, enhanced):
+    for fixture in (() if self_test else (legacy, enhanced)):
         if not fixture.is_file():
             raise ValueError(f"测试素材不是文件: {fixture}")
     for name in CORE_DLLS:
@@ -66,21 +68,71 @@ def verify(candidate, legacy, enhanced, project, compiler, work_dir, timeout):
         for dll in (project / "bin").iterdir():
             if dll.is_file() and dll.suffix.lower() == ".dll":
                 shutil.copy2(dll, stage / dll.name)
-        shutil.copy2(candidate, stage / CORE_DLLS[0])
         # 使用 ASCII 相对路径，避免 C main 的 Windows ANSI argv 损坏中文素材路径。
-        shutil.copy2(legacy, stage / "legacy.flv")
-        shutil.copy2(enhanced, stage / "enhanced.flv")
+        if not self_test:
+            shutil.copy2(legacy, stage / "legacy.flv")
+            shutil.copy2(enhanced, stage / "enhanced.flv")
         executable = stage / "verify_ffmpeg_windows.exe"
-        run([compiler, "/nologo", "/MD", "/W4", "/utf-8",
-             f"/I{project / 'include'}", PROBE,
-             f"/Fo{stage / 'probe.obj'}", f"/Fe{executable}", "/link",
-             f"/LIBPATH:{project / 'lib'}", "avformat.lib", "avcodec.lib", "avutil.lib"],
-            stage, dict(os.environ), timeout)
+        if Path(compiler).stem.lower() in ("cl", "clang-cl"):
+            command = [compiler, "/nologo", "/MD", "/W4", "/utf-8",
+                       f"/I{project / 'include'}", PROBE,
+                       f"/Fo{stage / 'probe.obj'}", f"/Fe{executable}", "/link",
+                       f"/LIBPATH:{project / 'lib'}", "avformat.lib", "avcodec.lib", "avutil.lib"]
+        else:
+            command = [compiler, "-std=c11", "-O2", "-Wall", f"-I{project / 'include'}",
+                       PROBE, f"-L{project / 'lib'}", "-lavformat", "-lavcodec", "-lavutil",
+                       "-o", executable]
+        run(command, stage, dict(os.environ), timeout)
         env = dict(os.environ)
         # 不让其他 FFmpeg 安装通过 PATH 填补依赖；系统运行库仍由 Windows 加载。
         system = Path(os.environ["SystemRoot"])
         env["PATH"] = os.pathsep.join(map(str, (stage, system / "System32", system)))
-        run([executable, "legacy.flv", "enhanced.flv"], stage, env, timeout)
+        baseline = run([executable, "--capabilities"], stage, env, timeout)
+        shutil.copy2(candidate, stage / CORE_DLLS[0])
+        actual = run([executable, "--capabilities"], stage, env, timeout)
+        def capabilities(output):
+            return {line.strip() for line in output.splitlines()
+                    if line.startswith(("demuxer:", "muxer:", "input:", "output:"))}
+        missing = capabilities(baseline) - capabilities(actual)
+        if missing:
+            raise ValueError(f"候选库减少了容器/协议能力: {sorted(missing)}")
+        print(f"PASS: preserved {len(capabilities(baseline))} container/protocol capabilities")
+        if not self_test:
+            run([executable, "legacy.flv", "enhanced.flv"], stage, env, timeout)
+        run([executable, "--contracts"], stage, env, timeout)
+        # The writer must retain upstream Enhanced output by default, and emit
+        # codec-id 12 only when explicitly requested. Compare real decoded pixels/PTS.
+        from verify_ffmpeg_macos import read_flv, write_flv, without_av1_sequence
+        for filename, enhanced_output in (("contract-enhanced.flv", True),
+                                           ("contract-legacy.flv", False)):
+            _, tags = read_flv(stage / filename)
+            video = [payload for kind, _, payload in tags if kind == 9]
+            if not video or any(bool(payload[0] & 0x80) != enhanced_output for payload in video):
+                raise ValueError(f"HEVC writer contract failed: {filename}")
+        run([executable, "contract-legacy.flv", "contract-enhanced.flv"], stage, env, timeout)
+        header, tags = read_flv(stage / "contract-enhanced.flv")
+        sequence = next(tag for tag in tags if tag[0] == 9 and tag[2][0] & 15 == 0)
+        write_flv(stage / "extra-tags.flv", header,
+                  [sequence, (9, 0, b"\x90zzzzunknown"), *tags, (9, 1000, b"\x92hvc1")])
+        run([executable, "contract-legacy.flv", "extra-tags.flv"], stage, env, timeout)
+        for payload in (b"\x91hv", b"\x91hvc1\x00\x00"):
+            write_flv(stage / "truncated.flv", header, [sequence, (9, 1, payload)])
+            run([executable, "--reject", "truncated.flv"], stage, env, timeout)
+        for codec in ("av1", "vp9"):
+            filename = f"contract-{codec}.flv"
+            run([executable, "--compare", codec, filename, filename], stage, env, timeout)
+        header, tags = read_flv(stage / "contract-av1.flv")
+        stripped, removed = [], 0
+        for kind, timestamp, payload in tags:
+            if kind == 9 and payload[0] & 15 == 1:
+                body, count = without_av1_sequence(payload[5:])
+                payload = payload[:5] + body
+                removed += count
+            stripped.append((kind, timestamp, payload))
+        if not removed:
+            raise ValueError("AV1 test did not remove any in-band sequence headers")
+        write_flv(stage / "av1-config-only.flv", header, stripped)
+        run([executable, "--compare", "av1", "contract-av1.flv", "av1-config-only.flv"], stage, env, timeout)
     print("PASS: 候选 Windows DLL 验证通过；项目 DLL 未修改。")
 
 
@@ -93,8 +145,9 @@ def main(argv=None):
     parser.add_argument("--ffmpeg-dir", type=Path, default=ROOT / "third_party/ffmpeg/windows-x64",
                         help="项目 FFmpeg 目录（含 include/lib/bin）")
     parser.add_argument("--work-dir", type=Path, default=ROOT / "build/ffmpeg-windows-tests")
-    parser.add_argument("--cc", default="cl", help="x64 MSVC cl.exe 路径")
+    parser.add_argument("--cc", default="cl", help="x64 MSVC cl.exe 或 MinGW gcc.exe 路径")
     parser.add_argument("--timeout", type=int, default=120, help="每个进程的超时秒数")
+    parser.add_argument("--self-test", action="store_true", help="生成短素材进行完整回归，无需外部 HEVC 测试文件")
     args = parser.parse_args(argv)
     if sys.platform != "win32":
         parser.error("此入口必须在 Windows 上运行；本机源码回归不能替代 Windows DLL 验证")
@@ -102,10 +155,10 @@ def main(argv=None):
         parser.error("--timeout 必须大于 0")
     compiler = shutil.which(args.cc)
     if not compiler:
-        parser.error("未找到 cl.exe，请在 x64 VS Developer Command Prompt 中运行")
+        parser.error("未找到编译器；请使用 x64 VS Developer Command Prompt 或 --cc 指定 MinGW gcc.exe")
     try:
         verify(args.avformat_dll, args.legacy, args.enhanced, args.ffmpeg_dir,
-               compiler, args.work_dir.resolve(), args.timeout)
+               compiler, args.work_dir.resolve(), args.timeout, args.self_test)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1

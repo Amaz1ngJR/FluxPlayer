@@ -15,3 +15,13 @@ foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
 endforeach()
 set(FLUX_WHISPER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../third_party/whisper.cpp" CACHE PATH "Whisper library source")
 add_subdirectory("${FLUX_WHISPER_SOURCE_DIR}" whisper EXCLUDE_FROM_ALL)
+
+# GGML removes the library prefix on Windows, including MinGW. xmake's
+# -l flags require the conventional lib<name>.a archive names.
+if(MINGW)
+    foreach(target ggml ggml-base ggml-cpu)
+        if(TARGET ${target})
+            set_target_properties(${target} PROPERTIES PREFIX "lib")
+        endif()
+    endforeach()
+endif()

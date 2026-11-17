@@ -13,9 +13,13 @@
     {
       "file": "scripts/ffmpeg/patches/ffmpeg-7.1-enhanced-flv-fixes.patch",
       "sha256": "8b2f3a50a4067dd945406d25fe23be4efd1eeaff6815255a0d36883addcb2f8a"
+    },
+    {
+      "file": "scripts/ffmpeg/patches/ffmpeg-7.1-hls-fmp4-seek.patch",
+      "sha256": "d06868d6b5bd6868dcacc1788ee1f2ac04e3c6a0904806096d31f955a2d8eac4"
     }
   ],
-  "avformatSha256": "1fdd6bd76363f7457db7d058928f820d90fa2786e6b5fc9bf257744e23ab84d9",
+  "avformatSha256": "679acd9cf7f6cfe4598756a7c6f390a5e59c0f8044f7cf487a75b71f21a9e4c5",
   "libraries": [
     "libaom.3.15.3.dylib",
     "libarchive.13.dylib",
@@ -96,7 +100,7 @@
   "headersSha256": "e2b8134ff33edd462c444e8c43b522847e929b3988c64f52ded8cb54efe5549f",
   "configuration": "configuration: --prefix=${FFMPEG_PREFIX} --install-name-dir=${FFMPEG_PREFIX}/lib --cc=clang --enable-shared --disable-static --disable-debug --disable-doc --disable-autodetect --disable-ffplay --enable-gpl --enable-version3 --enable-videotoolbox --enable-audiotoolbox --enable-avfoundation --enable-network --enable-indev=avfoundation --enable-indev=lavfi --enable-outdev=audiotoolbox --enable-libx264 --enable-libx265 --enable-libopus --enable-libvpx --enable-libdav1d --enable-libaom --enable-libzimg --enable-libass --enable-libsoxr --enable-libmp3lame --enable-libvorbis --enable-libtheora --enable-libwebp --enable-libspeex --enable-libopenjpeg --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libsnappy --enable-librubberband --enable-libvidstab --enable-libtesseract --enable-libfontconfig --enable-libfreetype --enable-librav1e --enable-libxvid --enable-gnutls --enable-libsrt --enable-librist --enable-libbluray --enable-libxml2 --enable-libzmq --enable-lzma --enable-zlib --enable-bzlib --extra-cflags=-I/opt/homebrew/include --extra-ldflags=-L/opt/homebrew/lib --extra-version=FluxPlayer-5a1f107b4c78318f318897900acad1b6c6aa3f9d",
   "sha256": {
-    "libavformat.61.7.102.dylib": "1fdd6bd76363f7457db7d058928f820d90fa2786e6b5fc9bf257744e23ab84d9",
+    "libavformat.61.7.102.dylib": "679acd9cf7f6cfe4598756a7c6f390a5e59c0f8044f7cf487a75b71f21a9e4c5",
     "libavcodec.61.19.101.dylib": "119e70a77548419894c4cf3015515ed2e730002bb6e5642b0a4b8181bc149aad",
     "libswresample.5.3.100.dylib": "539c279a60e3798593f27872b7b364d1f6c289e032b00a2be20d3a7239137e13",
     "libavutil.59.39.100.dylib": "5ad124e81546bf9d4cee64e6332e0c57837df13ba2621f7ba608cb285cd51ce0",
@@ -148,7 +152,7 @@
     "libzmq.5.dylib": "778d624907ed1dc80f61651fd3c8fc31c4af3c43b30fc177eef26775dcbeeeb9",
     "libsodium.26.dylib": "4c729215b75fb7dabe5bbf88126edc890012bcef7b86268fc679cb2d3cd8d47b",
     "libswscale.8.3.100.dylib": "292959b8541b1397a09d1ec23bbdb7c6a248e1a6f1886e89a5a6148cb5e214cd",
-    "libavfilter.10.5.100.dylib": "37a4ddbe09de6fd7997699895019aef2b92f272b09b4bc05a3285beca9c8de13",
+    "libavfilter.10.5.100.dylib": "020b27c17053d9dda7212ab7094ba01794da1f5644be17867fac8723a23289f1",
     "libpostproc.58.3.100.dylib": "c448783dc107e2556f46e61d6b4c257003ee48edb73746fd77d2c5a7c106973d",
     "librubberband.3.dylib": "d339578add87ffabf246a8b215754322ebc720e2e51691092dc9381e5844eafa",
     "libsamplerate.0.2.2.dylib": "0479f7009259478e40c3b16956e524db34b6e8178042326ad8d4a96892f68699",

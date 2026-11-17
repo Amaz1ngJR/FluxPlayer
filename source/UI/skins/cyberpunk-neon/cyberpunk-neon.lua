@@ -877,17 +877,19 @@ local function render_merge()
 
         -- 链路信息：即使回退软件也要显示，不能留空白
         local transcode = status.transcoded == "true"
+        local initializing = transcode and (status.decoderName or "") == "" and (status.encoderName or "") == ""
         local device = not transcode and "Stream Copy"
-            or ((status.hwDeviceType or "") ~= "" and status.hwDeviceType or "CPU / Software")
+            or (initializing and "Initializing..."
+                or ((status.hwDeviceType or "") ~= "" and status.hwDeviceType or "CPU / Software"))
         c.text("Merge Pipeline", 268, 505, 904, 11, "textPrimary", "center")
         c.text(device, 268, 528, 904, 12, "accentPrimary", "center")
 
         local dec = not transcode and "BYPASS"
-            or ((status.hwDecoding == "true" and "HW " or "SW ") ..
-                ((status.decoderName or "") ~= "" and "(" .. status.decoderName .. ")" or "(initializing...)"))
+            or ((status.decoderName or "") == "" and "Initializing..."
+                or ((status.hwDecoding == "true" and "HW " or "SW ") .. "(" .. status.decoderName .. ")"))
         local enc = not transcode and "BYPASS"
-            or ((status.hwEncoding == "true" and "HW " or "SW ") ..
-                ((status.encoderName or "") ~= "" and "(" .. status.encoderName .. ")" or "(initializing...)"))
+            or ((status.encoderName or "") == "" and "Initializing..."
+                or ((status.hwEncoding == "true" and "HW " or "SW ") .. "(" .. status.encoderName .. ")"))
         c.text("Decode:", 548, 556, 120, 11, "textMuted")
         c.text(dec, 676, 556, 300, 11,
                status.hwDecoding == "true" and "accentSecondary" or "textSecondary")
@@ -896,8 +898,10 @@ local function render_merge()
                status.hwEncoding == "true" and "accentSecondary" or "textSecondary")
 
         local note = not transcode and "Packet remux (no decode / encode)"
-            or (status.zeroCopy == "true" and "GPU Zero-Copy Pipeline"
-                or "Software pipeline (CPU frames)")
+            or (initializing and "Initializing pipeline..."
+                or (status.zeroCopy == "true" and "GPU Zero-Copy Pipeline"
+                    or ((status.hwDecoding == "true" or status.hwEncoding == "true")
+                        and "Hybrid pipeline (CPU / GPU transfer)" or "Software pipeline (CPU frames)")))
         c.text(note, 268, 610, 904, 11,
                status.zeroCopy == "true" and "accentPrimary" or "textMuted", "center")
 

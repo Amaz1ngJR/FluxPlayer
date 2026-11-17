@@ -2,6 +2,7 @@
 .xmake/
 build/
 .cache/
+__pycache__/
 
 # CMake build files
 *.cmake

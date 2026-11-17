@@ -2,3 +2,4 @@
 ffmpeg-7.1-legacy-hevc.patch
 ffmpeg-7.1-private-flv.patch
 ffmpeg-7.1-enhanced-flv-fixes.patch
+ffmpeg-7.1-hls-fmp4-seek.patch
