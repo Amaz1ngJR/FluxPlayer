@@ -722,4 +722,33 @@ skin.surfaces.settings = skin.surfaces.settings or {}
 skin.surfaces.settings.render = render_settings
 
 
+skin.surfaces.subtitle.render = function()
+    local width,height=ui.getWindowSize()
+    local data=(ui.getData("subtitle") or {})[1] or {}
+    local stable,pending=data.text or "",data.pendingText or ""
+    local correction=data.correctionText or ""
+    -- 更正单独一行并加箭头，表明这一条是在改前一行的字。
+    if correction~="" then correction="更正  "..correction end
+    local children={}
+    local size=22*math.max(0.5,math.min(4,tonumber(data.fontScale) or 1.4))
+    local rows=(stable~="" and 1 or 0)+(pending~="" and 1 or 0)+(correction~="" and 1 or 0)
+    if rows>0 then
+        local boxW=width*0.85
+        local boxH=rows*size*1.25+12
+        local x=(width-boxW)/2
+        local y=height-(data.controlsVisible=="true" and 104 or 24)-boxH
+        children[#children+1]=ui.rect{color="bgVoid",opacity=0.55,x=x,y=y,width=boxW,height=boxH,absolute=true}
+        -- 待定文字用琥珀色，与已确认的白色拉开对比：颜色本身即“尚未确认”的信号，
+        -- 不再依赖低对比的灰。更正行用青色，并与正文区分开。
+        for _,line in ipairs({{correction,"accentPrimary"},{stable,"textPrimary"},{pending,"accentSecondary"}}) do
+            if line[1]~="" then
+                children[#children+1]=ui.text{content=line[1],color=line[2],size=size,baseline=size,
+                    textAlign="center",ellipsis=true,x=x,y=y+6,width=boxW,height=size*1.25,absolute=true}
+                y=y+size*1.25
+            end
+        end
+    end
+    return ui.container{layout="absolute",width=width,height=height,table.unpack(children)}
+end
+
 return skin

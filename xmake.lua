@@ -471,12 +471,12 @@ target("FluxPlayer")
         local resources_dir = path.join(target:targetdir(), "resources")
         os.mkdir(resources_dir)
         cp_if_changed("source/pic2.png", resources_dir)
-        -- Match CMake: only the built-in base Q8 model is deployed.
+        -- Match CMake: only the built-in small Q3_K model is deployed.
         for _, base in ipairs({source_dst, resources_dir}) do
             local model_dir = path.join(base, "models/whisper")
             os.tryrm(model_dir)
             os.mkdir(model_dir)
-            for _, name in ipairs({"ggml-base-q8_0.bin", "README.md"}) do
+            for _, name in ipairs({"ggml-small-q3_k.bin", "README.md"}) do
                 cp_if_changed(path.join("source/models/whisper", name), model_dir)
             end
         end

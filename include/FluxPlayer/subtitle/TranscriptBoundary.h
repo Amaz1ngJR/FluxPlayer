@@ -14,6 +14,7 @@ struct TranscriptBoundary {
     }
     static std::vector<Character> characters(const std::string& text) {
         std::vector<Character> result;
+        size_t last = 0;
         for (size_t i = 0; i < text.size();) {
             const size_t begin = i;
             uint32_t c = static_cast<unsigned char>(text[i++]);
@@ -26,7 +27,12 @@ struct TranscriptBoundary {
                 c == 0x3000 || c == 0x3001 || c == 0x3002 ||
                 (c >= 0x2010 && c <= 0x201f) || c == 0xff01 || c == 0xff0c ||
                 c == 0xff0e || c == 0xff1a || c == 0xff1b || c == 0xff1f) continue;
-            result.push_back({c, begin});
+            // A dropped character leaves a gap: two visible characters can share
+            // a byte offset only if they are the same character. Callers locate
+            // text by this offset, so keep it strictly increasing.
+            const size_t byte = begin <= last ? last : begin;
+            result.push_back({c, byte});
+            last = byte + 1;
         }
         return result;
     }
@@ -34,6 +40,67 @@ struct TranscriptBoundary {
         const auto a = characters(left), b = characters(right);
         return !a.empty() && a.size() == b.size() &&
             std::equal(a.begin(), a.end(), b.begin(), [](const Character& x, const Character& y) { return x.value == y.value; });
+    }
+    static bool matchesPrefix(const std::string& prefix, const std::string& text) {
+        const auto a = characters(prefix), b = characters(text);
+        return !a.empty() && a.size() <= b.size() &&
+            std::equal(a.begin(), a.end(), b.begin(), [](const auto& x, const auto& y) {
+                return x.value == y.value;
+            });
+    }
+    static bool hasAnchoredPreviewClue(const std::string& preview, const std::string& final) {
+        const auto a = characters(preview), b = characters(final);
+        if (a.size() < 8 || a.size() + 2 > b.size()) return false;
+        size_t differences = 0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].value == b[i].value) continue;
+            if (i < 3 || i + 1 >= a.size() || ++differences > 1) return false;
+        }
+        return differences == 1;
+    }
+    // A delayed revision should add a phrase also heard in the new audio.
+    static bool addsSharedPair(const std::string& original, const std::string& revised,
+                               const std::string& clue) {
+        const auto before = characters(original);
+        const auto after = characters(revised);
+        const auto later = characters(clue);
+        const auto isHan = [](uint32_t c) {
+            return (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff);
+        };
+        auto containsPair = [](const auto& chars, uint32_t first, uint32_t second) {
+            for (size_t i = 1; i < chars.size(); ++i)
+                if (chars[i - 1].value == first && chars[i].value == second) return true;
+            return false;
+        };
+        for (size_t i = 1; i < after.size(); ++i) {
+            const auto first = after[i - 1].value;
+            const auto second = after[i].value;
+            if (isHan(first) && isHan(second) && containsPair(later, first, second) &&
+                !containsPair(before, first, second)) return true;
+        }
+        return false;
+    }
+    // Use the preview as evidence only where the two full-window candidates
+    // have a small, locally aligned disagreement.
+    static bool previewSupports(const std::string& preview, const std::string& baseline,
+                                const std::string& alternative) {
+        const auto draft = characters(preview);
+        const auto first = characters(baseline);
+        const auto second = characters(alternative);
+        if (first.size() != second.size() || draft.size() < 6) return false;
+        size_t differences = 0;
+        for (size_t i = 0; i < first.size(); ++i) {
+            if (first[i].value == second[i].value) continue;
+            if (i >= draft.size() || draft[i].value != second[i].value) return false;
+            const auto anchored = [&](size_t index) {
+                return index < draft.size() && draft[index].value == first[index].value &&
+                    first[index].value == second[index].value;
+            };
+            if (!(i > 0 && anchored(i - 1)) && !(i + 1 < first.size() && anchored(i + 1)))
+                return false;
+            if (++differences > 1) return false;
+        }
+        return differences == 1;
     }
     // Only call when the input audio actually overlaps the previous chunk.
     // Conservative exact suffix/prefix matching avoids fuzzy deletion of speech.

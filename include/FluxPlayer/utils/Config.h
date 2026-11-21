@@ -33,7 +33,7 @@ public:
         float subtitleFontScale = 1.4f;       ///< 字幕字体缩放比例（1.0 ~ 2.5）
         std::string subtitleFontPath = "";    ///< 自定义字体路径（留空按平台自动探测 CJK 字体）
         bool aiSubtitlesEnabled = false;     ///< AI captions override embedded captions; applies on open
-        std::string aiSubtitleModel;         ///< Empty selects bundled models/whisper/ggml-base-q8_0.bin
+        std::string aiSubtitleModel;         ///< Empty selects bundled models/whisper/ggml-small-q3_k.bin
         std::string aiSubtitleLanguage = "zh";
         bool aiSubtitleGpu = true;
         std::string aiSubtitleHints;         ///< Domain terms for ASR, not replacement rules

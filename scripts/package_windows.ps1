@@ -268,13 +268,13 @@ foreach ($model in Get-ChildItem -LiteralPath "$stage\resources\models\realesrga
         throw "Unexpected bundled model in installer staging: $($model.Name)"
     }
 }
-foreach ($name in @("ggml-base-q8_0.bin", "README.md")) {
+foreach ($name in @("ggml-small-q3_k.bin", "README.md")) {
     if (-not (Test-Path -LiteralPath "$stage\resources\models\whisper\$name" -PathType Leaf)) {
         throw "Whisper resource missing: $name"
     }
 }
 foreach ($model in Get-ChildItem -LiteralPath "$stage\resources\models\whisper" -Filter "*.bin" -File) {
-    if ($model.Name -ne "ggml-base-q8_0.bin") { throw "Unexpected bundled Whisper model: $($model.Name)" }
+    if ($model.Name -ne "ggml-small-q3_k.bin") { throw "Unexpected bundled Whisper model: $($model.Name)" }
 }
 foreach ($directory in @("shaders", "fonts")) {
     if (-not (Test-Path -LiteralPath (Join-Path $stage $directory) -PathType Container)) {

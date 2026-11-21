@@ -38,7 +38,23 @@ public:
                 quiet_ >= (analyzed_ >= sampleRate * 3 ? 2560u : 5120u))
                 return {analyzed_, true, std::min(quiet_, size_t(7680)), false};
 
-            if (analyzed_ >= sampleRate * 8) {
+            // In a long phrase, accept a quiet pause with residual room noise.
+            // Require both low absolute energy and a sharp drop from the
+            // preceding audio, so ordinary soft syllables don't end the chunk.
+            if (hasSound_ && analyzed_ >= sampleRate * 9 / 2) {
+                constexpr size_t pause = 6 * block;
+                constexpr size_t preceding = 14 * block;
+                const auto pauseEnergy = SpeechAudio::energy(samples.data() + analyzed_ - pause, pause);
+                const auto precedingEnergy = SpeechAudio::energy(
+                    samples.data() + analyzed_ - pause - preceding, preceding);
+                if (pauseEnergy < 1e-5 && pauseEnergy < precedingEnergy * .005)
+                    return {analyzed_, true, pause, false};
+            }
+
+            // Hard limit. Shorter than the previous 8 s because the bundled
+            // model re-decodes a whole window per refresh: a smaller ceiling
+            // bounds both the visible latency and the per-refresh cost.
+            if (analyzed_ >= sampleRate * 6) {
                 // At the hard limit, prefer a quiet 80 ms region in the last
                 // 800 ms. Only use it if clearly quieter than that whole tail;
                 // otherwise avoid arbitrarily shortening continuous speech.

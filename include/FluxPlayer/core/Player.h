@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <memory>
 #include <functional>
 #include <thread>
@@ -415,6 +416,7 @@ public:
      * Controller 每帧查询，不持有所有权。
      */
     SubtitleManager* getSubtitleManager() const { return subtitleManager_.get(); }
+    std::pair<std::string, std::string> getSubtitleParts(std::string* correction = nullptr);
     std::string getSubtitleText();
     std::string getRealtimeSubtitleStatus() const;
 

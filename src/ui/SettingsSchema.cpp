@@ -413,7 +413,7 @@ const SettingEntry kSettings[] = {
 
     // ── SUBTITLES（旧版在 GENERAL 页内的小节）───────────────────────────
     {"aiSubtitlesEnabled", "AI Subtitles", SettingType::Boolean, "subtitle", "SUBTITLES", 0, 0, 0, true, aiEnabled_read, aiEnabled_write, "Local speech recognition; replaces embedded subtitles. Reopen media to apply."},
-    {"aiSubtitleModel", "Whisper Model", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiModel_read, aiModel_write, "Empty uses built-in base Q8. Optional small: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin (466 MiB). Select the downloaded file and reopen media.",
+    {"aiSubtitleModel", "Whisper Model", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiModel_read, aiModel_write, "Empty uses the built-in small Q3_K. Optional base: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin (141 MiB). Select the downloaded file and reopen media.",
         nullptr, 0, 0.75, PathKind::File, "*.bin", "Select Whisper Model"},
     {"aiSubtitleLanguage", "Speech Language", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiLanguage_read, aiLanguage_write, "zh / en / ja / auto. Reopen media to apply.", nullptr, 0, 0.55},
     {"aiSubtitleHints", "Recognition Hints", SettingType::Text, "subtitle", "SUBTITLES", 0, 0, 0, true, aiHints_read, aiHints_write, "Names and domain terms, e.g. email, account, login. Use a short list. Reopen media to apply.", nullptr, 0, 0.75},

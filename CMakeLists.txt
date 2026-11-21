@@ -442,11 +442,11 @@ add_custom_command(
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/whisper
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/whisper
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/ggml-base-q8_0.bin
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/ggml-small-q3_k.bin
         ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/README.md
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/source/models/whisper
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/ggml-base-q8_0.bin
+        ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/ggml-small-q3_k.bin
         ${CMAKE_CURRENT_SOURCE_DIR}/source/models/whisper/README.md
         ${FLUXPLAYER_RUNTIME_OUTPUT_DIR}/resources/models/whisper
     # 清理部署副本中的旧模型，仅分发当前内置模型。
@@ -590,7 +590,7 @@ install(CODE [[
     file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/resources/models/whisper")
     file(REMOVE_RECURSE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/source/models/whisper")
 ]])
-install(FILES source/models/whisper/ggml-base-q8_0.bin source/models/whisper/README.md
+install(FILES source/models/whisper/ggml-small-q3_k.bin source/models/whisper/README.md
     DESTINATION resources/models/whisper)
 # 安装阶段同步把单文件 Lua 皮肤包放到 resources/skins。
 install(DIRECTORY source/UI/skins/cyberpunk-neon/

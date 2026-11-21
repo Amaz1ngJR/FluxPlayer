@@ -494,7 +494,11 @@ std::string optionsText(const SettingEntry& entry) {
 std::vector<std::unordered_map<std::string, std::string>>
 Controller::provideLuaData(const std::string& name) const {
     if (name == "subtitle") {
-        return {{{"text", subtitleEnabled_ ? player_.getSubtitleText() : ""},
+        std::string correction;
+        const auto parts = player_.getSubtitleParts(&correction);
+        return {{{"text", subtitleEnabled_ ? parts.first : ""},
+                 {"pendingText", subtitleEnabled_ ? parts.second : ""},
+                 {"correctionText", subtitleEnabled_ ? correction : ""},
                  {"fontScale", std::to_string(Config::getInstance().get().subtitleFontScale)},
                  {"aiStatus", player_.getRealtimeSubtitleStatus()},
                  {"controlsVisible", visible_ ? "true" : "false"}}};

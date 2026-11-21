@@ -1080,16 +1080,29 @@ skin.surfaces.subtitle.render = function()
     local s=player_scale(width,height)
     local c=canvas(width,height,function(x) return (width-1440*s)/2+x*s end,
         function(y) return height-(900-y)*s end,function(v) return v*s end)
-    if data.text and data.text~="" then
+    local pending=data.pendingText or ""
+    local correction=data.correctionText or ""
+    if (data.text or "")~="" or pending~="" or correction~="" then
         local fontScale=math.max(0.5,math.min(4,tonumber(data.fontScale) or 1.4))
         local fontSize=15*fontScale
-        local boxHeight=fontSize*1.25+10
+        local rows=((data.text or "")~="" and 1 or 0)+(pending~="" and 1 or 0)+(correction~="" and 1 or 0)
+        local boxHeight=fontSize*1.25*rows+10
         local boxWidth=math.min(1320,math.max(614,614*fontScale))
         local x=(1440-boxWidth)/2
         local bottom=data.controlsVisible=="true" and 790 or 878
         local y=bottom-boxHeight
         c.rect(x,y,boxWidth,boxHeight,"bgVoid",0.55)
-        c.text(data.text,x,y+5+fontSize,boxWidth,fontSize,"textPrimary","center")
+        local lineY=y+5+fontSize
+        if correction~="" then
+            c.text("更正 "..correction,x,lineY,boxWidth,fontSize,"accentPrimary","center")
+            lineY=lineY+fontSize*1.25
+        end
+        if (data.text or "")~="" then
+            c.text(data.text,x,lineY,boxWidth,fontSize,"textPrimary","center")
+            lineY=lineY+fontSize*1.25
+        end
+        -- 待定文字用琥珀色：与已确认的白色拉开对比，颜色即“尚未确认”的信号。
+        if pending~="" then c.text(pending,x,lineY,boxWidth,fontSize,"accentSecondary","center") end
     end
     return c.finish()
 end

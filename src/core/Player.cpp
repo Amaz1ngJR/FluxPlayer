@@ -1363,7 +1363,7 @@ void Player::startWorkerThreads() {
     const auto& settings = Config::getInstance().get();
     if (settings.aiSubtitlesEnabled && hasAudioStream_) {
         realtimeSubtitles_ = std::make_unique<RealtimeSubtitles>(
-            settings.aiSubtitleModel.empty() ? Config::getResourcePath("models/whisper/ggml-base-q8_0.bin") : settings.aiSubtitleModel,
+            settings.aiSubtitleModel.empty() ? Config::getResourcePath("models/whisper/ggml-small-q3_k.bin") : settings.aiSubtitleModel,
             settings.aiSubtitleLanguage, settings.aiSubtitleGpu, settings.aiSubtitleHints);
         realtimeSubtitles_->reset(queueManager_->audioPacketQueue()->serial());
     }
@@ -1449,14 +1449,19 @@ bool Player::isPlaying() const {
     return stateManager_->isPlaying();
 }
 
-std::string Player::getSubtitleText() {
+std::pair<std::string, std::string> Player::getSubtitleParts(std::string* correction) {
+    if (correction) correction->clear();
     if (realtimeSubtitles_) {
-        const auto text = realtimeSubtitles_->text(getCurrentTime(), queueManager_->audioPacketQueue()->serial());
-        if (!text.empty()) return text;
+        auto value = realtimeSubtitles_->parts(getCurrentTime(), queueManager_->audioPacketQueue()->serial(), correction);
+        if (!value.first.empty() || !value.second.empty()) return value;
         const auto status = realtimeSubtitles_->status();
-        return status == "AI: listening..." ? std::string{} : status;
+        return {status == "AI: listening..." ? std::string{} : status, {}};
     }
-    return subtitleManager_ ? subtitleManager_->getCurrentText(getCurrentTime()) : std::string{};
+    return {subtitleManager_ ? subtitleManager_->getCurrentText(getCurrentTime()) : std::string{}, {}};
+}
+std::string Player::getSubtitleText() {
+    const auto value = getSubtitleParts();
+    return value.first + value.second;
 }
 
 std::string Player::getRealtimeSubtitleStatus() const {

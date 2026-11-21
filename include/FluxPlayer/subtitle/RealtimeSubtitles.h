@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <utility>
 #include <string>
 struct AVFrame;
 namespace FluxPlayer {
@@ -12,6 +13,7 @@ public:
     void push(const AVFrame* frame, double pts, int serial);
     void finish(int serial);
     void requestStop();
+    std::pair<std::string, std::string> parts(double mediaTime, int serial, std::string* correction = nullptr);
     std::string text(double mediaTime, int serial);
     std::string status() const;
 private:

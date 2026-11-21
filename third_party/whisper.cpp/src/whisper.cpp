@@ -1543,6 +1543,15 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
             model.type = e_model::MODEL_SMALL;
         }
 
+        // Pruned variants keep the width of their parent model; identify them
+        // by state width so a trimmed layer count is not reported as unknown.
+        if (model.type == e_model::MODEL_UNKNOWN) {
+            if (hparams.n_audio_state == 768) model.type = e_model::MODEL_SMALL;
+            else if (hparams.n_audio_state == 512) model.type = e_model::MODEL_BASE;
+            else if (hparams.n_audio_state == 384) model.type = e_model::MODEL_TINY;
+            else if (hparams.n_audio_state == 1024) model.type = e_model::MODEL_LARGE;
+        }
+
         if (hparams.n_audio_layer == 24) {
             model.type = e_model::MODEL_MEDIUM;
         }
@@ -1938,9 +1947,46 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
 
             const size_t bpe = ggml_type_size(ggml_type(ttype));
 
-            if ((nelements*bpe)/ggml_blck_size(tensor->type) != ggml_nbytes(tensor)) {
+            // A mixed-precision model stores some tensors at a different type
+            // than the header's dominant type. Convert those on load instead of
+            // rejecting the file; the shape check above already ran.
+            const bool convert = ggml_type(ttype) != tensor->type;
+            if (!convert && (nelements*bpe)/ggml_blck_size(tensor->type) != ggml_nbytes(tensor)) {
                 WHISPER_LOG_ERROR("%s: tensor '%s' has wrong size in model file: got %zu, expected %zu\n",
                         __func__, name.data(), ggml_nbytes(tensor), nelements*bpe);
+                return false;
+            }
+
+            if (convert) {
+                if (ggml_is_quantized(ggml_type(ttype)) || ggml_type(ttype) == GGML_TYPE_F16) {
+                    const auto* from = ggml_get_type_traits(ggml_type(ttype));
+                    const auto* to   = ggml_get_type_traits(tensor->type);
+                    if (!from || !from->to_float || !to || !to->from_float_ref) {
+                        WHISPER_LOG_ERROR("%s: tensor '%s' cannot be converted from %s to %s\n",
+                                __func__, name.data(), ggml_type_name(ggml_type(ttype)), ggml_type_name(tensor->type));
+                        return false;
+                    }
+                    const size_t srcBytes = ggml_row_size(ggml_type(ttype), ne[0]) * (nelements / ne[0]);
+                    read_buf.resize(srcBytes);
+                    loader->read(loader->context, read_buf.data(), srcBytes);
+                    std::vector<float> tmp(nelements);
+                    from->to_float(read_buf.data(), tmp.data(), nelements);
+                    std::vector<char> converted(ggml_nbytes(tensor));
+                    // from_float_ref copies n elements into one contiguous block,
+                    // which matches the row-major layout of these tensors.
+                    to->from_float_ref(tmp.data(), converted.data(), nelements);
+                    total_size += ggml_nbytes(tensor);
+                    model.n_loaded++;
+                    if (ggml_backend_buffer_is_host(tensor->buffer)) {
+                        memcpy(tensor->data, converted.data(), ggml_nbytes(tensor));
+                        BYTESWAP_TENSOR(tensor);
+                    } else {
+                        ggml_backend_tensor_set(tensor, converted.data(), 0, ggml_nbytes(tensor));
+                    }
+                    continue;
+                }
+                WHISPER_LOG_ERROR("%s: tensor '%s' has unsupported mixed type %s\n",
+                        __func__, name.data(), ggml_type_name(ggml_type(ttype)));
                 return false;
             }
 
