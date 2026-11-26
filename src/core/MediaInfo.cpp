@@ -1,8 +1,10 @@
 #include "FluxPlayer/core/MediaInfo.h"
 #include "FluxPlayer/utils/FrameRateUtils.h"
+#include "FluxPlayer/utils/StreamUtils.h"
 #include "FluxPlayer/utils/Logger.h"
 #include <sstream>
 #include <iomanip>
+#include <filesystem>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -53,10 +55,10 @@ const AVIndexEntry* streamIndexEntryAt(AVStream* stream, int index) {
  *
  * 部分 MP4 的索引条目很多，但除第一条外都没有 AVINDEX_KEYFRAME 标记；实际
  * av_read_frame() 返回的视频包仍带有正确的 AV_PKT_FLAG_KEY。该函数仅用于
- * extractFromFile() 创建的独立探测上下文，可以 seek 和读取数据，不会移动播放器
+ * probeLocalGop() 创建的独立探测上下文，可以 seek 和读取数据，不会移动播放器
  * 正在使用的 demux 上下文，也不会给网络流增加额外读取延迟。
  */
-int estimateGopFromPackets(AVFormatContext* formatCtx, int streamIndex, double fps) {
+int estimateGopFromPackets(AVFormatContext* formatCtx, int streamIndex, double fps, const std::atomic_bool& cancelled) {
     if (!formatCtx || streamIndex < 0 ||
         streamIndex >= static_cast<int>(formatCtx->nb_streams) || fps <= 0.0) {
         return 0;
@@ -85,7 +87,7 @@ int estimateGopFromPackets(AVFormatContext* formatCtx, int streamIndex, double f
     int64_t totalFrameInterval = 0;
     int64_t lastKeyframeTimestamp = AV_NOPTS_VALUE;
 
-    while (intervalCount < kMaxIntervals &&
+    while (!cancelled.load() && intervalCount < kMaxIntervals &&
            videoPacketCount < kMaxVideoPackets &&
            totalPacketCount < kMaxTotalPackets &&
            av_read_frame(formatCtx, packet) >= 0) {
@@ -173,7 +175,7 @@ bool MediaInfo::extractFromContext(AVFormatContext* formatCtx) {
         AVStream* stream = formatCtx->streams[i];
         AVCodecParameters* codecParams = stream->codecpar;
 
-        if (codecParams->codec_type == AVMEDIA_TYPE_VIDEO) {
+        if (isPlayableVideoStream(stream)) {
             videoStreams_[videoStreamCount_] = parseStreamInfo(stream);
             videoStreamCount_++;
         } else if (codecParams->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -198,50 +200,26 @@ bool MediaInfo::extractFromContext(AVFormatContext* formatCtx) {
     return true;
 }
 
-bool MediaInfo::extractFromFile(const std::string& filePath) {
-    AVFormatContext* formatCtx = nullptr;
+int MediaInfo::probeLocalGop(const std::string& filePath, std::atomic_bool& cancelled) {
+    std::error_code ec;
+    if (cancelled.load() || !std::filesystem::is_regular_file(std::filesystem::u8path(filePath), ec)) return 0;
+    AVFormatContext* fmt = avformat_alloc_context();
+    if (!fmt) return 0;
+    fmt->interrupt_callback = {[](void* flag) -> int { return static_cast<std::atomic_bool*>(flag)->load(); }, &cancelled};
+    if (avformat_open_input(&fmt, filePath.c_str(), nullptr, nullptr) < 0) return 0;
 
-    // 打开输入文件
-    if (avformat_open_input(&formatCtx, filePath.c_str(), nullptr, nullptr) != 0) {
-        LOG_ERROR("Failed to open file: " + filePath);
-        return false;
-    }
-
-    // 获取流信息
-    if (avformat_find_stream_info(formatCtx, nullptr) < 0) {
-        LOG_ERROR("Failed to find stream info: " + filePath);
-        avformat_close_input(&formatCtx);
-        return false;
-    }
-
-    bool result = extractFromContext(formatCtx);
-
-    // parseStreamInfo() 优先使用元数据和容器索引，速度最快。只有这两种方式都
-    // 得不到 GOP 时才扫描实际视频包。videoStreams_ 按“第几个视频流”编号，
-    // AVFormatContext 则按所有音视频/字幕流统一编号，因此这里单独维护 videoOrdinal。
-    if (result) {
-        int videoOrdinal = 0;
-        for (unsigned int streamIndex = 0; streamIndex < formatCtx->nb_streams; ++streamIndex) {
-            AVStream* stream = formatCtx->streams[streamIndex];
-            if (!stream || stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) continue;
-
-            auto infoIt = videoStreams_.find(videoOrdinal);
-            if (infoIt != videoStreams_.end() && infoIt->second.gopSize == 0) {
-                const int estimatedGop = estimateGopFromPackets(
-                    formatCtx, static_cast<int>(streamIndex), infoIt->second.fps);
-                if (estimatedGop > 0) {
-                    infoIt->second.gopSize = estimatedGop;
-                    LOG_INFO("MediaInfo: GOP estimated from packet keyframes: stream=" +
-                             std::to_string(streamIndex) +
-                             ", gop=" + std::to_string(estimatedGop));
-                }
+    int gop = 0;
+    if (!cancelled.load() && avformat_find_stream_info(fmt, nullptr) >= 0) {
+        for (unsigned i = 0; i < fmt->nb_streams; ++i) {
+            AVStream* stream = fmt->streams[i];
+            if (isPlayableVideoStream(stream)) {
+                gop = estimateGopFromPackets(fmt, i, selectFrameRate(stream), cancelled);
+                break;
             }
-            ++videoOrdinal;
         }
     }
-
-    avformat_close_input(&formatCtx);
-    return result;
+    avformat_close_input(&fmt);
+    return gop;
 }
 
 StreamInfo MediaInfo::getVideoStreamInfo(int index) const {

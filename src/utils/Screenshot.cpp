@@ -7,6 +7,7 @@
 #include "FluxPlayer/decoder/Frame.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/SystemSound.h"
+#include "FluxPlayer/utils/Yuv420Layout.h"
 
 extern "C" {
 #include <libswscale/swscale.h>
@@ -392,38 +393,29 @@ std::string Screenshot::saveFrameYUV(const Frame* frame,
     int width = outFrame->width;
     int height = outFrame->height;
 
-    if (targetFmt == AV_PIX_FMT_YUV420P) {
-        // I420: 写入 Y, U, V 三个平面
-        // 注意处理 linesize（可能有对齐填充），按行写入避免写入填充字节
-        for (int i = 0; i < height; i++) {
-            file.write(reinterpret_cast<const char*>(outFrame->data[0] + i * outFrame->linesize[0]), width);
-        }
-        for (int i = 0; i < height / 2; i++) {
-            file.write(reinterpret_cast<const char*>(outFrame->data[1] + i * outFrame->linesize[1]), width / 2);
-        }
-        for (int i = 0; i < height / 2; i++) {
-            file.write(reinterpret_cast<const char*>(outFrame->data[2] + i * outFrame->linesize[2]), width / 2);
-        }
-    } else {
-        // NV12: 写入 Y, UV 两个平面
-        for (int i = 0; i < height; i++) {
-            file.write(reinterpret_cast<const char*>(outFrame->data[0] + i * outFrame->linesize[0]), width);
-        }
-        for (int i = 0; i < height / 2; i++) {
-            file.write(reinterpret_cast<const char*>(outFrame->data[1] + i * outFrame->linesize[1]), width);
-        }
-    }
-
+    // 按行写入有效像素，跳过 linesize 中的对齐填充。
+    const bool written = visitYuv420Planes(width, height, targetFmt == AV_PIX_FMT_NV12,
+        [&](int plane, int rows, int bytes) {
+            for (int i = 0; i < rows; ++i) {
+                const auto* row = outFrame->data[plane] + i * outFrame->linesize[plane];
+                if (!file.write(reinterpret_cast<const char*>(row), bytes)) return false;
+            }
+            return true;
+        });
     file.close();
 
     // 5. 写入元数据
-    writeYUVMetadata(fullPath, width, height, yuvFormat);
+    if (written && file) writeYUVMetadata(fullPath, width, height, yuvFormat);
 
     // 6. 清理
     if (swsCtx) sws_freeContext(swsCtx);
     if (needFree) av_frame_free(&outFrame);
     if (needFreeCpuFrame) av_frame_free(&cpuFrame);
 
+    if (!written || !file) {
+        LOG_ERROR("Screenshot: failed to write YUV file: " + fullPath);
+        return "";
+    }
     LOG_INFO("YUV screenshot saved: " + fullPath);
 
     // 7. 播放音效（跨平台系统提示音）

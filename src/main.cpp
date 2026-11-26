@@ -210,20 +210,6 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
         LOG_INFO("Playback finished");
     });
 
-    // 媒体信息：
-    // - 本地文件：直接探测文件
-    // - 网络流 / 网页流：复用 Player 已打开的 AVFormatContext，避免重复连接
-    MediaInfo mediaInfo;
-    if (!FluxPlayer::isNetworkUrl(mediaPath) && !MediaSource::needsCapture(mediaPath)) {
-        if (!mediaInfo.extractFromFile(mediaPath)) {
-            LOG_WARN("Failed to extract media info; UI may show incomplete fields");
-        }
-    } else if (AVFormatContext* fmtCtx = player.getFormatContext()) {
-        if (!mediaInfo.extractFromContext(fmtCtx)) {
-            LOG_WARN("Failed to extract media info from open context; UI may show incomplete fields");
-        }
-    }
-
     if (!player.play()) {
         return "Failed to start playback";
     }
@@ -242,22 +228,7 @@ static std::string playMediaShared(UiContext& ui, Player& player, const std::str
         return "Failed to initialize UI";
     }
 
-    StreamInfo videoInfo = mediaInfo.getVideoStreamInfo(0);
-    StreamInfo audioInfo = mediaInfo.getAudioStreamInfo(0);
-    controller->setMediaInfo(
-        mediaPath,
-        videoInfo.width,
-        videoInfo.height,
-        mediaInfo.getDuration(),
-        videoInfo.fps,
-        videoInfo.codecName,
-        videoInfo.profile,
-        audioInfo.codecName,
-        audioInfo.profile,
-        audioInfo.sampleRate,
-        audioInfo.channels,
-        audioInfo.channelLayout,
-        videoInfo.gopSize);
+    controller->setMediaInfo(mediaPath);
 
     // 网页视频的 qualities / uploader / platform 等字段由 Controller::render 的
     // 「lazy pull」分支按需从 player.getLastExtractedInfo() 拉取（首帧命中），
@@ -310,13 +281,6 @@ static std::string playMediaCli(const std::string& mediaPath) {
         return "Failed to open: " + mediaPath;
     }
 
-    MediaInfo mediaInfo;
-    if (!FluxPlayer::isNetworkUrl(mediaPath) && !MediaSource::needsCapture(mediaPath)) {
-        mediaInfo.extractFromFile(mediaPath);
-    } else if (AVFormatContext* fmtCtx = player.getFormatContext()) {
-        mediaInfo.extractFromContext(fmtCtx);
-    }
-
     if (!player.play()) return "Failed to start playback";
     player.setLoopPlayback(Config::getInstance().get().loopPlayback);
 
@@ -329,17 +293,7 @@ static std::string playMediaCli(const std::string& mediaPath) {
     auto controller = std::make_unique<Controller>(player, *window);
     if (!controller->init()) return "Failed to initialize UI";
 
-    StreamInfo videoInfo = mediaInfo.getVideoStreamInfo(0);
-    StreamInfo audioInfo = mediaInfo.getAudioStreamInfo(0);
-    controller->setMediaInfo(
-        mediaPath,
-        videoInfo.width, videoInfo.height,
-        mediaInfo.getDuration(), videoInfo.fps,
-        videoInfo.codecName, videoInfo.profile,
-        audioInfo.codecName, audioInfo.profile,
-        audioInfo.sampleRate, audioInfo.channels,
-        audioInfo.channelLayout,
-        videoInfo.gopSize);
+    controller->setMediaInfo(mediaPath);
 
     player.setController(controller.get());
     player.setRenderCallback([&controller]() {
@@ -385,7 +339,7 @@ int main(int argc, char* argv[]) {
 #endif
     Config::getInstance().load();
 
-    auto& cfg = Config::getInstance().get();
+    const auto cfg = Config::getInstance().get();
     LogLevel logLevel = LogLevel::LOG_INFO;
     if      (cfg.logLevel == "DEBUG") logLevel = LogLevel::LOG_DEBUG;
     else if (cfg.logLevel == "INFO")  logLevel = LogLevel::LOG_INFO;

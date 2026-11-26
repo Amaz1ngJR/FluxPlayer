@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <future>
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -57,12 +58,7 @@ public:
     void render();
     void processInput();
 
-    void setMediaInfo(const std::string& filename,
-                      int width, int height, double duration, double videoFps,
-                      const std::string& videoCodec, const std::string& videoProfile,
-                      const std::string& audioCodec, const std::string& audioProfile,
-                      int audioSampleRate, int audioChannels, const std::string& channelLayout,
-                      int gopSize = 0);
+    void setMediaInfo(const std::string& filename);
 
     /**
      * @brief 设置网页视频扩展信息（上传者、平台、播放量、上传日期）
@@ -175,6 +171,11 @@ private:
     int videoHeight_;
     double videoFps_;
     int videoGopSize_;              ///< GOP 大小（关键帧间隔，单位：帧数）
+    void updateGopProbe();
+    void cancelGopProbe();
+    bool gopProbeRequested_ = false;
+    std::shared_ptr<std::atomic_bool> cancelGop_;
+    std::future<int> gopProbe_;
     double duration_;
     std::string videoCodec_;
     std::string videoProfile_;      ///< 视频 Profile（如 "High", "Main"）

@@ -5,7 +5,7 @@
 add_rules("mode.debug", "mode.release")
 
 -- ===== 版本号（需与 CMakeLists.txt 的 project VERSION 保持同步） =====
-local version = "0.9.7"
+local version = "0.9.8"
 
 -- 项目基本信息
 set_project("FluxPlayer")
@@ -340,6 +340,8 @@ target("FluxPlayer")
     add_files("src/ui/HomeScreen.cpp", {unity_ignored = true})
     -- MergeScreen 同样 include <glad/glad.h> + GLFW + ImGui，需单独编译
     add_files("src/ui/MergeScreen.cpp", {unity_ignored = true})
+    -- GLFW in another source can include system OpenGL before this source includes GLAD.
+    add_files("src/ui/SuperResolutionScreen.cpp", {unity_ignored = true})
     -- UiContext 与 OpeningScreen 直接 include <glad/glad.h> + GLFW，跟 Controller 等其他 GL TU 不能合并
     add_files("src/ui/UiContext.cpp", {unity_ignored = true})
     add_files("src/ui/OpeningScreen.cpp", {unity_ignored = true})
@@ -388,7 +390,7 @@ target("FluxPlayer")
         -- shell32 对应 Config 中的 SHGetFolderPath；uuid 提供 IID_IUnknown 等 COM IID。
         -- 两个库均在 CMake 主目标中显式链接，避免依赖第三方 target 的传递链接顺序。
         add_syslinks("opengl32", "gdi32", "winmm", "ole32", "comdlg32",
-                     "d3d11", "dxgi", "shell32", "uuid")
+                     "d3d11", "dxgi", "shell32", "uuid", "advapi32")
 
         -- CMake 在 Windows 使用 add_executable(... WIN32)，MinGW 会传入 -mwindows。
         -- xmake 也显式使用 GUI 子系统，避免双击 xmake 产物时额外弹出控制台窗口。

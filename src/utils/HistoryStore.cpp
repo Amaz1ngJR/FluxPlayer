@@ -14,6 +14,7 @@
  */
 
 #include "FluxPlayer/utils/HistoryStore.h"
+#include "FluxPlayer/utils/AtomicFile.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/Logger.h"
 
@@ -177,17 +178,7 @@ bool HistoryStore::writeAll(const std::vector<HistoryEntry>& entries, std::strin
         {"entries", std::move(arr)},
     };
 
-    std::ofstream file(path, std::ios::trunc);
-    if (!file.is_open()) {
-        if (error) *error = "failed to open history file for write: " + path;
-        return false;
-    }
-    file << root.dump(2);
-    if (!file.good()) {
-        if (error) *error = "failed to write history file: " + path;
-        return false;
-    }
-    return true;
+    return writeFileAtomically(path, root.dump(2), error);
 }
 
 bool HistoryStore::record(const HistoryEntry& entry, std::string* error) {

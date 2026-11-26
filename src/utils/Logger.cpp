@@ -117,15 +117,8 @@ Logger& Logger::getInstance() {
 
 // 构造函数：初始化默认配置
 Logger::Logger()
-    : m_minLevel(LogLevel::LOG_DEBUG)
-    , m_fileOutputEnabled(false) {
-    // 从配置加载日志级别
-    auto& cfg = Config::getInstance().get();
-    if (cfg.logLevel == "DEBUG") m_minLevel = LogLevel::LOG_DEBUG;
-    else if (cfg.logLevel == "INFO") m_minLevel = LogLevel::LOG_INFO;
-    else if (cfg.logLevel == "WARN") m_minLevel = LogLevel::LOG_WARN;
-    else if (cfg.logLevel == "ERROR") m_minLevel = LogLevel::LOG_ERROR;
-}
+    : m_minLevel(LogLevel::LOG_INFO)
+    , m_fileOutputEnabled(false) {} // Config::load applies the configured level after publishing settings.
 
 // 析构函数：关闭文件流
 Logger::~Logger() {

@@ -27,6 +27,7 @@
 #include "FluxPlayer/subtitle/RealtimeSubtitles.h"
 #include "FluxPlayer/video/FrameInterpolator.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Yuv420Layout.h"
 #include "FluxPlayer/utils/Timer.h"
 #include "FluxPlayer/utils/Config.h"
 #include "FluxPlayer/utils/HardwareInfo.h"
@@ -34,8 +35,10 @@
 #include "FluxPlayer/ui/Toast.h"
 #include "FluxPlayer/ui/ScreenshotEffect.h"
 
+#include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 #include "FluxPlayer/utils/MediaSource.h"
 #include "FluxPlayer/utils/HlsStreamResolver.h"
 #include "FluxPlayer/utils/MediaSourceResolver.h"
@@ -55,6 +58,7 @@ extern "C" {
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
 }
 
@@ -199,7 +203,7 @@ Player::Player()
     , videoHeight_(0)
     , videoFrameInterval_(0.04)
     , isLiveStream_(false)
-    , volume_(Config::getInstance().get().volume)
+    , volume_(Config::getInstance().read(&Config::Settings::volume))
     , muted_(false)
     , loopPlayback_(false)
     , currentAudioFramePTS_(0.0)
@@ -335,6 +339,7 @@ bool Player::open(const std::string& filePath) {
     { std::lock_guard<std::mutex> lock(mediaSessionMutex_); activeMediaSession_ = {}; }
     currentSourceUrl_ = filePath;
     currentSourceIsNetwork_ = isNetworkUrl(filePath);
+    mediaInfo_.reset();
 
     // 图片文件走独立路径（无 Demuxer/Worker��单帧直接注入渲染队列）
     if (isImageFile(filePath)) {
@@ -511,6 +516,8 @@ bool Player::open(const std::string& filePath) {
         setState(PlayerState::ERRORED);
         return false;
     }
+
+    snapshotMediaInfo(demuxer_->getFormatContext());
 
     // 纯音频模式检测：无视频流但有音频流时进入音频-only 模式
     audioOnly_ = demuxer_->getVideoStreamIndex() < 0;
@@ -1276,6 +1283,11 @@ double Player::getDuration() const {
     return duration_;
 }
 
+void Player::snapshotMediaInfo(AVFormatContext* fmt) {
+    mediaInfo_ = std::make_unique<MediaInfo>();
+    if (!mediaInfo_->extractFromContext(fmt)) mediaInfo_.reset();
+}
+
 AVFormatContext* Player::getFormatContext() const {
     return demuxer_ ? demuxer_->getFormatContext() : nullptr;
 }
@@ -1319,7 +1331,7 @@ void Player::setBrightness(float brightness) {
 void Player::setVolume(float volume) {
     if (!std::isfinite(volume)) return;
     volume_.store(std::clamp(volume, 0.0f, 1.0f));
-    Config::getInstance().getMutable().volume = volume_.load();
+    Config::getInstance().set(&Config::Settings::volume, volume_.load());
     Config::getInstance().save();
     if (audioOutput_) {
         audioOutput_->setVolume(muted_.load() ? 0.0f : volume_.load());
@@ -1360,7 +1372,7 @@ void Player::startWorkerThreads() {
     // 启动 packet / frame 队列（QueueManager 聚合）
     queueManager_->startAll();
 
-    const auto& settings = Config::getInstance().get();
+    const auto settings = Config::getInstance().get();
     if (settings.aiSubtitlesEnabled && hasAudioStream_) {
         realtimeSubtitles_ = std::make_unique<RealtimeSubtitles>(
             settings.aiSubtitleModel.empty() ? Config::getResourcePath("models/whisper/ggml-small-q3_k.bin") : settings.aiSubtitleModel,
@@ -1548,7 +1560,7 @@ void Player::cleanup() {
     qualitySwitch_.success = false;
     qualitySwitch_.formatId.clear();
     qualitySwitch_.error.clear();
-    qualityMediaInfo_.reset();
+    mediaInfo_.reset();
     failedDashSeekSerial_.store(-1);
     filePath_.clear();
     currentSourceUrl_.clear();
@@ -1678,14 +1690,14 @@ bool Player::initWindowAndRenderer() {
                             // 但截图文件和音效始终执行
                             // 闪光动画是可选反馈（Config.screenshotFlash）。关闭时直接跳过，
                             // 文件与音效/Toast 不受影响。
-                            const bool flashEnabled = Config::getInstance().get().screenshotFlash;
+                            const auto cfg = Config::getInstance().get();
+                            const bool flashEnabled = cfg.screenshotFlash;
                             bool shouldTriggerAnimation = flashEnabled &&
                                 (!screenshotEffect_ || !screenshotEffect_->isActive());
                             if (shouldTriggerAnimation && screenshotEffect_) {
                                 screenshotEffect_->trigger();
                             }
 
-                            auto& cfg = Config::getInstance().get();
                             std::string savedPath;
 
                             // 根据格式分发：yuv/nv12 走原始 YUV 写出（无编码），png/jpg 走编码
@@ -1755,7 +1767,7 @@ bool Player::initWindowAndRenderer() {
                             LOG_WARN("Screenshot: no frame available");
 
                             // 显示无帧可用的 Toast
-                            if (toastManager_ && Config::getInstance().get().screenshotToast) {
+                            if (toastManager_ && Config::getInstance().read(&Config::Settings::screenshotToast)) {
                                 ToastMessage msg;
                                 msg.type = ToastType::Warning;
                                 msg.title = "Screenshot unavailable";
@@ -1974,7 +1986,7 @@ bool Player::initDecoders() {
     // 初始化字幕解码器（仅当媒体含字幕流且配置启用时）
     // 字幕初始化失败不影响音视频播放，仅置空 subtitleDecoder_ 使渲染层不再工作
     if (demuxer_->getSubtitleStreamIndex() >= 0 &&
-        Config::getInstance().get().subtitleEnabled) {
+        Config::getInstance().read(&Config::Settings::subtitleEnabled)) {
         AVCodecParameters* subParams = demuxer_->getSubtitleCodecParams();
         AVStream* subStream = demuxer_->getSubtitleStream();
 
@@ -2103,7 +2115,7 @@ bool Player::shouldDropFrameForSpeed(const AVFrame* avFrame, double rate) {
 #endif
 
     // 判断是否启用高倍数抽帧：本地文件 + 硬件加速 + 高倍数（>=2x）
-    bool hwAccelEnabled = Config::getInstance().get().hwaccel;
+    bool hwAccelEnabled = Config::getInstance().read(&Config::Settings::hwaccel);
     bool useHighSpeedSkip = isLocalFile_ && hwAccelEnabled && (rate >= 2.0);
 
     // 调试日志：首次8倍速时打印条件
@@ -2790,8 +2802,7 @@ void Player::resetQualityPlayback(const ExtractedStream& info, double seekTime) 
     audioPausedForSeek_.store(hasAudioStream_);
     audioDeviceFlushReady_.store(true);
     failedDashSeekSerial_.store(-1);
-    qualityMediaInfo_ = std::make_unique<MediaInfo>();
-    if (!qualityMediaInfo_->extractFromContext(demuxer_->getFormatContext())) qualityMediaInfo_.reset();
+    snapshotMediaInfo(demuxer_->getFormatContext());
     if (audioOnly_) loadCoverImage();
     publishMediaSession(info);
     lastExtractedInfo_ = info; // DemuxWorker 启动前发布，不能与其读 isDash 竞争。
@@ -2803,8 +2814,6 @@ void Player::startVideoRecordingInternal() {
         LOG_WARN("RecordingService not available");
         return;
     }
-    auto& cfg = Config::getInstance().get();
-
     // 确定输出扩展名
     std::string ext;
     if (isLiveStream_) {
@@ -2826,7 +2835,7 @@ void Player::startVideoRecordingInternal() {
 #endif
     char buf[64];
     std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
-    std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + "." + ext;
+    std::string outputPath = Config::getInstance().read(&Config::Settings::recordDir) + "/FluxPlayer_" + buf + "." + ext;
 
     // 投递请求到 RecordingService，demux 线程串行处理
     recordingService_->requestStartVideo(outputPath);
@@ -2845,7 +2854,6 @@ void Player::startAudioRecordingInternal() {
         return;
     }
     // 源轨道由 demux 消费请求时检查，不从 UI 线程访问活跃输入。
-    auto& cfg = Config::getInstance().get();
 
     auto now = std::chrono::system_clock::now();
     auto timeT = std::chrono::system_clock::to_time_t(now);
@@ -2857,7 +2865,7 @@ void Player::startAudioRecordingInternal() {
 #endif
     char buf[64];
     std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
-    std::string outputPath = cfg.recordDir + "/FluxPlayer_" + buf + ".m4a";
+    std::string outputPath = Config::getInstance().read(&Config::Settings::recordDir) + "/FluxPlayer_" + buf + ".m4a";
 
     // 投递请求到 RecordingService
     recordingService_->requestStartAudio(outputPath);
@@ -2883,6 +2891,163 @@ bool Player::isImageFile(const std::string& path) {
            ext == ".yuv" || ext == ".i420" || ext == ".nv12";
 }
 
+namespace {
+
+// 限制静态图的解码/分配预算，包含 8K UHD；FFmpeg 另行检查 stride 和地址范围。
+constexpr int64_t kMaxImagePixels = 64LL * 1024 * 1024;
+
+bool validImageSize(int w, int h) {
+    return w > 0 && h > 0 && int64_t(w) * h <= kMaxImagePixels &&
+           av_image_check_size(w, h, 0, nullptr) >= 0;
+}
+
+std::string_view trimImageField(std::string_view s) {
+    const auto first = s.find_first_not_of(" \t\r");
+    return first == s.npos ? std::string_view{} :
+           s.substr(first, s.find_last_not_of(" \t\r") - first + 1);
+}
+
+bool readImageMetadata(const std::string& path, bool nv12, int& w, int& h) {
+    // sidecar 通常只有几百字节；一次有界读取，避免损坏的超长行撑大内存。
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    std::string buffer(64 * 1024 + 1, '\0');
+    file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    if (!file.eof() || file.bad()) return false;
+    std::string_view text(buffer.data(), static_cast<size_t>(file.gcount()));
+    while (!text.empty()) {
+        const auto end = text.find('\n');
+        const auto line = trimImageField(text.substr(0, end));
+        text.remove_prefix(end == text.npos ? text.size() : end + 1);
+        if (line.empty() || line.front() == '#') continue;
+        const auto eq = line.find('=');
+        if (eq == line.npos) return false;
+        const auto key = trimImageField(line.substr(0, eq));
+        const auto value = trimImageField(line.substr(eq + 1));
+        if (key == "width" || key == "height") {
+            int& dimension = key == "width" ? w : h;
+            if (dimension || value.empty()) return false;
+            const auto last = value.data() + value.size();
+            const auto parsed = std::from_chars(value.data(), last, dimension);
+            if (parsed.ec != std::errc{} || parsed.ptr != last || dimension <= 0) return false;
+        } else if (key == "format") {
+            if (nv12 ? value != "nv12" : (value != "yuv" && value != "i420" && value != "yuv420p"))
+                return false;
+        }
+    }
+    return validImageSize(w, h);
+}
+
+bool readRawImage(const std::string& path, bool nv12, AVFrame* frame) {
+    std::ifstream raw(path, std::ios::binary | std::ios::ate);
+    const std::streamoff size = raw.tellg();
+    if (size <= 0 || !raw.seekg(0)) return false;
+
+    const std::string metaPath = path + ".txt";
+    int w = 0, h = 0;
+    std::error_code ec;
+    if (std::filesystem::exists(metaPath, ec)) {
+        if (!readImageMetadata(metaPath, nv12, w, h)) return false;
+    } else {
+        if (ec) return false;
+        // 仅无 sidecar 时推断：优先精确单帧，其次匹配常见尺寸的整数帧。
+        static constexpr std::pair<int,int> kCommonRes[] = {
+            {176,144},{352,288},{640,360},{640,480},{720,480},{720,576},
+            {800,600},{1024,576},{1024,768},{1280,720},{1280,800},{1280,960},
+            {1280,1080},{1440,1080},{1920,1080},{1920,1088},{2048,1080},
+            {2560,1440},{3840,2160},{4096,2160}
+        };
+        for (int pass = 0; pass < 2 && !w; ++pass) {
+            for (auto [rw, rh] : kCommonRes) {
+                const int64_t bytes = int64_t(rw) * rh * 3 / 2;
+                if (pass == 0 ? size == bytes : size % bytes == 0) {
+                    w = rw;
+                    h = rh;
+                    break;
+                }
+            }
+        }
+    }
+    if (!validImageSize(w, h)) return false;
+    const int cw = chroma420Extent(w), ch = chroma420Extent(h);
+    if (size < int64_t(w) * h + 2LL * cw * ch) return false;
+    frame->width = w;
+    frame->height = h;
+    frame->format = nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    if (av_frame_get_buffer(frame, 0) < 0) return false;
+    auto readPlane = [&](int plane, int rows, int bytes) {
+        if (!frame->data[plane] || frame->linesize[plane] < bytes) return false;
+        for (int y = 0; y < rows; ++y) {
+            auto* row = frame->data[plane] + size_t(y) * frame->linesize[plane];
+            if (!raw.read(reinterpret_cast<char*>(row), bytes)) return false;
+        }
+        return true;
+    };
+    return visitYuv420Planes(w, h, nv12, readPlane);
+}
+
+template<typename T, void (*Free)(T**)>
+struct ImageResourceDeleter {
+    void operator()(T* ptr) const { Free(&ptr); }
+};
+
+bool decodeImageFrame(AVFormatContext* fmt, AVFrame* output) {
+    if (avformat_find_stream_info(fmt, nullptr) < 0) return false;
+    const int index = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (index < 0) return false;
+    const auto* params = fmt->streams[index]->codecpar;
+    const AVCodec* codec = avcodec_find_decoder(params->codec_id);
+    if (!codec) return false;
+    std::unique_ptr<AVCodecContext, ImageResourceDeleter<AVCodecContext, avcodec_free_context>>
+        ctx(avcodec_alloc_context3(codec));
+    if (!ctx || avcodec_parameters_to_context(ctx.get(), params) < 0) return false;
+    ctx->max_pixels = kMaxImagePixels;
+    if (avcodec_open2(ctx.get(), codec, nullptr) < 0) return false;
+    std::unique_ptr<AVPacket, ImageResourceDeleter<AVPacket, av_packet_free>> pkt(av_packet_alloc());
+    Frame decoded;
+    AVFrame* raw = decoded.getAVFrame();
+    if (!pkt || !raw) return false;
+    for (;;) {
+        const int ret = av_read_frame(fmt, pkt.get());
+        if (ret == AVERROR_EOF) {
+            if (avcodec_send_packet(ctx.get(), nullptr) < 0 ||
+                avcodec_receive_frame(ctx.get(), raw) < 0) return false;
+            break;
+        }
+        if (ret < 0) return false;
+        if (pkt->stream_index == index) {
+            if (avcodec_send_packet(ctx.get(), pkt.get()) < 0) return false;
+            const int received = avcodec_receive_frame(ctx.get(), raw);
+            if (received == 0) break;
+            if (received != AVERROR(EAGAIN)) return false;
+        }
+        av_packet_unref(pkt.get());
+    }
+    if (!validImageSize(raw->width, raw->height) || raw->decode_error_flags ||
+        (raw->flags & AV_FRAME_FLAG_CORRUPT)) return false;
+    const auto srcFmt = static_cast<AVPixelFormat>(raw->format);
+    if (srcFmt == AV_PIX_FMT_YUV420P || srcFmt == AV_PIX_FMT_YUVJ420P || srcFmt == AV_PIX_FMT_NV12) {
+        av_frame_move_ref(output, raw); // 保留解码器设置的 color_range 等属性。
+        if (srcFmt == AV_PIX_FMT_YUVJ420P) {
+            // 内存布局相同，只需用渲染器支持的格式标记并显式保留全范围。
+            output->format = AV_PIX_FMT_YUV420P;
+            output->color_range = AVCOL_RANGE_JPEG;
+        }
+        return true;
+    }
+    std::unique_ptr<SwsContext, decltype(&sws_freeContext)> sws(
+        sws_getContext(raw->width, raw->height, srcFmt, raw->width, raw->height,
+                       AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr), sws_freeContext);
+    output->width = raw->width;
+    output->height = raw->height;
+    output->format = AV_PIX_FMT_YUV420P;
+    return sws && av_frame_get_buffer(output, 0) >= 0 &&
+           sws_scale(sws.get(), raw->data, raw->linesize, 0, raw->height,
+                     output->data, output->linesize) == raw->height;
+}
+
+} // namespace
+
 bool Player::openImageFile(const std::string& path) {
     LOG_INFO("Opening image: " + path);
 
@@ -2896,150 +3061,27 @@ bool Player::openImageFile(const std::string& path) {
     bool isRawNV12 = (ext == ".nv12");
     bool isRawYUV = (ext == ".yuv" || ext == ".i420");
 
-    AVFrame* imgFrame = nullptr;
+    Frame prepared;
+    AVFrame* imgFrame = prepared.getAVFrame();
+    if (!imgFrame) return false;
+    std::unique_ptr<AVFormatContext, ImageResourceDeleter<AVFormatContext, avformat_close_input>> fmt;
 
     if (isRawYUV || isRawNV12) {
-        // ── YUV/NV12 原始文件：解析同名 .txt 元数据获取宽高 ──
-        std::string metaPath = path + ".txt";
-        std::ifstream meta(metaPath);
-        int w = 0, h = 0;
-        if (meta.is_open()) {
-            std::string line;
-            while (std::getline(meta, line)) {
-                if (line.empty() || line[0] == '#') continue;
-                auto eq = line.find('=');
-                if (eq == std::string::npos) continue;
-                std::string key = line.substr(0, eq), val = line.substr(eq + 1);
-                if (key == "width")  w = std::stoi(val);
-                else if (key == "height") h = std::stoi(val);
-            }
-        }
-        if (w <= 0 || h <= 0) {
-            // 无元数据：按文件大小匹配常用分辨率（I420/NV12 均为 W×H×3/2 字节）
-            // 覆盖了从 QCIF 到 4K 的常见尺寸，匹配失败才回退 1920×1080
-            static constexpr std::pair<int,int> kCommonRes[] = {
-                {176,144},{352,288},{640,360},{640,480},{720,480},{720,576},
-                {800,600},{1024,576},{1024,768},{1280,720},{1280,800},{1280,960},
-                {1280,1080},{1440,1080},{1920,1080},{1920,1088},{2048,1080},
-                {2560,1440},{3840,2160},{4096,2160}
-            };
-            // 获取文件大小（避免 std::filesystem 在旧 MinGW 上的兼容问题）
-            int64_t fileSize = 0;
-            {
-                std::ifstream file(path, std::ios::binary | std::ios::ate);
-                if (file.is_open()) fileSize = file.tellg();
-            }
-            // 两轮匹配：pass0 精确单帧（fileSize*2 == W*H*3），pass1 整数倍多帧
-            // 优先精确匹配，避免小分辨率多帧误命中大文件
-            for (int pass = 0; pass < 2 && w <= 0; pass++) {
-                for (auto [rw, rh] : kCommonRes) {
-                    int64_t frameBytes2 = (int64_t)rw * rh * 3;  // = W*H*3/2 × 2，避免浮点
-                    bool match = (pass == 0) ? (fileSize * 2 == frameBytes2)
-                                             : (frameBytes2 > 0 && (fileSize * 2) % frameBytes2 == 0);
-                    if (match) { w = rw; h = rh; break; }
-                }
-            }
-            if (w <= 0 || h <= 0) {
-                w = 1920; h = 1080;
-                LOG_WARN("openImageFile: cannot guess resolution, assuming 1920x1080");
-            }
-        }
-
-        imgFrame = av_frame_alloc();
-        imgFrame->format = isRawNV12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-        imgFrame->width  = w;
-        imgFrame->height = h;
-        av_frame_get_buffer(imgFrame, 0);
-
-        std::ifstream raw(path, std::ios::binary);
-        if (!raw.is_open()) {
-            av_frame_free(&imgFrame);
-            LOG_ERROR("openImageFile: cannot read " + path);
+        if (!readRawImage(path, isRawNV12, imgFrame)) {
+            LOG_ERROR("openImageFile: invalid raw image or metadata: " + path);
             return false;
-        }
-        // 按行写入，避免读入 linesize 的对齐填充字节
-        if (!isRawNV12) {
-            // I420: Y + U + V
-            for (int i = 0; i < h;     i++) raw.read((char*)imgFrame->data[0] + i * imgFrame->linesize[0], w);
-            for (int i = 0; i < h / 2; i++) raw.read((char*)imgFrame->data[1] + i * imgFrame->linesize[1], w / 2);
-            for (int i = 0; i < h / 2; i++) raw.read((char*)imgFrame->data[2] + i * imgFrame->linesize[2], w / 2);
-        } else {
-            // NV12: Y + UV（UV 每行宽度与 Y 相同）
-            for (int i = 0; i < h;     i++) raw.read((char*)imgFrame->data[0] + i * imgFrame->linesize[0], w);
-            for (int i = 0; i < h / 2; i++) raw.read((char*)imgFrame->data[1] + i * imgFrame->linesize[1], w);
         }
     } else {
         // ── JPEG / PNG：FFmpeg image2 解复用器 + 解码器 ──
-        AVFormatContext* fmt = nullptr;
-        if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
+        AVFormatContext* input = nullptr;
+        if (avformat_open_input(&input, path.c_str(), nullptr, nullptr) < 0) {
             LOG_ERROR("openImageFile: avformat_open_input failed: " + path);
             return false;
         }
-        avformat_find_stream_info(fmt, nullptr);
-
-        int vidIdx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-        if (vidIdx < 0) {
-            avformat_close_input(&fmt);
-            LOG_ERROR("openImageFile: no video stream in " + path);
-            return false;
-        }
-
-        const AVCodec* codec = avcodec_find_decoder(fmt->streams[vidIdx]->codecpar->codec_id);
-        AVCodecContext* ctx = avcodec_alloc_context3(codec);
-        avcodec_parameters_to_context(ctx, fmt->streams[vidIdx]->codecpar);
-        if (avcodec_open2(ctx, codec, nullptr) < 0) {
-            avcodec_free_context(&ctx);
-            avformat_close_input(&fmt);
-            LOG_ERROR("openImageFile: avcodec_open2 failed");
-            return false;
-        }
-
-        AVPacket* pkt = av_packet_alloc();
-        AVFrame* raw = av_frame_alloc();
-        bool decoded = false;
-        while (av_read_frame(fmt, pkt) >= 0 && !decoded) {
-            if (pkt->stream_index == vidIdx &&
-                avcodec_send_packet(ctx, pkt) == 0 &&
-                avcodec_receive_frame(ctx, raw) == 0) {
-                decoded = true;
-            }
-            av_packet_unref(pkt);
-        }
-        av_packet_free(&pkt);
-        avcodec_free_context(&ctx);
-        avformat_close_input(&fmt);
-
-        if (!decoded) {
-            av_frame_free(&raw);
+        fmt.reset(input);
+        if (!decodeImageFrame(fmt.get(), imgFrame)) {
             LOG_ERROR("openImageFile: decode failed: " + path);
             return false;
-        }
-
-        // YUV420P / YUVJ420P / NV12：直接使用（renderer 按 avFrame->format 和 color_range 正确渲染）
-        // 其他格式（如 PNG → RGB24）：转换为 YUV420P
-        AVPixelFormat srcFmt = (AVPixelFormat)raw->format;
-        if (srcFmt == AV_PIX_FMT_YUV420P || srcFmt == AV_PIX_FMT_YUVJ420P ||
-            srcFmt == AV_PIX_FMT_NV12) {
-            imgFrame = raw;  // 直接移交，color_range 会被 renderVideoFrame 正确读取
-        } else {
-            SwsContext* sws = sws_getContext(
-                raw->width, raw->height, srcFmt,
-                raw->width, raw->height, AV_PIX_FMT_YUV420P,
-                SWS_BILINEAR, nullptr, nullptr, nullptr);
-            if (!sws) {
-                av_frame_free(&raw);
-                LOG_ERROR("openImageFile: sws_getContext failed");
-                return false;
-            }
-            imgFrame = av_frame_alloc();
-            imgFrame->format = AV_PIX_FMT_YUV420P;
-            imgFrame->width  = raw->width;
-            imgFrame->height = raw->height;
-            av_frame_get_buffer(imgFrame, 0);
-            sws_scale(sws, raw->data, raw->linesize, 0, raw->height,
-                      imgFrame->data, imgFrame->linesize);
-            sws_freeContext(sws);
-            av_frame_free(&raw);
         }
     }
 
@@ -3048,7 +3090,6 @@ bool Player::openImageFile(const std::string& path) {
     videoHeight_ = imgFrame->height;
 
     if (!initWindowAndRenderer()) {
-        av_frame_free(&imgFrame);
         LOG_ERROR("openImageFile: initWindowAndRenderer failed");
         return false;
     }
@@ -3061,23 +3102,17 @@ bool Player::openImageFile(const std::string& path) {
     queueManager_->videoFrameQueue()->start();
 
     // 图片也走私有帧提交，不暴露内部槽位。
-    Frame prepared;
-    if (!prepared.getAVFrame()) {
-        av_frame_free(&imgFrame);
-        return false;
-    }
-    av_frame_move_ref(prepared.getAVFrame(), imgFrame);
     prepared.setPTS(0.0);
     prepared.setType(FrameType::VIDEO);
     auto* imageQueue = queueManager_->videoFrameQueue();
     const auto result = imageQueue->trySubmit(prepared, imageQueue->outputTag(0));
-    av_frame_free(&imgFrame);
     if (result != FrameQueue::SubmitResult::Committed) {
         LOG_ERROR("openImageFile: frame submission failed");
         return false;
     }
 
     // 设置标志：图片模式无 Worker 线程，EOF 判断需跳过
+    if (fmt) snapshotMediaInfo(fmt.get());
     isImageMode_    = true;
     filePath_       = path;
     hasVideoStream_ = true;

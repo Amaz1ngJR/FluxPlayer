@@ -10,6 +10,7 @@
 
 #include "FluxPlayer/renderer/GLRenderer.h"
 #include "FluxPlayer/utils/Logger.h"
+#include "FluxPlayer/utils/Yuv420Layout.h"
 #include <algorithm>
 #include <glad/glad.h>
 #ifdef _WIN32
@@ -137,10 +138,11 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    // YUV420P 的 U/V 平面宽高各为 Y 平面的一半
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    // YUV420P 的 U/V 平面宽高为亮度宽高的一半，奇数尺寸向上取整。
+    const int cw = chroma420Extent(m_videoWidth), ch = chroma420Extent(m_videoHeight);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, cw, ch, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
     if (!checkGLError("U texture glTexImage2D")) return false;
-    LOG_DEBUG("U texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
+    LOG_DEBUG("U texture initialized: " + std::to_string(cw) + "x" + std::to_string(ch));
 
     // 步骤7：配置 V 纹理（色度V平面，1/4 分辨率）
     glBindTexture(GL_TEXTURE_2D, m_textureV);
@@ -148,9 +150,9 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, cw, ch, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
     if (!checkGLError("V texture glTexImage2D")) return false;
-    LOG_DEBUG("V texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
+    LOG_DEBUG("V texture initialized: " + std::to_string(cw) + "x" + std::to_string(ch));
 
     // 步骤8：配置 CPU 内存 NV12 的 UV 上传纹理（GL_RG8 双通道）
     glGenTextures(1, &m_textureUV);
@@ -159,9 +161,9 @@ bool GLRenderer::init(int videoWidth, int videoHeight) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, cw, ch, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
     if (!checkGLError("NV12 UV texture glTexImage2D")) return false;
-    LOG_DEBUG("NV12 UV texture initialized: " + std::to_string(m_videoWidth / 2) + "x" + std::to_string(m_videoHeight / 2));
+    LOG_DEBUG("NV12 UV texture initialized: " + std::to_string(cw) + "x" + std::to_string(ch));
 
     glBindTexture(GL_TEXTURE_2D, 0);
 
@@ -336,7 +338,7 @@ void GLRenderer::renderFrame(uint8_t* yData, uint8_t* uData, uint8_t* vData,
     // 步骤2：绑定纹理到对应的纹理单元
     // NV12 解交错模式下数据已拆分到 U/V 纹理，与 YUV420P 一致
     // NV12 GL_RG8 模式下 UV 数据在 m_textureUV 中，需要 shader 区分采样方式
-    bool useNV12Shader = isNV12 && !m_nv12Deinterleave;
+    bool useNV12Shader = isNV12 && !m_nv12Deinterleave && uPitch % 2 == 0;
 
     glActiveTexture(GL_TEXTURE0);  // 纹理单元 0：Y 平面（亮度）
     glBindTexture(GL_TEXTURE_2D, m_textureY);
@@ -613,16 +615,17 @@ void GLRenderer::setVideoSize(int width, int height) {
     checkGLError("setVideoSize Y texture glTexImage2D");
 
     glBindTexture(GL_TEXTURE_2D, m_textureU);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    const int cw = chroma420Extent(m_videoWidth), ch = chroma420Extent(m_videoHeight);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, cw, ch, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
     checkGLError("setVideoSize U texture glTexImage2D");
 
     glBindTexture(GL_TEXTURE_2D, m_textureV);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, cw, ch, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
     checkGLError("setVideoSize V texture glTexImage2D");
 
     // NV12 UV 纹理也需要随分辨率变化重建
     glBindTexture(GL_TEXTURE_2D, m_textureUV);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, m_videoWidth / 2, m_videoHeight / 2, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8, cw, ch, 0, GL_RG, GL_UNSIGNED_BYTE, nullptr);
     checkGLError("setVideoSize NV12 UV texture glTexImage2D");
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -690,12 +693,13 @@ void GLRenderer::updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vDat
     // 更新 U 纹理（色度U平面）
     glBindTexture(GL_TEXTURE_2D, m_textureU);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, uPitch);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, uData);
+    const int cw = chroma420Extent(m_videoWidth), ch = chroma420Extent(m_videoHeight);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cw, ch, GL_RED, GL_UNSIGNED_BYTE, uData);
 
     // 更新 V 纹理（色度V平面）
     glBindTexture(GL_TEXTURE_2D, m_textureV);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, vPitch);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2, GL_RED, GL_UNSIGNED_BYTE, vData);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cw, ch, GL_RED, GL_UNSIGNED_BYTE, vData);
 
     // 恢复默认值
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
@@ -713,7 +717,7 @@ void GLRenderer::updateYUVTextures(uint8_t* yData, uint8_t* uData, uint8_t* vDat
  *
  * NV12 格式内存布局：
  * Y 平面：  [Y0][Y1][Y2][Y3]...  每行 width 字节
- * UV 平面： [U0][V0][U1][V1]...  每行 width 字节（U/V 交错存储）
+ * UV 平面： [U0][V0][U1][V1]...  每行 2 × ceil(width / 2) 字节
  *
  * 支持两种上传策略（由 m_nv12Deinterleave 控制）：
  * - GL_RG8 直接上传：把交错 UV 上传到双通道纹理
@@ -731,11 +735,11 @@ void GLRenderer::updateNV12Textures(uint8_t* yData, uint8_t* uvData,
                     GL_RED, GL_UNSIGNED_BYTE, yData);
 
     // ===== UV 平面上传（根据模式选择策略） =====
-    if (m_nv12Deinterleave) {
+    const int chromaWidth = chroma420Extent(m_videoWidth);
+    const int chromaHeight = chroma420Extent(m_videoHeight);
+    if (m_nv12Deinterleave || uvPitch % 2 != 0) {
         // 解交错模式：将 [U0,V0,U1,V1,...] 拆分为独立 U/V 平面
         // 仅用于 GL_RG8 纹理存在兼容性问题的旧驱动
-        const int chromaWidth  = m_videoWidth  / 2;
-        const int chromaHeight = m_videoHeight / 2;
         const size_t chromaSize = static_cast<size_t>(chromaWidth) * chromaHeight;
 
         // 按需分配解交错缓冲区（仅首次或分辨率变化时分配）
@@ -767,7 +771,7 @@ void GLRenderer::updateNV12Textures(uint8_t* yData, uint8_t* uvData,
         // 真正的硬件帧不会进入本函数，而由 HardwareFrameInterop 导入原生 surface。
         glBindTexture(GL_TEXTURE_2D, m_textureUV);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, uvPitch / 2);  // GL_RG: 2 bytes/pixel
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_videoWidth / 2, m_videoHeight / 2,
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, chromaWidth, chromaHeight,
                         GL_RG, GL_UNSIGNED_BYTE, uvData);
     }
 

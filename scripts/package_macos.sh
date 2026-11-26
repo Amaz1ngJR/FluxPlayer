@@ -40,7 +40,7 @@ for required in "$FFMPEG_LIB_DIR/libavformat.dylib" "$YTDLP" \
     "$ROOT/source/UI/skins/cyberpunk-neon/cyberpunk-neon.lua" \
     "$ROOT/source/models/realesrgan/realesr-general-x4v3.onnx" \
     "$ROOT/source/models/realesrgan/LICENSE" "$ROOT/source/models/realesrgan/README.md" \
-    "$ROOT/source/models/whisper/ggml-base-q8_0.bin" "$ROOT/source/models/whisper/README.md" "$ORT_LIBRARY"; do
+    "$ROOT/source/models/whisper/ggml-small-q3_k.bin" "$ROOT/source/models/whisper/README.md" "$ORT_LIBRARY"; do
     if [ ! -f "$required" ]; then
         echo "Missing packaging input: $required" >&2
         exit 1
@@ -91,7 +91,7 @@ for model_resource in realesr-general-x4v3.onnx LICENSE README.md; do
 done
 cp -R "$ROOT/source/onnxruntime" "$APP_BUNDLE/Contents/Resources/"
 mkdir -p "$APP_BUNDLE/Contents/Resources/models/whisper"
-for model_resource in ggml-base-q8_0.bin README.md; do
+for model_resource in ggml-small-q3_k.bin README.md; do
     cp "$ROOT/source/models/whisper/$model_resource" "$APP_BUNDLE/Contents/Resources/models/whisper/"
 done
 

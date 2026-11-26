@@ -2,6 +2,7 @@
 
 #include <string>
 #include <map>
+#include <atomic>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -62,12 +63,8 @@ public:
      */
     bool extractFromContext(AVFormatContext* formatCtx);
 
-    /**
-     * 从文件提取信息
-     * @param filePath 文件路径
-     * @return 成功返回 true
-     */
-    bool extractFromFile(const std::string& filePath);
+    /// 仅供本地视频详情后台补算；使用独立输入，取消或无法估计时返回 0。
+    static int probeLocalGop(const std::string& filePath, std::atomic_bool& cancelled);
 
     // ===== 基本信息 =====
 

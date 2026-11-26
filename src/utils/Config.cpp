@@ -1,5 +1,8 @@
 #include "FluxPlayer/utils/Config.h"
+#include "FluxPlayer/utils/AtomicFile.h"
+#include "FluxPlayer/utils/SettingsParsing.h"
 #include "FluxPlayer/utils/Logger.h"
+#include <sstream>
 #include <fstream>
 #include <sys/stat.h>
 #include <filesystem>
@@ -136,13 +139,74 @@ long Config::getFileModTime() {
     return 0;
 }
 
+namespace {
+using Settings = Config::Settings;
+
+// Unknown keys are ignored for forward compatibility. Invalid known keys never mutate s.
+bool applyIniSetting(Settings& s, const std::string& key, const std::string& value) {
+    using namespace SettingsParsing;
+    static constexpr std::pair<const char*, bool Settings::*> flags[] = {
+        {"logFileEnabled", &Settings::logFileEnabled}, {"uiVisible", &Settings::uiVisible},
+        {"showMediaInfo", &Settings::showMediaInfo}, {"showStats", &Settings::showStats},
+        {"loopPlayback", &Settings::loopPlayback}, {"hwaccel", &Settings::hwaccel},
+        {"screenshotSound", &Settings::screenshotSound}, {"screenshotSoundEnabled", &Settings::screenshotSound},
+        {"screenshotToast", &Settings::screenshotToast}, {"screenshotToastEnabled", &Settings::screenshotToast},
+        {"screenshotFlash", &Settings::screenshotFlash}, {"screenshotFlashEnabled", &Settings::screenshotFlash},
+        {"subtitleEnabled", &Settings::subtitleEnabled}, {"aiSubtitlesEnabled", &Settings::aiSubtitlesEnabled},
+        {"aiSubtitleGpu", &Settings::aiSubtitleGpu}, {"frameInterpolation", &Settings::frameInterpolation},
+        {"proxyEnabled", &Settings::proxyEnabled}, {"skinHotReload", &Settings::skinHotReload}
+    };
+    for (const auto& [name, field] : flags) if (key == name) return parseBool(value, s.*field);
+
+    if (key == "windowWidth") return parseClampedInt(value, kWindowWidthMin, kWindowWidthMax, s.windowWidth);
+    if (key == "windowHeight") return parseClampedInt(value, kWindowHeightMin, kWindowHeightMax, s.windowHeight);
+    if (key == "tcpLogPort") return parseClampedInt(value, kTcpLogPortMin, kTcpLogPortMax, s.tcpLogPort);
+    if (key == "playbackSpeed") return parsePlaybackSpeed(value, s.playbackSpeed);
+    if (key == "volume" || key == "subtitleFontScale") {
+        const bool volume = key == "volume";
+        double parsed;
+        if (!parseClampedDouble(value, volume ? kVolumeMin : kSubtitleFontScaleMin,
+                                volume ? kVolumeMax : kSubtitleFontScaleMax, parsed)) return false;
+        (volume ? s.volume : s.subtitleFontScale) = static_cast<float>(parsed);
+    } else if (key == "logLevel") {
+        if (value != "INFO" && value != "WARN" && value != "DEBUG" && value != "ERROR") return false;
+        s.logLevel = value;
+    } else if (key == "screenshotFormat") {
+        if (value != "png" && value != "jpg" && value != "yuv" && value != "nv12") return false;
+        s.screenshotFormat = value;
+    } else if (key == "aiSubtitleHints") {
+        if (value.size() > 1024 || value.find('\r') != std::string::npos) return false;
+        s.aiSubtitleHints = value;
+    } else if (key == "skinId") {
+        if (value.empty()) return false;
+        s.skinId = value;
+    } else if (key == "aiSubtitleLanguage") s.aiSubtitleLanguage = value.empty() ? "auto" : value;
+    else if (key == "logFilePath") s.logFilePath = value.empty() ? Config::getAppDataDir() + "/fluxplayer.log" : value;
+    else if (key == "screenshotDir") s.screenshotDir = value;
+    else if (key == "recordDir") s.recordDir = value;
+    else if (key == "subtitleFontPath") s.subtitleFontPath = value;
+    else if (key == "aiSubtitleModel") s.aiSubtitleModel = value;
+    else if (key == "httpProxy") s.httpProxy = value;
+    else if (key == "socksProxy") s.socksProxy = value;
+    return true;
+}
+} // namespace
+
 // 从配置文件加载设置（不存在则自动生成默认配置）
 bool Config::load() {
     bool fileExists = false;
+    Settings loaded;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        loaded = settings_; // 启动时为默认值；热重载时保留未能解析的字段。
         std::ifstream file(configPath_);
-        if (file.is_open()) {
+        if (!file.is_open()) {
+            std::error_code ec;
+            if (std::filesystem::exists(configPath_, ec) || ec) {
+                LOG_ERROR("Cannot read existing config: " + configPath_);
+                return false; // 不用默认配置替换打不开的旧文件。
+            }
+        } else {
             fileExists = true;
             std::string line;
             while (std::getline(file, line)) {
@@ -158,61 +222,13 @@ bool Config::load() {
                 key.erase(0, key.find_first_not_of(" \t"));
                 key.erase(key.find_last_not_of(" \t") + 1);
                 value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
+                value.erase(value.find_last_not_of(" \t\r") + 1);
 
-                if (key == "volume") settings_.volume = std::stof(value);
-                else if (key == "logLevel") settings_.logLevel = value;
-                else if (key == "tcpLogPort") settings_.tcpLogPort = std::stoi(value);
-                else if (key == "logFileEnabled") settings_.logFileEnabled = (value == "true" || value == "1");
-                else if (key == "logFilePath") settings_.logFilePath = value.empty() ? getAppDataDir() + "/fluxplayer.log" : value;
-                else if (key == "windowWidth") settings_.windowWidth = std::stoi(value);
-                else if (key == "windowHeight") settings_.windowHeight = std::stoi(value);
-                else if (key == "uiVisible") settings_.uiVisible = (value == "true" || value == "1");
-                else if (key == "showMediaInfo") settings_.showMediaInfo = (value == "true" || value == "1");
-                else if (key == "showStats") settings_.showStats = (value == "true" || value == "1");
-                else if (key == "loopPlayback") settings_.loopPlayback = (value == "true" || value == "1");
-                else if (key == "screenshotDir") settings_.screenshotDir = value;
-                else if (key == "screenshotFormat") settings_.screenshotFormat = value;
-                else if (key == "screenshotSound" || key == "screenshotSoundEnabled")
-                    settings_.screenshotSound = (value == "true" || value == "1");
-                else if (key == "screenshotToast" || key == "screenshotToastEnabled")
-                    settings_.screenshotToast = (value == "true" || value == "1");
-                else if (key == "screenshotFlash" || key == "screenshotFlashEnabled")
-                    settings_.screenshotFlash = (value == "true" || value == "1");
-                else if (key == "recordDir") settings_.recordDir = value;
-                else if (key == "hwaccel") settings_.hwaccel = (value == "true" || value == "1");
-                else if (key == "subtitleEnabled") settings_.subtitleEnabled = (value == "true" || value == "1");
-                else if (key == "subtitleFontScale") {
-                    // 限制字体缩放范围，避免异常值导致字幕过大/过小
-                    try {
-                        float scale = std::stof(value);
-                        if (scale < 0.5f) scale = 0.5f;
-                        if (scale > 4.0f) scale = 4.0f;
-                        settings_.subtitleFontScale = scale;
-                    } catch (...) {
-                        // 解析失败保留默认值
-                    }
-                }
-                else if (key == "subtitleFontPath") settings_.subtitleFontPath = value;
-                else if (key == "aiSubtitlesEnabled") settings_.aiSubtitlesEnabled = (value == "true" || value == "1");
-                else if (key == "aiSubtitleModel") settings_.aiSubtitleModel = value;
-                else if (key == "aiSubtitleLanguage") settings_.aiSubtitleLanguage = value.empty() ? "auto" : value;
-                else if (key == "aiSubtitleGpu") settings_.aiSubtitleGpu = (value == "true" || value == "1");
-                else if (key == "aiSubtitleHints" && value.size() <= 1024) settings_.aiSubtitleHints = value;
-                else if (key == "playbackSpeed") {
-                    try {
-                        double speed = std::stod(value);
-                        if (speed >= 0.5 && speed <= 16.0) settings_.playbackSpeed = speed;
-                    } catch (...) {}
-                }
-                else if (key == "frameInterpolation") settings_.frameInterpolation = (value == "true" || value == "1");
-                else if (key == "proxyEnabled") settings_.proxyEnabled = (value == "true" || value == "1");
-                else if (key == "httpProxy") settings_.httpProxy = value;
-                else if (key == "socksProxy") settings_.socksProxy = value;
-                else if (key == "skinId") { if (!value.empty()) settings_.skinId = value; }
-                else if (key == "skinHotReload") settings_.skinHotReload = (value == "true" || value == "1");
+                if (!applyIniSetting(loaded, key, value)) LOG_WARN("Invalid config value, keeping previous setting: " + key);
             }
 
+            if (file.bad()) { LOG_ERROR("Failed to read config: " + configPath_); return false; }
+            settings_ = loaded;
             lastModTime_ = getFileModTime();
             LOG_INFO("Config loaded from: " + configPath_);
         }
@@ -224,31 +240,26 @@ bool Config::load() {
 
     // 每次加载后同步日志级别（启动时 + 热重载时均生效）
     LogLevel level = LogLevel::LOG_INFO;
-    if (settings_.logLevel == "DEBUG") level = LogLevel::LOG_DEBUG;
-    else if (settings_.logLevel == "WARN")  level = LogLevel::LOG_WARN;
-    else if (settings_.logLevel == "ERROR") level = LogLevel::LOG_ERROR;
+    if (loaded.logLevel == "DEBUG") level = LogLevel::LOG_DEBUG;
+    else if (loaded.logLevel == "WARN")  level = LogLevel::LOG_WARN;
+    else if (loaded.logLevel == "ERROR") level = LogLevel::LOG_ERROR;
     Logger::getInstance().setLogLevel(level);
 
     // 同步文件日志开关（启动时 + 热重载时均生效）
-    if (settings_.logFileEnabled) {
-        Logger::getInstance().enableFileOutput(settings_.logFilePath);
+    if (loaded.logFileEnabled) {
+        Logger::getInstance().enableFileOutput(loaded.logFilePath);
     } else {
         Logger::getInstance().disableFileOutput();
     }
 
-    // 无论是新建还是旧文件缺少新配置项，都回写一次完整配置
-    save();
-    return true;
+    // 读取现有配置不触碰磁盘；保留注释及尚未识别的键。
+    return fileExists || save();
 }
 
 // 保存设置到配置文件
 bool Config::save() {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::ofstream file(configPath_);
-    if (!file.is_open()) {
-        LOG_ERROR("Failed to save config: " + configPath_);
-        return false;
-    }
+    std::ostringstream file;
 
     file << "# FluxPlayer Configuration\n\n";
     file << "[Audio]\n";
@@ -329,6 +340,11 @@ bool Config::save() {
     file << "# 默认：socks5://127.0.0.1:7890\n";
     file << "socksProxy=" << settings_.socksProxy << "\n";
 
+    std::string error;
+    if (!file.good() || !writeFileAtomically(std::filesystem::path(configPath_), file.str(), &error)) {
+        LOG_ERROR("Failed to save config: " + configPath_ + ": " + error);
+        return false;
+    }
     LOG_INFO("Config saved to: " + configPath_);
     // 必须刷新 mtime 哨兵：save() 之后文件 mtime 一定比 lastModTime_ 新，若不更新，
     // 下一帧 checkAndReload() 会把刚写下去的值当成外部改动重新加载一遍。

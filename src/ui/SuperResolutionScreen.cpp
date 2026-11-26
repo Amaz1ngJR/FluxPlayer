@@ -1,3 +1,4 @@
+#include "FluxPlayer/utils/StreamUtils.h"
 #include "FluxPlayer/ui/SuperResolutionScreen.h"
 #include "FluxPlayer/ui/FluxUI/ImGuiBackend.h"
 #include "FluxPlayer/ui/SkinManager.h"
@@ -75,8 +76,7 @@ SourceInfo probeSource(const std::string& path, const std::shared_ptr<std::atomi
     int audioCount = 0;
     for (unsigned i = 0; i < raw->nb_streams; ++i) {
         auto* stream = raw->streams[i];
-        if (!video && stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-            !(stream->disposition & AV_DISPOSITION_ATTACHED_PIC)) video = stream;
+        if (!video && isPlayableVideoStream(stream)) video = stream;
         if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ++audioCount;
     }
     if (!video) { info.error = "Select a local video; audio-only files are not supported"; return info; }

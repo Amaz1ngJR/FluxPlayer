@@ -162,7 +162,8 @@ public:
     /** @brief 主线程读取最近请求/完成快照，pending=false 时 success/error 才是结果。 */
     const QualitySwitchStatus& getQualitySwitchStatus() const { return qualitySwitch_; }
     /** @brief 成功安装时、Worker 启动前获取的只读媒体信息；仅主线程访问。 */
-    const MediaInfo* getQualityMediaInfo() const { return qualityMediaInfo_.get(); }
+    const MediaInfo* getMediaInfo() const { return mediaInfo_.get(); }
+    bool canProbeLocalVideo() const { return isLocalFile_ && !isImageMode_ && !audioOnly_ && !isLiveStream_; }
 
     /**
      * 开始播放
@@ -460,7 +461,8 @@ private:
     bool pausedForQualityInstall_ = false; ///< 安装事务持有期间，Pause/Resume 只更新意图，不直接操作设备。
     bool qualityInstallWantsPlaying_ = false; ///< 控制线程拥有的最新安装恢复意图。
     void resetQualityPlayback(const ExtractedStream& info, double seekTime); ///< Worker 启动前重置会话状态。
-    std::unique_ptr<MediaInfo> qualityMediaInfo_; ///< 避免 UI 与 demux 并发解析输入上下文。
+    void snapshotMediaInfo(AVFormatContext* fmt);
+    std::unique_ptr<MediaInfo> mediaInfo_; ///< 避免 UI 与 demux 并发解析输入上下文。
     void startVideoRecordingInternal();
     void stopVideoRecordingInternal();
     void startAudioRecordingInternal();

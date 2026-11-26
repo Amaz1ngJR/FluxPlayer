@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # 声明项目名称、版本，启用 C 和 C++ 两种语言
-project(FluxPlayer VERSION 0.9.7 LANGUAGES C CXX)
+project(FluxPlayer VERSION 0.9.8 LANGUAGES C CXX)
 
 # macOS 上需要 Objective-C++ 才能编译 WebLogin_mac.mm（WKWebView 桥接层）
 if(APPLE)
@@ -24,10 +24,6 @@ if(FLUX_WHISPER_SOURCE_DIR)
         set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
         # Static linkage keeps packaged players independent of the source checkout.
         set(BUILD_SHARED_LIBS OFF)
-        set(GGML_BACKEND_DL OFF)
-        set(WHISPER_BUILD_TESTS OFF)
-        set(WHISPER_BUILD_EXAMPLES OFF)
-        set(WHISPER_BUILD_SERVER OFF)
         add_subdirectory("${FLUX_WHISPER_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/whisper" EXCLUDE_FROM_ALL)
     endfunction()
     flux_add_whisper()
@@ -334,6 +330,7 @@ elseif(WIN32)
         d3d11       # D3D11VA 硬件解码
         dxgi        # DXGI 设备枚举
         shell32     # SHGetFolderPath（应用数据目录）
+        advapi32    # 私有临时文件的 Windows 安全描述符
         uuid        # IID_IUnknown 等 COM IID（与 xmake Windows 链接项一致）
     )
 

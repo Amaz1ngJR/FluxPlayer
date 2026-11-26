@@ -3,6 +3,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <utility>
 
 namespace FluxPlayer {
 
@@ -56,8 +57,19 @@ public:
 
     static Config& getInstance();
 
-    const Settings& get() const { return settings_; }
-    Settings& getMutable() { return settings_; }
+    // 多字段决策使用一致快照；高频单字段读取不复制整份配置。
+    Settings get() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return settings_;
+    }
+    template<class T> T read(T Settings::*field) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return settings_.*field;
+    }
+    template<class T, class U> void set(T Settings::*field, U&& value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settings_.*field = std::forward<U>(value);
+    }
 
     bool load();
     bool save();

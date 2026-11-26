@@ -7,6 +7,7 @@
 
 #include "FluxPlayer/decoder/Demuxer.h"
 #include "FluxPlayer/utils/FrameRateUtils.h"
+#include "FluxPlayer/utils/StreamUtils.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/PathUtils.h"
 #include "FluxPlayer/utils/Config.h"
@@ -395,7 +396,8 @@ bool Demuxer::findStreams() {
                   " (VIDEO=" + std::to_string(AVMEDIA_TYPE_VIDEO) +
                   ", AUDIO=" + std::to_string(AVMEDIA_TYPE_AUDIO) + ")");
 
-        if (codecType == AVMEDIA_TYPE_VIDEO && m_videoStreamIndex == -1) {
+        // 封面由 Player::loadCoverImage 单独读取，不是可播放的视频轨。
+        if (m_videoStreamIndex == -1 && isPlayableVideoStream(stream)) {
             m_videoStreamIndex = i;
             LOG_INFO("Found video stream at index " + std::to_string(i) +
                     " - Codec: " + std::string(avcodec_get_name(stream->codecpar->codec_id)));

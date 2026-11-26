@@ -1,4 +1,5 @@
 #include "FluxPlayer/utils/VideoSuperResolutionExporter.h"
+#include "FluxPlayer/utils/StreamUtils.h"
 #include "FluxPlayer/utils/Logger.h"
 #include "FluxPlayer/utils/Config.h"
 #include "RealESRGAN.h"
@@ -188,7 +189,7 @@ struct Pipeline {
         check(rc,"Open input"); check(avformat_find_stream_info(input,nullptr),"Probe input");
         for (unsigned i=0;i<input->nb_streams;++i) {
             auto* s=input->streams[i];
-            if (!video && s->codecpar->codec_type==AVMEDIA_TYPE_VIDEO && !(s->disposition&AV_DISPOSITION_ATTACHED_PIC)) video=s;
+            if (!video && isPlayableVideoStream(s)) video=s;
             if (s->codecpar->codec_type==AVMEDIA_TYPE_AUDIO && (!audio || (s->disposition&AV_DISPOSITION_DEFAULT))) audio=s;
         }
         if (!video) throw std::runtime_error("No main video stream");

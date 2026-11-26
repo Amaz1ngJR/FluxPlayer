@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 namespace FluxPlayer {
 
@@ -180,6 +181,7 @@ bool Controller::init() {
 }
 
 void Controller::destroy() {
+    cancelGopProbe();
     if (!initialized_) {
         return;
     }
@@ -324,15 +326,7 @@ void Controller::render() {
         qualityStatus.requestId != completedQualityRequest_;
     if (!qualityStatus.pending && qualityStatus.requestId != completedQualityRequest_) {
         if (qualityStatus.success) {
-            const auto* media = player_.getQualityMediaInfo();
-            if (media) {
-                const auto video = media->getVideoStreamInfo(0);
-                const auto audio = media->getAudioStreamInfo(0);
-                setMediaInfo(player_.getCurrentSourceUrl(), video.width, video.height,
-                    player_.getDuration(), video.fps, video.codecName, video.profile,
-                    audio.codecName, audio.profile, audio.sampleRate, audio.channels,
-                    audio.channelLayout, video.gopSize);
-            }
+            setMediaInfo(player_.getCurrentSourceUrl());
         } else if (!qualityStatus.error.empty()) {
             if (auto* toasts = player_.getToastManager()) {
                 ToastMessage message;
@@ -392,7 +386,10 @@ void Controller::render() {
     //
     // settingsOnly_ 下跳过 player surface：那条路径用的是空壳 Controller（无媒体），
     // player 数据全是默认值，画出来就是一副停在 0 的播放器底栏。
-    if (!settingsOnly_) renderLuaPlayer();
+    if (!settingsOnly_) {
+        if (showMediaInfo_) updateGopProbe();
+        renderLuaPlayer();
+    }
     if (showSettingsMenu_) renderSettings();
     renderToasts();
 
@@ -432,7 +429,7 @@ void Controller::applyPendingSkinOps() {
             break;
         case PendingSkinOp::RestoreDefault:
             if (SkinManager::instance().selectSkin("cyberpunk-neon")) {
-                Config::getInstance().getMutable().skinId = "cyberpunk-neon";
+                Config::getInstance().set(&Config::Settings::skinId, "cyberpunk-neon");
                 Config::getInstance().save();
                 LOG_INFO("Settings: restored default skin");
             }
@@ -499,7 +496,7 @@ Controller::provideLuaData(const std::string& name) const {
         return {{{"text", subtitleEnabled_ ? parts.first : ""},
                  {"pendingText", subtitleEnabled_ ? parts.second : ""},
                  {"correctionText", subtitleEnabled_ ? correction : ""},
-                 {"fontScale", std::to_string(Config::getInstance().get().subtitleFontScale)},
+                 {"fontScale", std::to_string(Config::getInstance().read(&Config::Settings::subtitleFontScale))},
                  {"aiStatus", player_.getRealtimeSubtitleStatus()},
                  {"controlsVisible", visible_ ? "true" : "false"}}};
     }
@@ -612,7 +609,7 @@ Controller::provideLuaData(const std::string& name) const {
                             {"error", candidate.error},
                             {"label", label},
                             {"valid", candidate.valid ? "true" : "false"},
-                            {"selected", candidate.id == Config::getInstance().get().skinId ? "true" : "false"}});
+                            {"selected", candidate.id == Config::getInstance().read(&Config::Settings::skinId) ? "true" : "false"}});
         }
         return rows;
     }
@@ -838,26 +835,65 @@ void Controller::handleLuaAction(
     }
 }
 
-void Controller::setMediaInfo(const std::string& filename,
-                               int width, int height, double duration, double videoFps,
-                               const std::string& videoCodec, const std::string& videoProfile,
-                               const std::string& audioCodec, const std::string& audioProfile,
-                               int audioSampleRate, int audioChannels, const std::string& channelLayout,
-                               int gopSize) {
+void Controller::cancelGopProbe() {
+    if (cancelGop_) cancelGop_->store(true);
+    cancelGop_.reset();
+    gopProbe_ = {}; // packaged_task 的 future 销毁时不等待 worker。
+}
+
+void Controller::updateGopProbe() {
+    if (videoGopSize_ > 0 || videoFps_ <= 0 || !player_.canProbeLocalVideo()) return;
+    try {
+        if (!gopProbeRequested_) {
+            // 即使旧输入卡在系统 I/O，快速换片也不会累积后台线程。
+            static std::atomic_bool probeRunning{false};
+            if (probeRunning.exchange(true)) return;
+            try {
+                auto cancelled = std::make_shared<std::atomic_bool>(false);
+                std::packaged_task<int()> task([path = filename_, cancelled] {
+                    struct ReleaseSlot {
+                        ~ReleaseSlot() { probeRunning.store(false); }
+                    } releaseSlot;
+                    return MediaInfo::probeLocalGop(path, *cancelled);
+                });
+                auto result = task.get_future();
+                std::thread(std::move(task)).detach();
+                cancelGop_ = std::move(cancelled);
+                gopProbe_ = std::move(result);
+                gopProbeRequested_ = true;
+            } catch (...) {
+                probeRunning.store(false);
+                gopProbeRequested_ = true;
+                throw;
+            }
+        }
+        if (gopProbe_.valid() && gopProbe_.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            videoGopSize_ = gopProbe_.get();
+    } catch (const std::exception& err) {
+        LOG_WARN(std::string("Media info: GOP probe unavailable: ") + err.what());
+    }
+}
+
+void Controller::setMediaInfo(const std::string& filename) {
+    cancelGopProbe();
+    gopProbeRequested_ = false;
+    const MediaInfo* media = player_.getMediaInfo();
+    const auto video = media ? media->getVideoStreamInfo() : StreamInfo{};
+    const auto audio = media ? media->getAudioStreamInfo() : StreamInfo{};
     pendingLuaSeekProgress_ = -1.0;
     filename_ = filename;
-    videoWidth_ = width;
-    videoHeight_ = height;
-    duration_ = duration;
-    videoFps_ = videoFps;
-    videoGopSize_ = gopSize;
-    videoCodec_ = videoCodec;
-    videoProfile_ = videoProfile;
-    audioCodec_ = audioCodec;
-    audioProfile_ = audioProfile;
-    audioSampleRate_ = audioSampleRate;
-    audioChannels_ = audioChannels;
-    channelLayout_ = channelLayout;
+    videoWidth_ = video.width;
+    videoHeight_ = video.height;
+    duration_ = player_.getDuration();
+    videoFps_ = video.fps;
+    videoGopSize_ = video.gopSize;
+    videoCodec_ = video.codecName;
+    videoProfile_ = video.profile;
+    audioCodec_ = audio.codecName;
+    audioProfile_ = audio.profile;
+    audioSampleRate_ = audio.sampleRate;
+    audioChannels_ = audio.channels;
+    channelLayout_ = audio.channelLayout;
     LOG_INFO("Controller: Media info set - " + filename);
 }
 
@@ -914,7 +950,7 @@ std::string Controller::formatTime(double seconds) {
 
 void Controller::setSubtitleEnabled(bool enabled) {
     subtitleEnabled_ = enabled;
-    Config::getInstance().getMutable().subtitleEnabled = enabled;
+    Config::getInstance().set(&Config::Settings::subtitleEnabled, enabled);
     Config::getInstance().save();
 }
 
